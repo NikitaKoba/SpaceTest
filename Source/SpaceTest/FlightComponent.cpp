@@ -16,7 +16,7 @@ static float Torque_SI_to_UE(float kgm2_alpha){ return kgm2_alpha * 10000.f; } /
 UFlightComponent::UFlightComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.TickGroup    = TG_PrePhysics;
+	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 	bAutoActivate = true;
 }
 
@@ -247,10 +247,6 @@ void UFlightComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, 
 	QueueSubstep();
 
 	// дешёвые экранные строки
-	if (Body)
-	{
-		PrintScreenTelemetry(DeltaTime, GetOwner()->GetActorTransform(), F_loc, R_loc, U_loc);
-	}
 }
 
 void UFlightComponent::QueueSubstep()
