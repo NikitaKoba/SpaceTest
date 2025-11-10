@@ -19,10 +19,10 @@ AShipPawn::AShipPawn()
 	// Актор должен реплицироваться (компонент тоже реплицируемый)
 	bReplicates = true;
 	SetReplicateMovement(false);
-	bAlwaysRelevant = true;
+	bAlwaysRelevant = false;
 	bOnlyRelevantToOwner = false;
-	NetUpdateFrequency    = 120.f;
-	MinNetUpdateFrequency = 60.f;
+	SetNetUpdateFrequency(120.f);
+	SetMinNetUpdateFrequency(60.f);
 	// Root mesh (physics)
 	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
 	SetRootComponent(ShipMesh);
