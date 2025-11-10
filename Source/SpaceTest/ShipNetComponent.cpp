@@ -4,9 +4,12 @@
 #include "FlightComponent.h"
 
 #include "Components/StaticMeshComponent.h"
-#include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "Engine/World.h"
+#include "Misc/ScopeExit.h"
 #include "Net/UnrealNetwork.h"
+
+DEFINE_LOG_CATEGORY(LogShipNet);
 
 UShipNetComponent::UShipNetComponent()
 {
@@ -28,8 +31,21 @@ void UShipNetComponent::BeginPlay()
 		Flight   = Ship->Flight;
 	}
 
-	// стартовая инициализация симуляции физики по роли
+	SetupTickOrder();
 	UpdatePhysicsSimState();
+}
+
+void UShipNetComponent::SetupTickOrder()
+{
+	// важно: сначала физика/Flight, потом — мы
+	if (Flight)
+	{
+		AddTickPrerequisiteComponent(Flight);
+	}
+	if (ShipMesh)
+	{
+		AddTickPrerequisiteComponent(ShipMesh);
+	}
 }
 
 void UShipNetComponent::SetLocalAxes(float F, float R, float U, float Roll)
@@ -48,11 +64,10 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	if (!OwPawn || !ShipMesh) return;
 
-	// 0) поддерживаем состояние симуляции по роли
 	UpdatePhysicsSimState();
 
-	// 1) владелец → сервер: RPC инпут
-	if (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole()==ROLE_AutonomousProxy)
+	// === 1) Владелец → сервер: RPC с инпутом + локальное кэширование ===
+	if (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole() == ROLE_AutonomousProxy)
 	{
 		FControlState St;
 		St.Seq       = ++LocalInputSeq;
@@ -66,30 +81,42 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 		Server_SendInput(St);
 
+		// Запомним для ресима (ACK спилит хвост)
+		PendingInputs.Add(St);
+
 		MouseX_Accum = 0.f;
 		MouseY_Accum = 0.f;
+
+		// [PREDICT] тут идеальный момент выполнить локальный детерминированный SimStep
+		// если UFlightComponent предоставит чистую функцию предсказания (без побочек).
+		// Пока оставляем гибридную модель (физика уже к этому тик-кадру применена Flight’ом).
 	}
 
-	// 2) наблюдатели: интерполяция
-	if (OwPawn->GetLocalRole()==ROLE_SimulatedProxy)
+	// === 2) Наблюдатели: интерполяция ===
+	if (OwPawn->GetLocalRole() == ROLE_SimulatedProxy)
 	{
 		DriveSimulatedProxy();
 	}
 
-	// 3) владелец: непрерывная мягкая реконсиляция
-	if (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole()==ROLE_AutonomousProxy)
+	// === 3) Владелец: мягкая реконсиляция (поверх локальной физики) ===
+	if (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole() == ROLE_AutonomousProxy)
 	{
 		OwnerReconcile_Tick(DeltaTime);
 	}
 
-	// 4) сервер: обновить авторитативный снап (уйдёт по репликации)
+	// === 4) Сервер: снимаем авторитативный снап ===
 	if (OwPawn->HasAuthority())
 	{
 		const FTransform X = ShipMesh->GetComponentTransform();
-		ServerState.Loc = X.GetLocation();
-		ServerState.Rot = X.GetRotation();
-		ServerState.Vel = ShipMesh->GetComponentVelocity();
-		ServerState.ServerTime = GetWorld()->GetTimeSeconds();
+		const FVector    Wrad = ShipMesh->GetPhysicsAngularVelocityInRadians();
+
+		ServerSnap.Loc       = X.GetLocation();
+		FRotator R = X.Rotator();
+		ServerSnap.RotCS.FromRotator(R);
+		ServerSnap.Vel       = ShipMesh->GetComponentVelocity();
+		ServerSnap.AngVelDeg = Wrad * (180.f / PI); // храню в deg/s для читаемой сетки
+		ServerSnap.ServerTime= GetWorld()->GetTimeSeconds();
+		// LastAckSeq сервер обновляет в Server_SendInput()
 	}
 }
 
@@ -100,19 +127,22 @@ void UShipNetComponent::UpdatePhysicsSimState()
 	const bool bShouldSim =
 		OwPawn->HasAuthority() || (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole()==ROLE_AutonomousProxy);
 
-	if (ShipMesh->IsSimulatingPhysics()!=bShouldSim)
+	if (ShipMesh->IsSimulatingPhysics() != bShouldSim)
 	{
 		ShipMesh->SetSimulatePhysics(bShouldSim);
 	}
 	Flight->SetComponentTickEnabled(bShouldSim);
 }
 
+// ===== RPC =====
 void UShipNetComponent::Server_SendInput_Implementation(const FControlState& State)
 {
-	// отметим, что обработали пакет
-	ServerState.LastAckSeq = State.Seq;
+	// ACK — сервер сообщает, что обработал этот seq
+	ServerSnap.LastAckSeq = State.Seq;
 
-	// Прокатываем те же публичные вызовы, что и у клиента
+	// Санити/клампы здесь (защита от «сверх»-инпутов) — опустил ради краткости
+
+	// Прокатываем public API, как было
 	if (Flight)
 	{
 		Flight->SetThrustForward(State.ThrustF);
@@ -124,13 +154,14 @@ void UShipNetComponent::Server_SendInput_Implementation(const FControlState& Sta
 	}
 }
 
-void UShipNetComponent::OnRep_ServerState()
+// ===== OnRep (универсально: и owner, и сим-прокси) =====
+void UShipNetComponent::OnRep_ServerSnap()
 {
 	const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
 
-	// EMA времени сервера → клиентское Now
+	// --- Подстройка оффсета времени (EMA) + выборка для адаптивного delay ---
 	{
-		const double EstOffset = Now - (double)ServerState.ServerTime;
+		const double EstOffset = Now - (double)ServerSnap.ServerTime;
 		if (!bHaveTimeSync)
 		{
 			ServerTimeToClientTime = EstOffset;
@@ -138,32 +169,109 @@ void UShipNetComponent::OnRep_ServerState()
 		}
 		else
 		{
+			// EMA для оффсета
 			ServerTimeToClientTime = FMath::Lerp(ServerTimeToClientTime, EstOffset, 0.10);
 		}
+		// выборка «остатка» для джиттера (чем ближе к нулю — тем точнее оффсет)
+		const double Residual = EstOffset - ServerTimeToClientTime;
+		AdaptiveInterpDelay_OnSample(Residual);
 	}
 
-	if (OwPawn && OwPawn->GetLocalRole()==ROLE_SimulatedProxy)
+	// --- Сим-прокси: интерп-буфер (клиентское время в снапе) ---
+	if (OwPawn && OwPawn->GetLocalRole() == ROLE_SimulatedProxy)
 	{
-		// Снап в интерп-буфер (в клиентском времени)
 		FInterpNode N;
-		N.Time = (double)ServerState.ServerTime + ServerTimeToClientTime;
-		N.Loc  = ServerState.Loc;
-		N.Rot  = ServerState.Rot;
-		N.Vel  = ServerState.Vel;
+		N.Time   = (double)ServerSnap.ServerTime + ServerTimeToClientTime;
+		N.Loc    = ServerSnap.Loc;
+		N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
+		N.Vel    = ServerSnap.Vel;
+		N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f); // обратно в рад/с
 		NetBuffer.Add(N);
 
-		// Подрезать старые
+		// Подрезать хвост старых
 		const double KeepFrom = Now - 1.0;
 		int32 FirstValid = 0;
 		while (FirstValid < NetBuffer.Num() && NetBuffer[FirstValid].Time < KeepFrom) ++FirstValid;
-		if (FirstValid>0) NetBuffer.RemoveAt(0, FirstValid, EAllowShrinking::No);
+		if (FirstValid > 0) NetBuffer.RemoveAt(0, FirstValid, EAllowShrinking::No);
+
+		// ЛОГ
+		if (UE_LOG_ACTIVE(LogShipNet, VeryVerbose))
+		{
+			UE_LOG(LogShipNet, VeryVerbose, TEXT("[SIMPROXY] NetBuffer=%d delay=%.3f"),
+				NetBuffer.Num(), NetInterpDelay);
+		}
 	}
-	else if (OwPawn && OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole()==ROLE_AutonomousProxy)
+	// --- Владелец: ACK + целевой снап для мягкой реконсиляции/ресима ---
+	else if (OwPawn && OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole() == ROLE_AutonomousProxy)
 	{
-		// целевой снап для непрерывной коррекции
-		OwnerReconTarget = ServerState;
+		OwnerReconTarget = ServerSnap;
 		bHaveOwnerRecon  = true;
+
+		// Срезаем подтверждённые инпуты
+		int32 CutIdx = INDEX_NONE;
+		for (int32 i = PendingInputs.Num()-1; i >= 0; --i)
+		{
+			if (PendingInputs[i].Seq <= ServerSnap.LastAckSeq)
+			{
+				CutIdx = i; break;
+			}
+		}
+		if (CutIdx >= 0)
+		{
+			PendingInputs.RemoveAt(0, CutIdx+1, EAllowShrinking::No);
+		}
+
+		// [PREDICT] Здесь можно сделать настоящий rollback:
+		// 1) Восстановить снап S=OwnerReconTarget (Loc/Rot/Vel/AngVel)
+		// 2) Прогнать оставшиеся PendingInputs детерминированным SimStep(S, dt, input)
+		// 3) Установить S обратно на ShipMesh (через SetPhysics* / или мягко через скорости)
+		// Пока оставляем мягкую реконсиляцию в Tick (ниже).
 	}
+}
+
+// === Адаптивная настройка интерп-задержки по джиттеру (медиана + 0.5 * IQR90) ===
+void UShipNetComponent::AdaptiveInterpDelay_OnSample(double OffsetSample)
+{
+	DelaySamples[DelaySamplesHead] = OffsetSample;
+	DelaySamplesHead = (DelaySamplesHead + 1) % DelaySamples.Num();
+	DelaySamplesCount = FMath::Min(DelaySamplesCount + 1, DelaySamples.Num());
+
+	if (DelaySamplesCount < 16) return; // прогрев
+
+	// копия окна и сорт
+	TArray<double> W;
+	W.Reserve(DelaySamplesCount);
+	for (int32 i=0; i<DelaySamplesCount; ++i)
+	{
+		W.Add(DelaySamples[i]);
+	}
+	W.Sort();
+
+	const auto Pct = [&](double p)->double {
+		if (W.Num()==0) return 0.0;
+		const double idx = FMath::Clamp(p * (W.Num()-1), 0.0, double(W.Num()-1));
+		const int32 i0 = int32(FMath::FloorToDouble(idx));
+		const int32 i1 = FMath::Min(i0+1, W.Num()-1);
+		const double t = idx - i0;
+		return FMath::Lerp(W[i0], W[i1], t);
+	};
+
+	const double Med  = Pct(0.50);
+	const double P90  = Pct(0.90);
+	const double NewD = FMath::Clamp(Med + 0.5*(P90 - Med), (double)NetInterpDelayMin, (double)NetInterpDelayMax);
+
+	// сгладим
+	NetInterpDelay = FMath::Lerp(NetInterpDelay, (float)NewD, 0.15f);
+}
+
+// === Сим-прокси: интерполяция Hermite + интеграл ориентации по AngVel ===
+FQuat UShipNetComponent::IntegrateQuat(const FQuat& Q0, const FVector& Wrad, float Dt)
+{
+	const float Angle = Wrad.Size() * Dt;
+	if (Angle < 1e-6f) return Q0;
+	const FVector Axis = Wrad.GetSafeNormal();
+	const FQuat dQ(Axis, Angle);
+	return (dQ * Q0).GetNormalized();
 }
 
 void UShipNetComponent::DriveSimulatedProxy()
@@ -173,6 +281,7 @@ void UShipNetComponent::DriveSimulatedProxy()
 	const double Now = GetWorld()->GetTimeSeconds();
 	const double Tq  = Now - (double)NetInterpDelay;
 
+	// граничные случаи
 	if (NetBuffer.Num()==1 || Tq <= NetBuffer[0].Time)
 	{
 		const auto& N = NetBuffer[0];
@@ -181,11 +290,16 @@ void UShipNetComponent::DriveSimulatedProxy()
 	}
 	if (Tq >= NetBuffer.Last().Time)
 	{
-		const auto& N = NetBuffer.Last();
-		Ship->SetActorLocationAndRotation(N.Loc, N.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+		// короткая экстраполяция ≤ ~100 мс на основе скоростей
+		const auto& L = NetBuffer.Last();
+		const double Ahead = FMath::Min(0.1, Tq - L.Time);
+		const FVector P = L.Loc + L.Vel * (float)Ahead;
+		const FQuat   Q = IntegrateQuat(L.Rot, L.AngVel, (float)Ahead);
+		Ship->SetActorLocationAndRotation(P, Q.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
 		return;
 	}
 
+	// бинарный поиск
 	int32 L=0, R=NetBuffer.Num()-1;
 	while (L+1<R)
 	{
@@ -194,10 +308,11 @@ void UShipNetComponent::DriveSimulatedProxy()
 	}
 	const auto& A = NetBuffer[L];
 	const auto& B = NetBuffer[L+1];
+
 	const double dt = FMath::Max(1e-6, B.Time - A.Time);
 	const float  s  = (float)FMath::Clamp((Tq - A.Time)/dt, 0.0, 1.0);
 
-	// кубический Hermite по Loc/Vel, slerp по Rot
+	// Hermite по Loc/Vel
 	const float s2=s*s, s3=s2*s;
 	const float h00 =  2*s3 - 3*s2 + 1;
 	const float h10 =    s3 - 2*s2 + s;
@@ -206,11 +321,19 @@ void UShipNetComponent::DriveSimulatedProxy()
 
 	const FVector P =  h00*A.Loc + h10*(A.Vel*(float)dt)
 	                 + h01*B.Loc + h11*(B.Vel*(float)dt);
-	const FQuat   Q = FQuat::Slerp(A.Rot, B.Rot, s);
 
-	Ship->SetActorLocationAndRotation(P, Q.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+	// Ориентация: SLERP + корректный интеграл угл. скорости между узлами
+	// (квози-скоррекция: эквивалент добавлению "twist" от AngVel)
+	FQuat QA = A.Rot;
+	FQuat QB = B.Rot;
+	const FQuat QAe = IntegrateQuat(QA, A.AngVel, (float)(s*(float)dt));       // до точки внутри интервала
+	const FQuat QBe = IntegrateQuat(QB, -B.AngVel, (float)(((1.f-s))* (float)dt)); // обратная "подтяжка"
+	const FQuat Qs  = FQuat::Slerp(QAe, QBe, s).GetNormalized();
+
+	Ship->SetActorLocationAndRotation(P, Qs.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
 }
 
+// === Владелец: мягкая реконсиляция с ограниченным «пинком» ===
 void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 {
 	if (!bHaveOwnerRecon || !ShipMesh || DeltaSeconds <= 0.f || !GetWorld()) return;
@@ -219,34 +342,36 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	const double Tserver = (double)OwnerReconTarget.ServerTime + ServerTimeToClientTime;
 	const double Ahead   = FMath::Max(0.0, Now - Tserver);
 
-	const FVector LocS = OwnerReconTarget.Loc + OwnerReconTarget.Vel * Ahead;
-	const FQuat   RotS = OwnerReconTarget.Rot;
+	const FVector LocS = OwnerReconTarget.Loc + OwnerReconTarget.Vel * (float)Ahead;
+	const FQuat   RotS = OwnerReconTarget.RotCS.ToRotator().Quaternion();
 	const FVector VelS = OwnerReconTarget.Vel;
+	const FVector Wdeg = OwnerReconTarget.AngVelDeg;
+	const FVector Wrad = Wdeg * (PI / 180.f);
 
 	const FVector LocC = ShipMesh->GetComponentLocation();
 	const FQuat   RotC = ShipMesh->GetComponentQuat();
 
-	// жёсткий снап при грубой рассинхре
+	// жёсткий снап при грубой ошибке
 	const double errPos = (LocS - LocC).Size();
 	if (errPos > (double)OwnerHardSnapDistance)
 	{
 		ShipMesh->SetWorldLocationAndRotation(LocS, RotS.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
 		ShipMesh->SetPhysicsLinearVelocity(VelS);
-		ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
+		ShipMesh->SetPhysicsAngularVelocityInRadians(Wrad, false);
+		UE_LOG(LogShipNet, Verbose, TEXT("[OWNER] HARD-SNAP err=%.1fcm"), errPos);
 		return;
 	}
 
-	// мягкая коррекция скорости (критически демпфированная пружина с Tau)
 	const float Tau   = FMath::Max(0.02f, OwnerReconTau);
 	const float Alpha = 1.f - FMath::Exp(-DeltaSeconds / Tau);
 
-	const FVector VelC   = ShipMesh->GetComponentVelocity(); // см/с
+	// линейная часть
+	const FVector VelC   = ShipMesh->GetComponentVelocity();
 	const FVector Vtgt   = VelS + (LocS - LocC) / Tau;
 	FVector       Vnew   = FMath::Lerp(VelC, Vtgt, Alpha);
 
-	// лимит «пинка» за тик — чтобы не было ступеньки
 	const FVector Nudge     = Vnew - VelC;
-	const float   MaxNudge  = OwnerMaxVelNudge * DeltaSeconds;
+	const float   MaxNudge  = OwnerMaxVelNudge * DeltaSeconds; // лимит «пинка»
 	if (Nudge.Size() > MaxNudge)
 		Vnew = VelC + Nudge.GetClampedToMaxSize(MaxNudge);
 
@@ -259,13 +384,26 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	Axis = Axis.GetSafeNormal();
 
 	const FVector Wcur = ShipMesh->GetPhysicsAngularVelocityInRadians();
-	const FVector Wtgt = Axis * (Angle / Tau);
+	const FVector Wtgt = Wrad + Axis * (Angle / Tau);
 	const FVector Wnew = FMath::Lerp(Wcur, Wtgt, Alpha);
 	ShipMesh->SetPhysicsAngularVelocityInRadians(Wnew, false);
+
+	// Логи по делу
+	if (UE_LOG_ACTIVE(LogShipNet, VeryVerbose))
+	{
+		const float ErrAngDeg = FMath::RadiansToDegrees(FMath::Abs(Angle));
+		UE_LOG(LogShipNet, VeryVerbose, TEXT("[OWNER] errPos=%.2fcm errAng=%.2fdeg pend=%d ack=%d delay=%.3f"),
+			(float)errPos, ErrAngDeg, PendingInputs.Num(), OwnerReconTarget.LastAckSeq, NetInterpDelay);
+	}
 }
 
-void UShipNetComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+// === Репликация ===
+// ShipNetComponent.cpp
+
+void UShipNetComponent::GetLifetimeReplicatedProps(
+	TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	DOREPLIFETIME(UShipNetComponent, ServerState);
+	DOREPLIFETIME(UShipNetComponent, ServerSnap);
 }
+
