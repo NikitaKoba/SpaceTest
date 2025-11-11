@@ -9,7 +9,7 @@ class UReplicationGraphNode_GridSpatialization2D;
 class UReplicationGraphNode_ActorList;
 class UReplicationGraphNode_AlwaysRelevant_ForConnection;
 class UNetReplicationGraphConnection;
-
+class USRG_SpatialHash3D;
 /**
  * AAA-style RepGraph с перцептуальной приоритизацией и адаптивным бюджетом.
  */
@@ -48,6 +48,7 @@ private:
 	// --- Глобальные узлы ---
 	UPROPERTY() TObjectPtr<UReplicationGraphNode_GridSpatialization2D> GridNode = nullptr;
 	UPROPERTY() TObjectPtr<UReplicationGraphNode_ActorList>            AlwaysRelevantNode = nullptr;
+	UPROPERTY() TObjectPtr<USRG_SpatialHash3D> Spatial3D = nullptr;
 
 	// --- Per-connection base node ---
 	TMap<UNetReplicationGraphConnection*, TWeakObjectPtr<UReplicationGraphNode_AlwaysRelevant_ForConnection>> PerConnAlwaysMap;
@@ -166,7 +167,7 @@ private:
 		return Old + (Value - Old) * Alpha; // без FMath::Lerp, чтобы не ловить несоответствие типов
 	}
 
-
+	
 	// Обновление бюджета
 	void UpdateAdaptiveBudget(UNetReplicationGraphConnection* ConnMgr, FConnState& CS, float UsedBytesThisTick, float TickDt);
 

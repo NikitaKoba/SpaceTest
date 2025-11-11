@@ -16,6 +16,7 @@
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
+#include "SRG_SpatialHash3D.h"
 #include "Kismet/KismetMathLibrary.h"
 
 // RepGraph API
@@ -24,6 +25,15 @@
 DEFINE_LOG_CATEGORY_STATIC(LogSpaceRepGraph, Log, All);
 
 // ---------------- CVars ----------------
+static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_UseSpatial3D(
+	TEXT("space.RepGraph.UseSpatial3D"), 1, TEXT("Use SRG_SpatialHash3D for candidate queries (0/1)"));
+
+static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_UseKNearest(
+	TEXT("space.RepGraph.UseKNearest"), 0, TEXT("If >0, limit candidates to K nearest for scoring"));
+
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_MaxQueryRadiusMeters(
+	TEXT("space.RepGraph.MaxQueryRadiusMeters"), 0.f, TEXT("Optional hard cap on query radius in meters (0 = no cap)"));
+
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_Debug(
 	TEXT("space.RepGraph.Debug"), 1, TEXT("Verbose logging (0/1)"));
 
@@ -37,7 +47,7 @@ static TAutoConsoleVariable<float> CVar_SpaceRepGraph_DefaultCullMeters(
 	TEXT("space.RepGraph.DefaultCullMeters"), 100000.f, TEXT("Default cull (meters)"));
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ShipCullMeters(
-	TEXT("space.RepGraph.ShipCullMeters"), 5000.f, TEXT("Ship coarse cull (meters)"));
+	TEXT("space.RepGraph.ShipCullMeters"), 1000.f, TEXT("Ship coarse cull (meters)"));
 
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_AutoRebias(
 	TEXT("space.RepGraph.AutoRebias"), 1, TEXT("Auto-rebias grid toward active players (0/1)"));
@@ -167,6 +177,13 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 	GridNode->SpatialBias = FVector2D::ZeroVector;
 	AddGlobalGraphNode(GridNode);
 
+	// NEW: 3D Spatial Hash — тот же CellUU, что и у 2D грида
+	if (!Spatial3D)
+	{
+		Spatial3D = NewObject<USRG_SpatialHash3D>(this);
+		Spatial3D->Init(CellUU);
+	}
+
 	// Глобальный список «всегда релевантно»
 	AlwaysRelevantNode = CreateNewNode<UReplicationGraphNode_ActorList>();
 	AddGlobalGraphNode(AlwaysRelevantNode);
@@ -188,12 +205,14 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 	if (SRG_ShouldLog())
 	{
 		UE_LOG(LogSpaceRepGraph, Log,
-			TEXT("InitGlobalGraphNodes: Grid=%p CellUU=%.0f (%.0fm) Bias=(%.0f,%.0f)"),
+			TEXT("InitGlobalGraphNodes: Grid=%p CellUU=%.0f (%.0fm) Bias=(%.0f,%.0f) | Spatial3D=%p"),
 			static_cast<void*>(GridNode.Get()),
 			GridNode->CellSize, GridNode->CellSize / 100.f,
-			GridNode->SpatialBias.X, GridNode->SpatialBias.Y);
+			GridNode->SpatialBias.X, GridNode->SpatialBias.Y,
+			static_cast<void*>(Spatial3D.Get()));
 	}
 }
+
 
 void USpaceReplicationGraph::InitGlobalActorClassSettings()
 {
@@ -295,13 +314,15 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedAct
 		return;
 	}
 
-	// Наш корабль — трекаем и в динамический грид
+	// Наш корабль — трекаем, в динамический грид и в Spatial3D
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{
 		TrackedShips.Add(Ship);
-		if (GridNode) GridNode->AddActor_Dynamic(ActorInfo, GlobalInfo);
+
+		if (Spatial3D)  Spatial3D->Add(Ship);
+
 		if (SRG_ShouldLog())
-			UE_LOG(LogSpaceRepGraph, Verbose, TEXT("RouteAdd: [%s|%s] -> tracked + Grid"),
+			UE_LOG(LogSpaceRepGraph, Verbose, TEXT("RouteAdd: [%s|%s] -> tracked + Grid + Spatial3D"),
 				*Actor->GetClass()->GetName(), *Actor->GetName());
 		return;
 	}
@@ -315,6 +336,7 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedAct
 		else          GridNode->AddActor_Static (ActorInfo, GlobalInfo);
 	}
 }
+
 
 void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo)
 {
@@ -330,7 +352,7 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 			if (UReplicationGraphNode_AlwaysRelevant_ForConnection* Node = KV.Value.Get())
 				Node->NotifyRemoveNetworkActor(ActorInfo);
 
-		// подчистить состояния ПРАВИЛЬНО (берём CS из CKV.Value)
+		// подчистить состояния
 		for (auto& CKV : ConnStates)
 		{
 			FConnState& CS = CKV.Value;
@@ -339,8 +361,9 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 			CS.ActorStats.Remove(Ship);
 		}
 
-		// убрать из грида
-		if (GridNode) GridNode->RemoveActor_Dynamic(ActorInfo);
+		// убрать из Spatial3D и грида
+		if (Spatial3D) Spatial3D->Remove(Ship);
+		if (GridNode)  GridNode->RemoveActor_Dynamic(ActorInfo);
 		return;
 	}
 
@@ -368,6 +391,7 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 		CS.ActorStats.Remove(Actor);
 	}
 }
+
 
 
 void USpaceReplicationGraph::BeginDestroy()
@@ -426,6 +450,12 @@ void USpaceReplicationGraph::RebiasToXY(const FVector& WorldLoc)
 	{
 		GridNode->SpatialBias = NewBias;
 
+		// NEW: синхронизируем Spatial3D bias (по XY, Z=0)
+		if (Spatial3D)
+		{
+			Spatial3D->SetBias(FVector(NewBias.X, NewBias.Y, 0.f));
+		}
+
 		// Перерегистрируем ТОЛЬКО то, что действительно должно быть в гриде
 		if (UWorld* W = GetWorld())
 		{
@@ -444,7 +474,7 @@ void USpaceReplicationGraph::RebiasToXY(const FVector& WorldLoc)
 				const bool bMovable = Root && Root->Mobility == EComponentMobility::Movable;
 				if (!bMovable) continue;
 
-				// 3) Должен иметь ненулевой кулл (иначе гриду его класть нельзя)
+				// 3) Должен иметь ненулевой кулл
 				FGlobalActorReplicationInfo& GI = GlobalActorReplicationInfoMap.Get(A);
 				if (GI.Settings.GetCullDistanceSquared() <= 0.f)
 					continue;
@@ -463,6 +493,7 @@ void USpaceReplicationGraph::RebiasToXY(const FVector& WorldLoc)
 		}
 	}
 }
+
 
 
 // -------- LiveLog / AutoRebias + Перцептуальный планировщик --------
@@ -506,7 +537,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 
 		for (auto& CKV : ConnStates)
 		{
-			UNetReplicationGraphConnection* ConnMgr = CKV.Key; // <— было CKV.Key.Get()
+			UNetReplicationGraphConnection* ConnMgr = CKV.Key;
 			if (!ConnMgr || !ConnMgr->NetConnection) continue;
 			if (APlayerController* PC = ConnMgr->NetConnection->PlayerController)
 				if (APawn* P = PC->GetPawn())
@@ -567,9 +598,13 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 	int32 NumTrackedShipsWorld = 0;
 	for (auto ShipPtr : TrackedShips) if (ShipPtr.IsValid()) ++NumTrackedShipsWorld;
 
+	const bool bUseSpatial = (CVar_SpaceRepGraph_UseSpatial3D.GetValueOnAnyThread() != 0);
+	const int32 KNearest   = CVar_SpaceRepGraph_UseKNearest.GetValueOnAnyThread();
+	const float MaxQueryCapM = CVar_SpaceRepGraph_MaxQueryRadiusMeters.GetValueOnAnyThread();
+
 	for (auto& CKV : ConnStates)
 	{
-		UNetReplicationGraphConnection* ConnMgr = CKV.Key; // <— было CKV.Key.Get()
+		UNetReplicationGraphConnection* ConnMgr = CKV.Key;
 		if (!ConnMgr || !ConnMgr->NetConnection) continue;
 
 		APlayerController* PC = ConnMgr->NetConnection->PlayerController;
@@ -609,32 +644,72 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		TArray<FCandidate> Candidates;
 		Candidates.Reserve(TrackedShips.Num());
 
-		// Предварительный FOV-гейт и дистанция
-		const float CoarseCullSq = CullSqUU;
-
-		for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
+		// --- ВЫБОРКА ИЗ Spatial3D (если включено) ---
+		if (bUseSpatial && Spatial3D)
 		{
-			AShipPawn* Ship = ShipPtr.Get();
-			if (!Ship || Ship == ViewerPawn) continue;
-			if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
+			TArray<AActor*> Near;
+			const float QueryRadiusUU = [ShipCullM, MaxQueryCapM]()
+			{
+				const float Base = ShipCullM * 100.f;
+				if (MaxQueryCapM > 0.f) return FMath::Min(Base, MaxQueryCapM * 100.f);
+				return Base;
+			}();
 
-			// Грубый дистанционный гейт
-			const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
-			if (DistSq > CoarseCullSq) continue;
+			if (KNearest > 0)
+				Spatial3D->QueryKNearest(ViewLoc, KNearest, QueryRadiusUU, Near);
+			else
+				Spatial3D->QuerySphere(ViewLoc, QueryRadiusUU, Near);
 
-			// Расчёт балла и стоимости
-			FActorEMA& AStat = CS.ActorStats.FindOrAdd(Ship);
-			float CostB = 0.f, U = 0.f;
-			const float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
-			if (Score <= 0.f) continue;
+			for (AActor* A : Near)
+			{
+				AShipPawn* Ship = Cast<AShipPawn>(A);
+				if (!Ship || Ship == ViewerPawn) continue;
+				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
 
-			FCandidate C;
-			C.Actor = Ship;
-			C.Cost  = CostB;
-			C.U     = U;
-			C.Score = Score;
-			C.GroupKey = MakeGroupKey(ViewLoc, Ship->GetActorLocation(), GroupCellUU);
-			Candidates.Add(C);
+				// Доп. страховочный дистанционный гейт (почти всегда пройдёт)
+				const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
+				if (DistSq > CullSqUU) continue;
+
+				FActorEMA& AStat = CS.ActorStats.FindOrAdd(Ship);
+				float CostB = 0.f, U = 0.f;
+				const float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
+				if (Score <= 0.f) continue;
+
+				FCandidate C;
+				C.Actor = Ship;
+				C.Cost  = CostB;
+				C.U     = U;
+				C.Score = Score;
+				C.GroupKey = MakeGroupKey(ViewLoc, Ship->GetActorLocation(), GroupCellUU);
+				Candidates.Add(C);
+			}
+		}
+		else
+		{
+			// --- СТАРЫЙ ПУТЬ: полный проход по TrackedShips ---
+			const float CoarseCullSq = CullSqUU;
+			for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
+			{
+				AShipPawn* Ship = ShipPtr.Get();
+				if (!Ship || Ship == ViewerPawn) continue;
+				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
+
+				const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
+				if (DistSq > CoarseCullSq) continue;
+
+				FActorEMA& AStat = CS.ActorStats.FindOrAdd(Ship);
+				float CostB = 0.f, U = 0.f;
+				const float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
+				if (Score <= 0.f) continue;
+
+				FCandidate C;
+				C.Actor = Ship;
+				C.Cost  = CostB;
+				C.U     = U;
+				C.Score = Score;
+				C.GroupKey = MakeGroupKey(ViewLoc, Ship->GetActorLocation(), GroupCellUU);
+				Candidates.Add(C);
+			}
 		}
 
 		// Батчинг по группам
@@ -650,7 +725,6 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		const float BaseKBs= CVar_SpaceRepGraph_BudgetKBs.GetValueOnAnyThread();
 		const float TickBudgetBase = (BaseKBs * 1024.f) * Safety / TickHz;
 
-		// Итоговый бюджет = смесь базового и адаптивной EMA
 		float BudgetBytes = 0.f;
 		{
 			const float Blend = 0.5f;
@@ -658,7 +732,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			BudgetBytes = FMath::Lerp(TickBudgetBase, Adapt, Blend);
 		}
 
-		// Выбор по бюджету
+		// Выбор по бюджету + хистерезис
 		TSet<TWeakObjectPtr<AActor>> NowSelected;
 		float UsedBytes = 0.f;
 		int32 NumChosen = 0;
@@ -671,7 +745,6 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			const bool bGroupEmpty = !GroupHasAny.FindRef(C.GroupKey);
 			const float CostWithHeader = C.Cost + (bGroupEmpty ? HeaderCost : 0.f);
 
-			// Хистерезис
 			const bool bWasVisible = CS.Visible.Contains(C.Actor);
 			const bool bPassHyst   = (C.Score >= S_enter) || (bWasVisible && C.Score >= S_exit);
 			if (!bPassHyst) continue;
@@ -726,7 +799,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			CS.Visible  = CS.Selected;
 		}
 
-		// Адаптивный бюджет (по использованию)
+		// Адаптивный бюджет
 		UpdateAdaptiveBudget(ConnMgr, CS, UsedBytes, 1.f/TickHz);
 
 		// Лог
@@ -734,6 +807,9 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		{
 			LogPerConnTick(ConnMgr, CS, NumTrackedShipsWorld, Candidates.Num(), NumChosen, UsedBytes, 1.f/TickHz);
 		}
+		if (CVar_SpaceRepGraph_Debug.GetValueOnAnyThread() > 0)
+			DrawDebugSphere(W, ViewLoc, ShipCullM*100.f, 32, FColor::Cyan, false, 0.1f, 0, 2.f);
+
 	}
 
 	return true;
@@ -825,7 +901,7 @@ float USpaceReplicationGraph::ComputePerceptualScore(
 	const FVector n = dvec / d;
 
 	const FVector Avel  = GetActorVelocity(Actor);
-	const FVector Vvel  = VStat.PrevVel; // EMA оцениваем в tick-е
+	const FVector Vvel  = VStat.PrevVel;
 
 	// Тангенциальная отн. скорость
 	FVector vrel = (Avel - Vvel);
@@ -850,8 +926,8 @@ float USpaceReplicationGraph::ComputePerceptualScore(
 	const float K_size = CVar_SpaceRepGraph_KSize.GetValueOnAnyThread();
 	const float w_size = FMath::Clamp(K_size * FMath::Square(R / d), 0.f, 1.f);
 
-	const float w_aff = 1.f; // тут можно усилить цели/прицел/союз/угрозу
-	const float w_los = 1.f; // LOS вычислять трассом при необходимости
+	const float w_aff = 1.f;
+	const float w_los = 1.f;
 	const float W = w_fov * w_size * w_aff * w_los;
 
 	// Оценка непредсказуемой динамики (обновим EMA по a и jerk)
@@ -882,7 +958,7 @@ float USpaceReplicationGraph::ComputePerceptualScore(
 	const float RTTs = VStat.RTTmsEMA * 0.001f;
 	const float TauMin = CVar_SpaceRepGraph_TauMin.GetValueOnAnyThread();
 	const float TauMax = CVar_SpaceRepGraph_TauMax.GetValueOnAnyThread();
-	const float T_sched = FMath::Clamp(0.5f * (TauMin + TauMax), TauMin, TauMax); // можно хитрее, но ок
+	const float T_sched = FMath::Clamp(0.5f * (TauMin + TauMax), TauMin, TauMax);
 	const float τ = FMath::Clamp(RTTs * 0.5f + T_sched, TauMin, TauMax);
 
 	// Угловая ошибка на экране
@@ -893,17 +969,25 @@ float USpaceReplicationGraph::ComputePerceptualScore(
 	const float θ0 = FMath::Max(0.001f, CVar_SpaceRepGraph_Theta0Deg.GetValueOnAnyThread() * (PI/180.f));
 	const float Eang = FMath::Sqrt( FMath::Square(θ_pos/θ0) + FMath::Square(θ_self/θ0) );
 
-	OutU = W * Eang;
+	// ===== КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Базовый вес по дистанции =====
+	// Даём минимальную полезность U_base, которая убывает с расстоянием
+	// Это гарантирует, что близкие корабли ВСЕГДА видны, даже если стоят на месте
+	const float d_meters = d / 100.f; // см → метры
+	const float U_base = FMath::Max(0.5f, 1000.f / FMath::Max(1.f, d_meters)); // гипербола: 1000м→1.0, 100м→10.0, 10м→100.0
+	
+	// Динамическая полезность (как было)
+	const float U_dynamic = W * Eang;
+	
+	// Итоговая полезность = максимум из базовой и динамической
+	OutU = FMath::Max(U_base, U_dynamic);
 
 	// Стоимость: байты + CPU
 	const float Kcpu = CVar_SpaceRepGraph_CPUtoBytes.GetValueOnAnyThread();
 	const float c_i = AStat.BytesEMA + Kcpu * AStat.SerializeMsEMA;
-
 	OutCostB = FMath::Max(16.f, c_i);
 
 	return (OutU > 0.f) ? (OutU / (OutCostB + 1e-3f)) : 0.f;
 }
-
 // ====================== Бюджет, логи =========================
 
 void USpaceReplicationGraph::UpdateAdaptiveBudget(UNetReplicationGraphConnection* ConnMgr, FConnState& CS, float UsedBytesThisTick, float TickDt)

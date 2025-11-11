@@ -8,7 +8,7 @@ public class SpaceTest : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "ReplicationGraph" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "ReplicationGraph", "IrisCore"});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "NetCore"  });
 
