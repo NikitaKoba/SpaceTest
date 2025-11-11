@@ -195,33 +195,75 @@ void UShipNetComponent::OnRep_ServerSnap()
 			// EMA для оффсета
 			ServerTimeToClientTime = FMath::Lerp(ServerTimeToClientTime, EstOffset, 0.10);
 		}
+
 		// выборка «остатка» для джиттера (чем ближе к нулю — тем точнее оффсет)
 		const double Residual = EstOffset - ServerTimeToClientTime;
 		AdaptiveInterpDelay_OnSample(Residual);
 	}
 
-	// --- Сим-прокси: интерп-буфер (клиентское время в снапе) ---
+	// --- Сим-прокси: интерп-буфер (клиентское время в снапе) + детектор телепорта ---
 	if (OwPawn && OwPawn->GetLocalRole() == ROLE_SimulatedProxy)
 	{
-		FInterpNode N;
-		N.Time   = (double)ServerSnap.ServerTime + ServerTimeToClientTime;
-		N.Loc    = ServerSnap.Loc;
-		N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
-		N.Vel    = ServerSnap.Vel;
-		N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f); // обратно в рад/с
-		NetBuffer.Add(N);
+		const double ClientTime = (double)ServerSnap.ServerTime + ServerTimeToClientTime;
 
-		// Подрезать хвост старых
-		const double KeepFrom = Now - 1.0;
-		int32 FirstValid = 0;
-		while (FirstValid < NetBuffer.Num() && NetBuffer[FirstValid].Time < KeepFrom) ++FirstValid;
-		if (FirstValid > 0) NetBuffer.RemoveAt(0, FirstValid, EAllowShrinking::No);
+		// Телепорт-детектор по скачку относительно последнего узла буфера.
+		// Порог 100000 uu ≈ 1 км (подгони под свои масштабы).
+		const float TeleportCutoffUU = 100000.f;
 
-		// ЛОГ
-		if (UE_LOG_ACTIVE(LogShipNet, VeryVerbose))
+		bool bDidTeleport = false;
+
+		if (NetBuffer.Num() > 0)
 		{
-			UE_LOG(LogShipNet, VeryVerbose, TEXT("[SIMPROXY] NetBuffer=%d delay=%.3f"),
-				NetBuffer.Num(), NetInterpDelay);
+			const FInterpNode& Last = NetBuffer.Last();
+			const double Jump = FVector::Dist(ServerSnap.Loc, Last.Loc);
+
+			if (Jump > (double)TeleportCutoffUU)
+			{
+				// Резкий разрыв: чистим буфер, добавляем единичный ключ и снапаем актор.
+				NetBuffer.Reset();
+
+				FInterpNode N;
+				N.Time   = ClientTime;
+				N.Loc    = ServerSnap.Loc;
+				N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
+				N.Vel    = ServerSnap.Vel;
+				N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f);
+				NetBuffer.Add(N);
+
+				if (Ship)
+				{
+					Ship->SetActorLocationAndRotation(
+						N.Loc, N.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+				}
+
+				bDidTeleport = true;
+			}
+		}
+
+		if (!bDidTeleport)
+		{
+			// Обычный путь: добавляем ключ и подрезаем хвост
+			FInterpNode N;
+			N.Time   = ClientTime;
+			N.Loc    = ServerSnap.Loc;
+			N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
+			N.Vel    = ServerSnap.Vel;
+			N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f);
+			NetBuffer.Add(N);
+
+			// Подрезать старые узлы (держим ~1 секунду истории)
+			const double KeepFrom = Now - 1.0;
+			int32 FirstValid = 0;
+			while (FirstValid < NetBuffer.Num() && NetBuffer[FirstValid].Time < KeepFrom) ++FirstValid;
+			if (FirstValid > 0)
+				NetBuffer.RemoveAt(0, FirstValid, EAllowShrinking::No);
+
+			// ЛОГ
+			if (UE_LOG_ACTIVE(LogShipNet, VeryVerbose))
+			{
+				UE_LOG(LogShipNet, VeryVerbose, TEXT("[SIMPROXY] NetBuffer=%d delay=%.3f"),
+					NetBuffer.Num(), NetInterpDelay);
+			}
 		}
 	}
 	// --- Владелец: ACK + целевой снап для мягкой реконсиляции/ресима ---
@@ -230,7 +272,7 @@ void UShipNetComponent::OnRep_ServerSnap()
 		OwnerReconTarget = ServerSnap;
 		bHaveOwnerRecon  = true;
 
-		// Срезаем подтверждённые инпуты
+		// Срезаем подтверждённые инпуты (ACK)
 		int32 CutIdx = INDEX_NONE;
 		for (int32 i = PendingInputs.Num()-1; i >= 0; --i)
 		{
@@ -244,11 +286,8 @@ void UShipNetComponent::OnRep_ServerSnap()
 			PendingInputs.RemoveAt(0, CutIdx+1, EAllowShrinking::No);
 		}
 
-		// [PREDICT] Здесь можно сделать настоящий rollback:
-		// 1) Восстановить снап S=OwnerReconTarget (Loc/Rot/Vel/AngVel)
-		// 2) Прогнать оставшиеся PendingInputs детерминированным SimStep(S, dt, input)
-		// 3) Установить S обратно на ShipMesh (через SetPhysics* / или мягко через скорости)
-		// Пока оставляем мягкую реконсиляцию в Tick (ниже).
+		// [PREDICT] Здесь можно сделать настоящий rollback+replay по PendingInputs,
+		// пока оставляем мягкую реконсиляцию в Tick.
 	}
 }
 
@@ -360,57 +399,85 @@ void UShipNetComponent::DriveSimulatedProxy()
 // ShipNetComponent.cpp
 void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 {
-	if (!bHaveOwnerRecon || !ShipMesh || DeltaSeconds <= 0.f || !GetWorld()) return;
+	if (!bHaveOwnerRecon || !ShipMesh || DeltaSeconds <= 0.f || !GetWorld())
+		return;
 
-	const double Now     = GetWorld()->GetTimeSeconds();
+	// --- серверное время в клиентских секундах + лаг вперёд ---
+	const double Now     = (double)GetWorld()->GetTimeSeconds();
 	const double Tserver = (double)OwnerReconTarget.ServerTime + ServerTimeToClientTime;
 	const double Ahead   = FMath::Max(0.0, Now - Tserver);
 
-	// Целевое состояние, протянутое "вперёд" на локальный лаг
+	// --- целевое состояние (с учётом лага вперёд по линейной части) ---
 	const FVector LocS = OwnerReconTarget.Loc + OwnerReconTarget.Vel * (float)Ahead;
 	const FQuat   RotS = OwnerReconTarget.RotCS.ToRotator().Quaternion();
 	const FVector VelS = OwnerReconTarget.Vel;
-	const FVector Wrad = (OwnerReconTarget.AngVelDeg) * (PI / 180.f);
+	const FVector Wrad = OwnerReconTarget.AngVelDeg * (PI / 180.f);
 
+	// --- текущее состояние ---
 	const FVector LocC = ShipMesh->GetComponentLocation();
 	const FQuat   RotC = ShipMesh->GetComponentQuat();
+	const FVector VelC = ShipMesh->GetComponentVelocity();
+	const FVector Wcur = ShipMesh->GetPhysicsAngularVelocityInRadians();
 
-	// Жёсткий снап на крупной ошибке (например, после телепорта)
-	const double errPos = (LocS - LocC).Size();
-	if (errPos > (double)OwnerHardSnapDistance)
+	// --- метрики ошибки ---
+	const double PosErr = (LocS - LocC).Size();
+	const double VelErr = (VelS - VelC).Size();
+	const double AngErr = (Wrad - Wcur).Size();
+
+	// --- пороги жёсткой ресинхронизации (без CVAR; подгони при желании) ---
+	const float POS_HARD_SNAP  = 8000.f;   // 80 м (uu = см)
+	const float VEL_HARD_SNAP  = 30000.f;  // 300 м/с в uu/s
+	const float ANGV_HARD_SNAP = 4.0f;     // ~230°/с в рад/с
+
+	// Если после столкновения сервер сильно разошёлся с клиентом — жёсткий ресинк.
+	if (PosErr > POS_HARD_SNAP || VelErr > VEL_HARD_SNAP || AngErr > ANGV_HARD_SNAP)
 	{
 		ShipMesh->SetWorldLocationAndRotation(LocS, RotS.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
-		ShipMesh->SetPhysicsLinearVelocity(VelS);
+		ShipMesh->SetPhysicsLinearVelocity(VelS, false);
 		ShipMesh->SetPhysicsAngularVelocityInRadians(Wrad, false);
+
+		// Срезаем неприменённые предсказанные инпуты — они уже невалидны после удара.
+		if (PendingInputs.Num() > 0)
+			PendingInputs.Reset();
+
 		return;
 	}
 
-	const float Tau   = FMath::Max(0.02f, OwnerReconTau);
-	const float Alpha = 1.f - FMath::Exp(-DeltaSeconds / Tau);
+	// --- мягкая реконсиляция (критически демпфированный PD) ---
+	const float TauPos   = 0.08f; // «время подтяжки» позиции
+	const float TauAng   = 0.10f; // «время подтяжки» ориентации
+	const float AlphaPos = 1.f - FMath::Exp(-DeltaSeconds / TauPos);
+	const float AlphaAng = 1.f - FMath::Exp(-DeltaSeconds / TauAng);
 
-	// --- Линейная часть ---
-	const FVector VelC = ShipMesh->GetComponentVelocity();
-	const FVector Vtgt = VelS + (LocS - LocC) / Tau;
+	// Линейная часть: целевую скорость делаем как серверную + корректирующий термин по позиции
+	const FVector Vtgt = VelS + (LocS - LocC) / FMath::Max(1e-3f, TauPos);
 
-	FVector Vnew = FMath::Lerp(VelC, Vtgt, Alpha);
+	// ограничение «пинка», чтобы не раскачать после контакта
+	const float MAX_VEL_NUDGE = 10000.f; // макс. изменение скорости за тик (uu/s)
+	FVector Vnew = FMath::Lerp(VelC, Vtgt, AlphaPos);
 	const FVector Nudge = Vnew - VelC;
-	const float MaxNudge = OwnerMaxVelNudge * DeltaSeconds; // ограничим "пинок"
-	if (Nudge.Size() > MaxNudge)
-		Vnew = VelC + Nudge.GetClampedToMaxSize(MaxNudge);
+	if (Nudge.Size() > MAX_VEL_NUDGE)
+		Vnew = VelC + Nudge.GetClampedToMaxSize(MAX_VEL_NUDGE);
 
 	ShipMesh->SetPhysicsLinearVelocity(Vnew, false);
 
-	// --- Угловая часть ---
-	FVector Axis; float Angle=0.f;
+	// Угловая часть: разница ориентаций + серверная угл. скорость
+	FVector Axis; float Angle = 0.f;
 	(RotS * RotC.Inverse()).ToAxisAndAngle(Axis, Angle);
-	if (Angle > PI) Angle -= 2.f*PI;
+	if (Angle > PI) Angle -= 2.f * PI;
 	Axis = Axis.GetSafeNormal();
 
-	const FVector Wcur = ShipMesh->GetPhysicsAngularVelocityInRadians();
-	const FVector Wtgt = Wrad + Axis * (Angle / Tau);
-	const FVector Wnew = FMath::Lerp(Wcur, Wtgt, Alpha);
-	ShipMesh->SetPhysicsAngularVelocityInRadians(Wnew, false);
+	// Если почти нет вращательного расхождения — не дёргаем
+	if (!Axis.IsNearlyZero(1e-3f))
+	{
+		const FVector Wtgt = Wrad + Axis * (Angle / FMath::Max(1e-3f, TauAng));
+
+		// мягкий бленд без излишней агрессии
+		const FVector Wblend = FMath::Lerp(Wcur, Wtgt, AlphaAng);
+		ShipMesh->SetPhysicsAngularVelocityInRadians(Wblend, false);
+	}
 }
+
 
 
 // === Репликация ===
