@@ -10,6 +10,27 @@
 #include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY(LogShipNet);
+// --- Quant helpers (без зависимостей) ---
+static FORCEINLINE float QuantStep(float v, float step)
+{
+	// симметричная квантовка (в т.ч. для отрицательных), без дрейфа
+	return step * FMath::RoundToFloat(v / step);
+}
+
+static FORCEINLINE FVector QuantVec(const FVector& v, float step)
+{
+	return FVector(QuantStep(v.X, step), QuantStep(v.Y, step), QuantStep(v.Z, step));
+}
+
+static FORCEINLINE FRotator QuantRotDeg(const FRotator& r, float degStep)
+{
+	// нормализуем в [-180,180), квантим, снова нормализуем
+	FRotator n = r.GetNormalized();
+	n.Pitch = QuantStep(n.Pitch, degStep);
+	n.Yaw   = QuantStep(n.Yaw,   degStep);
+	n.Roll  = QuantStep(n.Roll,  degStep);
+	return n.GetNormalized();
+}
 
 UShipNetComponent::UShipNetComponent()
 {
@@ -107,15 +128,29 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	// === 4) Сервер: снимаем авторитативный снап ===
 	if (OwPawn->HasAuthority())
 	{
-		const FTransform X = ShipMesh->GetComponentTransform();
-		const FVector    Wrad = ShipMesh->GetPhysicsAngularVelocityInRadians();
+		// Подбираем минимальные «ступеньки», которых достаточно, чтобы скрыть шум,
+		// но не съесть управляемость. Всё в см/градусах, как у тебя.
+		// Если нужно ещё мягче — уменьши шаги вдвое.
+		constexpr float POS_STEP_CM   = 1.0f;   // позиция: 1 см
+		constexpr float VEL_STEP_CMPS = 1.0f;   // лин. скорость: 1 см/с
+		constexpr float ANG_STEP_DEGPS= 0.5f;   // угл. скорость: 0.5 °/с
+		constexpr float ROT_STEP_DEG  = 0.5f;   // ориентация (эйлеры): 0.5 °
 
-		ServerSnap.Loc       = X.GetLocation();
-		FRotator R = X.Rotator();
-		ServerSnap.RotCS.FromRotator(R);
-		ServerSnap.Vel       = ShipMesh->GetComponentVelocity();
-		ServerSnap.AngVelDeg = Wrad * (180.f / PI); // храню в deg/s для читаемой сетки
-		ServerSnap.ServerTime= GetWorld()->GetTimeSeconds();
+		const FTransform X   = ShipMesh->GetComponentTransform();
+		const FVector    V   = ShipMesh->GetComponentVelocity();
+		const FVector    Wrd = ShipMesh->GetPhysicsAngularVelocityInRadians();
+
+		// Квантуем всё перед записью в снап:
+		const FVector   LocQ    = QuantVec(X.GetLocation(), POS_STEP_CM);
+		const FRotator  RotQdeg = QuantRotDeg(X.Rotator(), ROT_STEP_DEG);
+		const FVector   VelQ    = QuantVec(V, VEL_STEP_CMPS);
+		const FVector   AngQdeg = QuantVec(Wrd * (180.f / PI), ANG_STEP_DEGPS);
+
+		ServerSnap.Loc        = LocQ;
+		ServerSnap.RotCS.FromRotator(RotQdeg);
+		ServerSnap.Vel        = VelQ;
+		ServerSnap.AngVelDeg  = AngQdeg;
+		ServerSnap.ServerTime = GetWorld()->GetTimeSeconds();
 		// LastAckSeq сервер обновляет в Server_SendInput()
 	}
 }
