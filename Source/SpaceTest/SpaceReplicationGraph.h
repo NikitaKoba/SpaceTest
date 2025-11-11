@@ -117,6 +117,7 @@ private:
 
 	// Трекинг «кораблей»
 	TSet<TWeakObjectPtr<AShipPawn>> TrackedShips;
+	TMap<UNetReplicationGraphConnection*, TSet<TWeakObjectPtr<AActor>>> ForcedMutualReveal;
 
 	// Тикер
 	FTSTicker::FDelegateHandle LiveLogTickerHandle;

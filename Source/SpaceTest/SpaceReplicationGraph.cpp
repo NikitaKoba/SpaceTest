@@ -260,12 +260,34 @@ void USpaceReplicationGraph::InitConnectionGraphNodes(UNetReplicationGraphConnec
 
 	LiveLog_OnConnAdded(ConnMgr);
 
+	// ⬅️ ВАЖНО: если у подключения УЖЕ есть Pawn – сразу посадим его в per-connection AlwaysRelevant.
+	if (ConnMgr->NetConnection)
+	{
+		if (APlayerController* PC = ConnMgr->NetConnection->PlayerController)
+		{
+			if (APawn* Pawn = PC->GetPawn())
+			{
+				PerConnAlways->NotifyAddNetworkActor(FNewReplicatedActorInfo(Pawn));
+				// маленькая страховка на случай дормантности
+				if (Pawn->NetDormancy != DORM_Awake) Pawn->SetNetDormancy(DORM_Awake);
+				Pawn->ForceNetUpdate();
+
+				if (SRG_ShouldLog())
+				{
+					UE_LOG(LogSpaceRepGraph, Log, TEXT("InitConn: seeded owner Pawn [%s] into PerConnAlways for PC=%s"),
+						*GetNameSafe(Pawn), *GetNameSafe(PC));
+				}
+			}
+		}
+	}
+
 	if (SRG_ShouldLog())
 	{
 		UE_LOG(LogSpaceRepGraph, Log, TEXT("InitConn: ConnMgr=%p NetConn=%p PerConnAlways=%p"),
 			ConnMgr, ConnMgr->NetConnection.Get(), PerConnAlways);
 	}
 }
+
 
 void USpaceReplicationGraph::RemoveClientConnection(UNetConnection* NetConnection)
 {
@@ -288,6 +310,7 @@ void USpaceReplicationGraph::RemoveClientConnection(UNetConnection* NetConnectio
 		// 2) Снять live-телеметрию/состояния приоритизатора
 		LiveLog_OnConnRemoved(ConnMgr);
 		ConnStates.Remove(ConnMgr);
+		ForcedMutualReveal.Remove(ConnMgr);
 	}
 
 	// Базовая логика графа
@@ -314,20 +337,55 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedAct
 		return;
 	}
 
+	// === Любой Pawn: обеспечить always-relevant для СВОЕГО владельца ===
+	if (APawn* Pawn = Cast<APawn>(Actor))
+	{
+		if (UNetConnection* OwnerConn = FindOwnerConnection(Pawn))
+		{
+			if (UNetReplicationGraphConnection* ConnMgr = FindOrAddConnectionManager(OwnerConn))
+			{
+				UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways =
+					PerConnAlwaysMap.FindRef(ConnMgr).Get();
+				if (!PerConnAlways)
+				{
+					PerConnAlways = CreateNewNode<UReplicationGraphNode_AlwaysRelevant_ForConnection>();
+					AddConnectionGraphNode(PerConnAlways, ConnMgr);
+					PerConnAlwaysMap.Add(ConnMgr, PerConnAlways);
+				}
+
+				PerConnAlways->NotifyAddNetworkActor(ActorInfo);
+				if (Pawn->NetDormancy != DORM_Awake) Pawn->SetNetDormancy(DORM_Awake);
+				Pawn->ForceNetUpdate();
+
+				if (SRG_ShouldLog())
+				{
+					if (APlayerController* PC = OwnerConn->PlayerController)
+					{
+						UE_LOG(LogSpaceRepGraph, Log, TEXT("RouteAdd: owner Pawn [%s] -> PerConnAlways (PC=%s)"),
+							*GetNameSafe(Pawn), *GetNameSafe(PC));
+					}
+					else
+					{
+						UE_LOG(LogSpaceRepGraph, Log, TEXT("RouteAdd: owner Pawn [%s] -> PerConnAlways"), *GetNameSafe(Pawn));
+					}
+				}
+			}
+		}
+	}
+
 	// Наш корабль — трекаем, в динамический грид и в Spatial3D
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{
 		TrackedShips.Add(Ship);
-
 		if (Spatial3D)  Spatial3D->Add(Ship);
 
 		if (SRG_ShouldLog())
 			UE_LOG(LogSpaceRepGraph, Verbose, TEXT("RouteAdd: [%s|%s] -> tracked + Grid + Spatial3D"),
 				*Actor->GetClass()->GetName(), *Actor->GetName());
-		return;
+		// НЕ return: пусть ещё попадёт в динамический грид (как и было ниже)
 	}
 
-	// Остальные: по мобильности
+	// Остальные: по мобильности — в 2D грид
 	if (GridNode)
 	{
 		const USceneComponent* Root = Cast<USceneComponent>(Actor->GetRootComponent());
@@ -529,7 +587,21 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 	const float ShipCullM = FMath::Max(1.f, CVar_SpaceRepGraph_ShipCullMeters.GetValueOnAnyThread());
 	const float CullSqUU  = FMath::Square(ShipCullM * 100.f);
 
-	// 1) авто-ребайас по центру активных игроков
+	// ==== PATCH #1: держим Spatial3D в актуальном состоянии ====
+	if (Spatial3D)
+	{
+		for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
+		{
+			if (AShipPawn* S = ShipPtr.Get())
+			{
+				// Простой и надёжный путь без новых API: remove+add на каждом тике планировщика.
+				Spatial3D->Remove(S);
+				Spatial3D->Add(S);
+			}
+		}
+	}
+
+	// 1) авто-ребайас по центру активных игроков (как было)
 	if (GridNode && CVar_SpaceRepGraph_AutoRebias.GetValueOnAnyThread() != 0)
 	{
 		FVector2D CenterXY(0, 0);
@@ -589,7 +661,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		}
 	}
 
-	// 2) Приоритизация per-connection
+	// 2) Перцептуальный приоритизатор per-connection (как было, с маленькими вставками)
 	const float Theta0 = FMath::Max(0.01f, CVar_SpaceRepGraph_Theta0Deg.GetValueOnAnyThread()) * (PI/180.f);
 	const float TickHz = float(FMath::Max(1, CVar_SpaceRepGraph_TickHz.GetValueOnAnyThread()));
 	const float GroupCellUU = FMath::Max(1.f, CVar_SpaceRepGraph_GroupCellMeters.GetValueOnAnyThread()) * 100.f;
@@ -617,48 +689,44 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 
 		const FVector ViewLoc = ViewerPawn->GetActorLocation();
 
-		// Обновим EMA зрителя (скорость, RTT)
+		// EMA зрителя
 		{
 			const double Now = W->GetTimeSeconds();
 			if (!CS.Viewer.bInit)
 			{
-				CS.Viewer.PrevPos = ViewLoc;
-				CS.Viewer.PrevVel = FVector::ZeroVector;
-				CS.Viewer.PrevStamp = Now;
+				CS.Viewer.PrevPos  = ViewLoc;
+				CS.Viewer.PrevVel  = FVector::ZeroVector;
+				CS.Viewer.PrevStamp= Now;
 				CS.Viewer.RTTmsEMA = CVar_SpaceRepGraph_RTTmsStart.GetValueOnAnyThread();
-				CS.Viewer.bInit = true;
+				CS.Viewer.bInit    = true;
 			}
 			else
 			{
-				const float dt = FMath::Max(1e-3f, float(Now - CS.Viewer.PrevStamp));
-				const FVector vel = (ViewLoc - CS.Viewer.PrevPos) / dt;
-				CS.Viewer.PrevVel = EMA(CS.Viewer.PrevVel, vel, 0.5f);
-				CS.Viewer.PrevPos = ViewLoc;
+				const float dt  = FMath::Max(1e-3f, float(Now - CS.Viewer.PrevStamp));
+				const FVector v = (ViewLoc - CS.Viewer.PrevPos) / dt;
+				CS.Viewer.PrevVel   = EMA(CS.Viewer.PrevVel, v, 0.5f);
+				CS.Viewer.PrevPos   = ViewLoc;
 				CS.Viewer.PrevStamp = Now;
-
-				CS.Viewer.RTTmsEMA = EMA(CS.Viewer.RTTmsEMA, CVar_SpaceRepGraph_RTTmsStart.GetValueOnAnyThread(), 0.05f);
+				CS.Viewer.RTTmsEMA  = EMA(CS.Viewer.RTTmsEMA, CVar_SpaceRepGraph_RTTmsStart.GetValueOnAnyThread(), 0.05f);
 			}
 		}
 
-		// Сбор кандидатов
+		// Кандидаты
 		TArray<FCandidate> Candidates;
 		Candidates.Reserve(TrackedShips.Num());
 
-		// --- ВЫБОРКА ИЗ Spatial3D (если включено) ---
+		// Выборка
 		if (bUseSpatial && Spatial3D)
 		{
 			TArray<AActor*> Near;
 			const float QueryRadiusUU = [ShipCullM, MaxQueryCapM]()
 			{
 				const float Base = ShipCullM * 100.f;
-				if (MaxQueryCapM > 0.f) return FMath::Min(Base, MaxQueryCapM * 100.f);
-				return Base;
+				return (MaxQueryCapM > 0.f) ? FMath::Min(Base, MaxQueryCapM * 100.f) : Base;
 			}();
 
-			if (KNearest > 0)
-				Spatial3D->QueryKNearest(ViewLoc, KNearest, QueryRadiusUU, Near);
-			else
-				Spatial3D->QuerySphere(ViewLoc, QueryRadiusUU, Near);
+			if (KNearest > 0) Spatial3D->QueryKNearest(ViewLoc, KNearest, QueryRadiusUU, Near);
+			else               Spatial3D->QuerySphere  (ViewLoc,            QueryRadiusUU, Near);
 
 			for (AActor* A : Near)
 			{
@@ -666,7 +734,6 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				if (!Ship || Ship == ViewerPawn) continue;
 				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
 
-				// Доп. страховочный дистанционный гейт (почти всегда пройдёт)
 				const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
 				if (DistSq > CullSqUU) continue;
 
@@ -686,8 +753,6 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		}
 		else
 		{
-			// --- СТАРЫЙ ПУТЬ: полный проход по TrackedShips ---
-			const float CoarseCullSq = CullSqUU;
 			for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
 			{
 				AShipPawn* Ship = ShipPtr.Get();
@@ -695,7 +760,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
 
 				const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
-				if (DistSq > CoarseCullSq) continue;
+				if (DistSq > CullSqUU) continue;
 
 				FActorEMA& AStat = CS.ActorStats.FindOrAdd(Ship);
 				float CostB = 0.f, U = 0.f;
@@ -712,15 +777,14 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			}
 		}
 
-		// Батчинг по группам
+		// Батчинг/сортировка
 		TMap<int32, bool> GroupHasAny;
 		TMap<int32, int32> GroupCounts;
 		CS.GroupsFormed = 0;
 
-		// Сортировка по Score (desc)
 		Candidates.Sort([](const FCandidate& A, const FCandidate& B){ return A.Score > B.Score; });
 
-		// Адаптивный бюджет
+		// Бюджет
 		const float Safety = CVar_SpaceRepGraph_Safety.GetValueOnAnyThread();
 		const float BaseKBs= CVar_SpaceRepGraph_BudgetKBs.GetValueOnAnyThread();
 		const float TickBudgetBase = (BaseKBs * 1024.f) * Safety / TickHz;
@@ -732,7 +796,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			BudgetBytes = FMath::Lerp(TickBudgetBase, Adapt, Blend);
 		}
 
-		// Выбор по бюджету + хистерезис
+		// Выбор с хистерезисом
 		TSet<TWeakObjectPtr<AActor>> NowSelected;
 		float UsedBytes = 0.f;
 		int32 NumChosen = 0;
@@ -768,7 +832,42 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			}
 		}
 
-		// Обновляем per-connection AlwaysRelevant
+		// ==== PATCH #2: взаимная видимость на малой дистанции ====
+		// Если мы выбрали какую-то цель, и у неё есть свой владелец-соединение,
+		// подстрахуем — добавим нашего ViewerPawn в AR-узел владельца цели,
+		// когда расстояние невелико. Так не будет «я врезался, а он меня не видит».
+		const float kMutualRevealMeters = 2000.f;
+		const float kMutualRevealSqUU   = FMath::Square(kMutualRevealMeters * 100.f);
+
+		for (TWeakObjectPtr<AActor> APtr : NowSelected)
+		{
+			APawn* TargetPawn = Cast<APawn>(APtr.Get());
+			if (!TargetPawn) continue;
+
+			const float DistSq = FVector::DistSquared(ViewLoc, TargetPawn->GetActorLocation());
+			if (DistSq > kMutualRevealSqUU) continue;
+
+			UNetConnection* OtherNet = FindOwnerConnection(TargetPawn);
+			if (!OtherNet) continue;
+
+			UNetReplicationGraphConnection* OtherConnMgr = FindOrAddConnectionManager(OtherNet);
+			if (!OtherConnMgr || OtherConnMgr == ConnMgr) continue;
+
+			UReplicationGraphNode_AlwaysRelevant_ForConnection* OtherAR =
+				PerConnAlwaysMap.FindRef(OtherConnMgr).Get();
+			if (!OtherAR)
+			{
+				OtherAR = CreateNewNode<UReplicationGraphNode_AlwaysRelevant_ForConnection>();
+				AddConnectionGraphNode(OtherAR, OtherConnMgr);
+				PerConnAlwaysMap.Add(OtherConnMgr, OtherAR);
+			}
+
+			OtherAR->NotifyAddNetworkActor(FNewReplicatedActorInfo(ViewerPawn));
+			if (ViewerPawn->NetDormancy != DORM_Awake) ViewerPawn->SetNetDormancy(DORM_Awake);
+			ViewerPawn->ForceNetUpdate();
+		}
+
+		// Обновляем per-connection AlwaysRelevant (как было)
 		{
 			for (TWeakObjectPtr<AActor> APtr : NowSelected)
 			{
@@ -802,14 +901,13 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		// Адаптивный бюджет
 		UpdateAdaptiveBudget(ConnMgr, CS, UsedBytes, 1.f/TickHz);
 
-		// Лог
+		// Логи/дебаг
 		if (bDoLiveLog)
 		{
 			LogPerConnTick(ConnMgr, CS, NumTrackedShipsWorld, Candidates.Num(), NumChosen, UsedBytes, 1.f/TickHz);
 		}
 		if (CVar_SpaceRepGraph_Debug.GetValueOnAnyThread() > 0)
 			DrawDebugSphere(W, ViewLoc, ShipCullM*100.f, 32, FColor::Cyan, false, 0.1f, 0, 2.f);
-
 	}
 
 	return true;
@@ -889,105 +987,137 @@ float USpaceReplicationGraph::ComputePerceptualScore(
 	float& OutCostB,
 	float& OutU)
 {
-	OutCostB = 0.f; OutU = 0.f;
+	OutCostB = 0.f; 
+	OutU     = 0.f;
 	if (!Actor || !ViewerPawn) return 0.f;
 
+	// --- Константы тюнинга (без новых CVars) ---
+	const float K_BASE      = 1000.f;   // сила базовой полезности (м * Score * Cost)
+	const float D0_M        = 3.0f;     // смещение по дистанции в метрах (анти-бесконечность в упор)
+	const float U_BASE_MIN  = 0.5f;     // нижний предел базовой полезности
+	const float U_BASE_CAP  = 200.f;    // верхний предел базовой полезности (анти-взрыв на 0..1м)
+	const float FMIN_FRONT  = 0.25f;    // минимальная «фронтальность» для базы (чтобы сзади не обнулять)
+	const float LSE_ALPHA   = 2.0f;     // жёсткость смешивания базы и динамики (1..3 — мягко/жестче)
+	const float EPS_D       = 1.0f;     // анти-zero для расстояний в uu
+	const float EPS_DEN     = 1e-3f;    // анти-zero для деления Score
+
+	// --- Геометрия и относительные величины ---
 	const FVector Apos = Actor->GetActorLocation();
 	const FVector Vpos = ViewerPawn->GetActorLocation();
-
 	const FVector dvec = Apos - Vpos;
+
 	float d = dvec.Size();
-	if (d < 1.f) d = 1.f;
+	if (d < EPS_D) d = EPS_D;
+
 	const FVector n = dvec / d;
 
-	const FVector Avel  = GetActorVelocity(Actor);
-	const FVector Vvel  = VStat.PrevVel;
+	const FVector Avel = GetActorVelocity(Actor);
+	const FVector Vvel = VStat.PrevVel;
 
-	// Тангенциальная отн. скорость
+	// Тангенциальная относительная скорость (в плоскости перпендикулярной взгляду на объект)
 	FVector vrel = (Avel - Vvel);
 	vrel -= FVector::DotProduct(vrel, n) * n;
 	const float vtan = vrel.Size();
 
-	// Собственная угл. скорость
-	const FVector Aang = GetActorAngularVel(Actor);
-	const float wSelf = Aang.Size();
+	// Собственная угловая скорость объекта
+	const FVector Aang  = GetActorAngularVel(Actor);
+	const float   wSelf = Aang.Size();
 
-	// Камера/FOV
-	const float FOVdeg  = CVar_SpaceRepGraph_FOVdeg.GetValueOnAnyThread();
-	const float FOVrad  = FOVdeg * (PI/180.f);
-	const FVector CamF  = GetViewerForward(ViewerPawn);
+	// Камера / FOV
+	const float FOVdeg = CVar_SpaceRepGraph_FOVdeg.GetValueOnAnyThread();
+	const float FOVrad = FMath::Max(KINDA_SMALL_NUMBER, FOVdeg * (PI / 180.f));
+	const FVector CamF = GetViewerForward(ViewerPawn).GetSafeNormal();
 
-	const float cosφ = FVector::DotProduct(CamF.GetSafeNormal(), n);
-	const float φ = FMath::Acos(FMath::Clamp(cosφ, -1.f, 1.f));
-	const float w_fov = FMath::Exp( - FMath::Square( φ / (FOVrad*0.7f) ) );
+	const float cosPhi = FVector::DotProduct(CamF, n);
+	const float phi    = FMath::Acos(FMath::Clamp(cosPhi, -1.f, 1.f));
+	const float fovSigma = FOVrad * 0.7f; // ширина гауссианы по углу
+	const float w_fov = FMath::Exp(-FMath::Square(phi / FMath::Max(KINDA_SMALL_NUMBER, fovSigma)));
 
-	// Вес размера на экране
-	const float R = GetActorRadiusUU(const_cast<AActor*>(Actor), AStat);
+	// «Размер на экране»
+	const float R      = GetActorRadiusUU(const_cast<AActor*>(Actor), AStat);
 	const float K_size = CVar_SpaceRepGraph_KSize.GetValueOnAnyThread();
 	const float w_size = FMath::Clamp(K_size * FMath::Square(R / d), 0.f, 1.f);
 
-	const float w_aff = 1.f;
-	const float w_los = 1.f;
-	const float W = w_fov * w_size * w_aff * w_los;
+	const float w_aff  = 1.f; // крючок под «прицел/цель/союз/угроза»
+	const float w_los  = 1.f; // при желании можно умножить на результат трассы
+	const float W      = w_fov * w_size * w_aff * w_los;
 
-	// Оценка непредсказуемой динамики (обновим EMA по a и jerk)
+	// --- Оценка «шумов» динамики (EMA по ускорению/рывку) ---
 	{
 		const double Now = Actor->GetWorld()->GetTimeSeconds();
-		const float dt = AStat.bInit ? FMath::Max(1e-3f, float(Now - AStat.PrevStamp)) : FMath::Max(DeltaTime, 1e-3f);
-		const FVector vel = Avel;
-		const FVector accel = (AStat.bInit ? (vel - AStat.PrevVel)/dt : FVector::ZeroVector);
+		const float dt = AStat.bInit ? FMath::Max(1e-3f, float(Now - AStat.PrevStamp))
+		                             : FMath::Max(DeltaTime, 1e-3f);
 
-		const FVector vdir = vel.GetSafeNormal();
+		const FVector vel   = Avel;
+		const FVector accel = (AStat.bInit ? (vel - AStat.PrevVel) / dt : FVector::ZeroVector);
+
+		const FVector vdir   = vel.GetSafeNormal();
 		const FVector a_pred = FVector::DotProduct(accel, vdir) * vdir;
-		const FVector a_noise = accel - a_pred;
+		const FVector a_noise= accel - a_pred;
 
 		const float aN = a_noise.Size();
-		const float jN = AStat.bInit ? ((a_noise - AStat.PrevAccel)/dt).Size() : 0.f;
+		const float jN = AStat.bInit ? ((a_noise - AStat.PrevAccel) / dt).Size() : 0.f;
 
-		AStat.SigmaA = EMA(AStat.SigmaA, aN, 0.3f);
-		AStat.SigmaJ = EMA(AStat.SigmaJ, jN, 0.2f);
-
-		AStat.PrevPos = Apos;
-		AStat.PrevVel = vel;
+		AStat.SigmaA    = EMA(AStat.SigmaA, aN, 0.3f);
+		AStat.SigmaJ    = EMA(AStat.SigmaJ, jN, 0.2f);
+		AStat.PrevPos   = Apos;
+		AStat.PrevVel   = vel;
 		AStat.PrevAccel = a_noise;
 		AStat.PrevStamp = Now;
-		AStat.bInit = true;
+		AStat.bInit     = true;
 	}
 
-	// Горизонт устаревания τ
-	const float RTTs = VStat.RTTmsEMA * 0.001f;
+	// --- Горизонт устаревания τ (зависит от RTT) ---
+	const float RTTs   = VStat.RTTmsEMA * 0.001f;
 	const float TauMin = CVar_SpaceRepGraph_TauMin.GetValueOnAnyThread();
 	const float TauMax = CVar_SpaceRepGraph_TauMax.GetValueOnAnyThread();
-	const float T_sched = FMath::Clamp(0.5f * (TauMin + TauMax), TauMin, TauMax);
-	const float τ = FMath::Clamp(RTTs * 0.5f + T_sched, TauMin, TauMax);
+	const float T_sched= FMath::Clamp(0.5f * (TauMin + TauMax), TauMin, TauMax);
+	const float tau    = FMath::Clamp(RTTs * 0.5f + T_sched,   TauMin, TauMax);
 
-	// Угловая ошибка на экране
-	const float e_pos = vtan*τ + 0.5f*AStat.SigmaA*τ*τ + (1.f/6.f)*AStat.SigmaJ*τ*τ*τ;
-	const float θ_pos = e_pos / d;
-	const float θ_self= (R / d) * (wSelf * τ);
+	// --- Угловая ошибка на экране ---
+	const float e_pos   = vtan * tau + 0.5f * AStat.SigmaA * tau * tau + (1.f/6.f) * AStat.SigmaJ * tau * tau * tau;
+	const float thetaPos= e_pos / d;
+	const float thetaSelf = (R / d) * (wSelf * tau);
 
-	const float θ0 = FMath::Max(0.001f, CVar_SpaceRepGraph_Theta0Deg.GetValueOnAnyThread() * (PI/180.f));
-	const float Eang = FMath::Sqrt( FMath::Square(θ_pos/θ0) + FMath::Square(θ_self/θ0) );
+	const float theta0Deg = FMath::Max(0.001f, CVar_SpaceRepGraph_Theta0Deg.GetValueOnAnyThread());
+	const float theta0    = theta0Deg * (PI / 180.f);
 
-	// ===== КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Базовый вес по дистанции =====
-	// Даём минимальную полезность U_base, которая убывает с расстоянием
-	// Это гарантирует, что близкие корабли ВСЕГДА видны, даже если стоят на месте
-	const float d_meters = d / 100.f; // см → метры
-	const float U_base = FMath::Max(0.5f, 1000.f / FMath::Max(1.f, d_meters)); // гипербола: 1000м→1.0, 100м→10.0, 10м→100.0
-	
-	// Динамическая полезность (как было)
+	const float Eang = FMath::Sqrt(
+		FMath::Square(thetaPos / theta0) +
+		FMath::Square(thetaSelf / theta0)
+	);
+
+	// --- Динамическая полезность ---
 	const float U_dynamic = W * Eang;
-	
-	// Итоговая полезность = максимум из базовой и динамической
-	OutU = FMath::Max(U_base, U_dynamic);
 
-	// Стоимость: байты + CPU
+	// --- Базовая полезность по дистанции (с анти-взрывом и мягкой фронтальностью) ---
+	const float d_m = d / 100.f; // uu -> метры
+	const float U_base_raw  = K_BASE / FMath::Max(1.f, d_m + D0_M);
+	const float U_base_capped = FMath::Clamp(U_base_raw, U_BASE_MIN, U_BASE_CAP);
+
+	// База не зависит от FOV, но слегка штрафуем заднюю полусферу
+	const float baseFovScale = FMath::Max(w_fov, FMIN_FRONT);
+	const float U_base = U_base_capped * baseFovScale;
+
+	// --- Плавное смешивание (log-sum-exp), чтобы не было «ломаной max» ---
+	auto LSE = [](float a, float b, float alpha)->float
+	{
+		const float m = FMath::Max(a, b);
+		// m + ln( exp(alpha*(a-m)) + exp(alpha*(b-m)) ) / alpha
+		return m + FMath::Loge(FMath::Exp(alpha * (a - m)) + FMath::Exp(alpha * (b - m))) / FMath::Max(1e-6f, alpha);
+	};
+
+	OutU = LSE(U_base, U_dynamic, LSE_ALPHA);
+
+	// --- Стоимость (байты) ---
 	const float Kcpu = CVar_SpaceRepGraph_CPUtoBytes.GetValueOnAnyThread();
-	const float c_i = AStat.BytesEMA + Kcpu * AStat.SerializeMsEMA;
+	const float c_i  = AStat.BytesEMA + Kcpu * AStat.SerializeMsEMA;
 	OutCostB = FMath::Max(16.f, c_i);
 
-	return (OutU > 0.f) ? (OutU / (OutCostB + 1e-3f)) : 0.f;
+	// --- Итоговая метрика ---
+	return (OutU > 0.f) ? (OutU / (OutCostB + EPS_DEN)) : 0.f;
 }
+
 // ====================== Бюджет, логи =========================
 
 void USpaceReplicationGraph::UpdateAdaptiveBudget(UNetReplicationGraphConnection* ConnMgr, FConnState& CS, float UsedBytesThisTick, float TickDt)

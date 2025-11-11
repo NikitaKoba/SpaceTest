@@ -65,7 +65,6 @@ void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// стартовый сэмпл для камеры
 	FCamSample S;
 	S.Time = FApp::GetCurrentTime();
 	const FTransform X = ShipMesh->GetComponentTransform();
@@ -75,6 +74,8 @@ void AShipPawn::BeginPlay()
 	PushCamSample(S);
 
 	if (Camera) Camera->SetFieldOfView(CameraFOV);
+
+	UpdateSimFlags(); // только это, без Flight->SetComponentTickEnabled(...)
 }
 
 void AShipPawn::Tick(float DeltaSeconds)
@@ -90,6 +91,60 @@ void AShipPawn::Tick(float DeltaSeconds)
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
 }
+
+void AShipPawn::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+	UpdateSimFlags();
+}
+void AShipPawn::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+	UpdateSimFlags();
+}
+void AShipPawn::OnRep_Controller()
+{
+	Super::OnRep_Controller();
+	UpdateSimFlags();
+}
+
+void AShipPawn::UpdateSimFlags()
+{
+	if (!ShipMesh) return;
+
+	// СЕРВЕР-ТОЛЬКО СИМУЛЯЦИЯ: физика включена ТОЛЬКО на сервере
+	const bool bNewSim = HasAuthority();
+	const bool bWasSim = ShipMesh->IsSimulatingPhysics();
+
+	if (bNewSim != bWasSim)
+	{
+		ShipMesh->SetSimulatePhysics(bNewSim);
+		ShipMesh->SetEnableGravity(false);
+		ShipMesh->SetCollisionEnabled(bNewSim ? ECollisionEnabled::QueryAndPhysics
+											  : ECollisionEnabled::QueryOnly);
+
+		if (!bNewSim)
+		{
+			// Клиенты: полностью «усыпляем» физику и обнуляем скорости
+			ShipMesh->SetAllPhysicsLinearVelocity(FVector::ZeroVector);
+			ShipMesh->SetAllPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+			ShipMesh->PutAllRigidBodiesToSleep();
+		}
+	}
+
+	// Тик Flight строго синхронизируем с фактом симуляции
+	if (Flight)
+	{
+		Flight->SetComponentTickEnabled(bNewSim);
+	}
+
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogTemp, Log, TEXT("UpdateSimFlags: Sim=%d (Auth=%d Local=%d) FlightTick=%d"),
+		int(bNewSim), int(HasAuthority()), int(IsLocallyControlled()),
+		Flight ? int(Flight->IsComponentTickEnabled()) : -1);
+#endif
+}
+
 
 void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {

@@ -74,9 +74,12 @@ public:
 	// APawn
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+	void PossessedBy(AController* NewController);
+	void OnRep_PlayerState();
+	void OnRep_Controller();
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
-
+	void UpdateSimFlags(); // централизуем логику “где симулируем”
 private:
 	// Camera sample buffer
 	TArray<FCamSample> CamSamples;

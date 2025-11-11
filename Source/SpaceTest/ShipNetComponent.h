@@ -153,7 +153,7 @@ public:
 	UPROPERTY(EditAnywhere) float OwnerReconTau       = 0.12f;
 	UPROPERTY(EditAnywhere) float OwnerHardSnapDistance = 200.f;  // см
 	UPROPERTY(EditAnywhere) float OwnerMaxVelNudge   = 8000.f;    // см/с за секунду
-
+	int32 LastReceivedSeq = 0; // только на сервере используется
 protected:
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
