@@ -120,19 +120,42 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	}
 }
 
+// ShipNetComponent.cpp
 void UShipNetComponent::UpdatePhysicsSimState()
 {
-	if (!ShipMesh || !Flight || !OwPawn) return;
+	if (!Ship || !ShipMesh || !Flight || !OwPawn) return;
 
-	const bool bShouldSim =
-		OwPawn->HasAuthority() || (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole()==ROLE_AutonomousProxy);
+	const bool bOwner = (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole()==ROLE_AutonomousProxy);
+	const bool bAuth  = OwPawn->HasAuthority();
+	const bool bShouldSim = bAuth || bOwner;
 
-	if (ShipMesh->IsSimulatingPhysics() != bShouldSim)
+	const bool bWasSim = ShipMesh->IsSimulatingPhysics();
+	if (bWasSim != bShouldSim)
 	{
-		ShipMesh->SetSimulatePhysics(bShouldSim);
+		if (bShouldSim)
+		{
+			// Синхронизируем трансформ и включаем физику
+			ShipMesh->SetWorldTransform(Ship->GetActorTransform(), false, nullptr, ETeleportType::TeleportPhysics);
+			ShipMesh->SetSimulatePhysics(true);
+			ShipMesh->WakeAllRigidBodies();
+
+			// КРИТИЧЕСКО: сразу ребайндим тело для Flight
+			Flight->RebindAfterSimToggle();
+		}
+		else
+		{
+			// Аккуратно гасим и выключаем
+			ShipMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false);
+			ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
+			ShipMesh->PutAllRigidBodiesToSleep();
+			ShipMesh->SetSimulatePhysics(false);
+		}
 	}
+
+	// Тик Flight только там, где симулируем
 	Flight->SetComponentTickEnabled(bShouldSim);
 }
+
 
 // ===== RPC =====
 void UShipNetComponent::Server_SendInput_Implementation(const FControlState& State)
@@ -334,6 +357,7 @@ void UShipNetComponent::DriveSimulatedProxy()
 }
 
 // === Владелец: мягкая реконсиляция с ограниченным «пинком» ===
+// ShipNetComponent.cpp
 void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 {
 	if (!bHaveOwnerRecon || !ShipMesh || DeltaSeconds <= 0.f || !GetWorld()) return;
@@ -342,42 +366,41 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	const double Tserver = (double)OwnerReconTarget.ServerTime + ServerTimeToClientTime;
 	const double Ahead   = FMath::Max(0.0, Now - Tserver);
 
+	// Целевое состояние, протянутое "вперёд" на локальный лаг
 	const FVector LocS = OwnerReconTarget.Loc + OwnerReconTarget.Vel * (float)Ahead;
 	const FQuat   RotS = OwnerReconTarget.RotCS.ToRotator().Quaternion();
 	const FVector VelS = OwnerReconTarget.Vel;
-	const FVector Wdeg = OwnerReconTarget.AngVelDeg;
-	const FVector Wrad = Wdeg * (PI / 180.f);
+	const FVector Wrad = (OwnerReconTarget.AngVelDeg) * (PI / 180.f);
 
 	const FVector LocC = ShipMesh->GetComponentLocation();
 	const FQuat   RotC = ShipMesh->GetComponentQuat();
 
-	// жёсткий снап при грубой ошибке
+	// Жёсткий снап на крупной ошибке (например, после телепорта)
 	const double errPos = (LocS - LocC).Size();
 	if (errPos > (double)OwnerHardSnapDistance)
 	{
 		ShipMesh->SetWorldLocationAndRotation(LocS, RotS.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
 		ShipMesh->SetPhysicsLinearVelocity(VelS);
 		ShipMesh->SetPhysicsAngularVelocityInRadians(Wrad, false);
-		UE_LOG(LogShipNet, Verbose, TEXT("[OWNER] HARD-SNAP err=%.1fcm"), errPos);
 		return;
 	}
 
 	const float Tau   = FMath::Max(0.02f, OwnerReconTau);
 	const float Alpha = 1.f - FMath::Exp(-DeltaSeconds / Tau);
 
-	// линейная часть
-	const FVector VelC   = ShipMesh->GetComponentVelocity();
-	const FVector Vtgt   = VelS + (LocS - LocC) / Tau;
-	FVector       Vnew   = FMath::Lerp(VelC, Vtgt, Alpha);
+	// --- Линейная часть ---
+	const FVector VelC = ShipMesh->GetComponentVelocity();
+	const FVector Vtgt = VelS + (LocS - LocC) / Tau;
 
-	const FVector Nudge     = Vnew - VelC;
-	const float   MaxNudge  = OwnerMaxVelNudge * DeltaSeconds; // лимит «пинка»
+	FVector Vnew = FMath::Lerp(VelC, Vtgt, Alpha);
+	const FVector Nudge = Vnew - VelC;
+	const float MaxNudge = OwnerMaxVelNudge * DeltaSeconds; // ограничим "пинок"
 	if (Nudge.Size() > MaxNudge)
 		Vnew = VelC + Nudge.GetClampedToMaxSize(MaxNudge);
 
 	ShipMesh->SetPhysicsLinearVelocity(Vnew, false);
 
-	// угловая часть
+	// --- Угловая часть ---
 	FVector Axis; float Angle=0.f;
 	(RotS * RotC.Inverse()).ToAxisAndAngle(Axis, Angle);
 	if (Angle > PI) Angle -= 2.f*PI;
@@ -387,15 +410,8 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	const FVector Wtgt = Wrad + Axis * (Angle / Tau);
 	const FVector Wnew = FMath::Lerp(Wcur, Wtgt, Alpha);
 	ShipMesh->SetPhysicsAngularVelocityInRadians(Wnew, false);
-
-	// Логи по делу
-	if (UE_LOG_ACTIVE(LogShipNet, VeryVerbose))
-	{
-		const float ErrAngDeg = FMath::RadiansToDegrees(FMath::Abs(Angle));
-		UE_LOG(LogShipNet, VeryVerbose, TEXT("[OWNER] errPos=%.2fcm errAng=%.2fdeg pend=%d ack=%d delay=%.3f"),
-			(float)errPos, ErrAngDeg, PendingInputs.Num(), OwnerReconTarget.LastAckSeq, NetInterpDelay);
-	}
 }
+
 
 // === Репликация ===
 // ShipNetComponent.cpp

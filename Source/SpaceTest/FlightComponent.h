@@ -162,7 +162,8 @@ public:
 
 	// Визуал-отладка
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Debug") float DebugVectorScaleCm = 220.f;
-
+	UFUNCTION()
+	void RebindAfterSimToggle();
 protected:
 	virtual void OnRegister() override;
 	virtual void BeginPlay() override;

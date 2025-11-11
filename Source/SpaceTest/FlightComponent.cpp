@@ -19,6 +19,21 @@ UFlightComponent::UFlightComponent()
 	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 	bAutoActivate = true;
 }
+void UFlightComponent::RebindAfterSimToggle()
+{
+	// Если только что включили симуляцию — привяжем тело.
+	// Срываем старую ссылку, чтобы TryBindBody пересканил компоненты.
+	if (!Body || !Body->IsSimulatingPhysics())
+	{
+		Body = nullptr;
+		TryBindBody();        // внутренняя, уже есть
+		if (Body && Opt.bOverrideDamping && SavedLinearDamping >= 0.f && SavedAngularDamping >= 0.f)
+		{
+			// восстановим нужный демпфинг, если он у тебя включён
+			ApplyDampingFA(true);
+		}
+	}
+}
 
 void UFlightComponent::OnRegister()
 {

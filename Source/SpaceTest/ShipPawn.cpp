@@ -11,22 +11,23 @@
 
 static FORCEINLINE float Clamp01(float v){ return FMath::Clamp(v, 0.f, 1.f); }
 
+// ShipPawn.cpp
 AShipPawn::AShipPawn()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickGroup    = TG_PostPhysics;
 
-	// Актор должен реплицироваться (компонент тоже реплицируемый)
 	bReplicates = true;
 	SetReplicateMovement(false);
 	bAlwaysRelevant = false;
 	bOnlyRelevantToOwner = false;
 	SetNetUpdateFrequency(120.f);
 	SetMinNetUpdateFrequency(60.f);
+
 	// Root mesh (physics)
 	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
 	SetRootComponent(ShipMesh);
-	ShipMesh->SetSimulatePhysics(true);
+	ShipMesh->SetSimulatePhysics(false);              // <--- ВАЖНО: изначально false
 	ShipMesh->SetEnableGravity(false);
 	ShipMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	ShipMesh->SetCollisionObjectType(ECC_Pawn);
@@ -34,13 +35,9 @@ AShipPawn::AShipPawn()
 	ShipMesh->SetLinearDamping(0.02f);
 	ShipMesh->SetAngularDamping(0.02f);
 
-	// Полёт
 	Flight = CreateDefaultSubobject<UFlightComponent>(TEXT("Flight"));
+	Net    = CreateDefaultSubobject<UShipNetComponent>(TEXT("Net"));
 
-	// Сеть
-	Net = CreateDefaultSubobject<UShipNetComponent>(TEXT("ShipNet"));
-
-	// SpringArm как якорь оффсетов (без лагов/коллизий)
 	SpringArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("SpringArm"));
 	SpringArm->SetupAttachment(RootComponent);
 	SpringArm->TargetArmLength = 0.f;
@@ -51,7 +48,6 @@ AShipPawn::AShipPawn()
 	SpringArm->SetUsingAbsoluteRotation(false);
 	SpringArm->PrimaryComponentTick.bCanEverTick = false;
 
-	// Камера
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(SpringArm, USpringArmComponent::SocketName);
 	Camera->bUsePawnControlRotation = false;
@@ -60,6 +56,7 @@ AShipPawn::AShipPawn()
 
 	SpawnCollisionHandlingMethod = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 }
+
 
 void AShipPawn::BeginPlay()
 {
