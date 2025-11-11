@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ShipCursorPilotComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Camera/CameraTypes.h"
 #include "ShipPawn.generated.h"
@@ -29,7 +30,8 @@ class SPACETEST_API AShipPawn : public APawn
 
 public:
 	AShipPawn();
-
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="HUD", meta=(AllowPrivateAccess="true"))
+	UShipCursorPilotComponent* CursorPilot = nullptr;
 	// Components
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UStaticMeshComponent* ShipMesh;
@@ -70,6 +72,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Advanced", meta=(ClampMin="16", ClampMax="512"))
 	int32 MaxCameraSamples = 256;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera") bool bLookAtTarget = true;
+
 
 	// APawn
 	virtual void BeginPlay() override;

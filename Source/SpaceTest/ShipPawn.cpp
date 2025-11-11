@@ -2,7 +2,7 @@
 #include "ShipPawn.h"
 #include "FlightComponent.h"
 #include "ShipNetComponent.h"
-
+#include "ShipCursorPilotComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Camera/CameraComponent.h"
@@ -23,7 +23,7 @@ AShipPawn::AShipPawn()
 	bOnlyRelevantToOwner = false;
 	SetNetUpdateFrequency(120.f);
 	SetMinNetUpdateFrequency(60.f);
-
+	CursorPilot = CreateDefaultSubobject<UShipCursorPilotComponent>(TEXT("CursorPilot"));
 	// Root mesh (physics)
 	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
 	SetRootComponent(ShipMesh);
@@ -302,13 +302,22 @@ void AShipPawn::Axis_Roll(float V)
 }
 void AShipPawn::Axis_MouseYaw(float V)
 {
-	if (Flight) Flight->AddMouseYaw(V);
-	if (Net)    Net->AddMouseDelta(V, 0.f);
+	// Если курсорный пилот активен — yaw/pitch уже подаются из компонента
+	const bool bCursorActive = (CursorPilot && CursorPilot->IsActive());
+	if (!bCursorActive)
+	{
+		if (Flight) Flight->AddMouseYaw(V);
+		if (Net)    Net->AddMouseDelta(V, 0.f);
+	}
 }
 void AShipPawn::Axis_MousePitch(float V)
 {
-	if (Flight) Flight->AddMousePitch(V);
-	if (Net)    Net->AddMouseDelta(0.f, V);
+	const bool bCursorActive = (CursorPilot && CursorPilot->IsActive());
+	if (!bCursorActive)
+	{
+		if (Flight) Flight->AddMousePitch(V);
+		if (Net)    Net->AddMouseDelta(0.f, V);
+	}
 }
 void AShipPawn::Action_ToggleFA()
 {
