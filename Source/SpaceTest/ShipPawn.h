@@ -77,6 +77,7 @@ public:
 	void PossessedBy(AController* NewController);
 	void OnRep_PlayerState();
 	void OnRep_Controller();
+	void PostInitializeComponents();
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
 	void UpdateSimFlags(); // централизуем логику “где симулируем”

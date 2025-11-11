@@ -26,7 +26,7 @@ AShipPawn::AShipPawn()
 	// Root mesh (physics)
 	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
 	SetRootComponent(ShipMesh);
-	ShipMesh->SetSimulatePhysics(true);
+	ShipMesh->SetSimulatePhysics(false);
 	ShipMesh->SetEnableGravity(false);
 	ShipMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	ShipMesh->SetCollisionObjectType(ECC_Pawn);
@@ -108,39 +108,66 @@ void AShipPawn::OnRep_Controller()
 	UpdateSimFlags();
 }
 
+void AShipPawn::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	// Включаем серверную физику ДО BeginPlay компонентов
+	UpdateSimFlags();
+}
+
 void AShipPawn::UpdateSimFlags()
 {
 	if (!ShipMesh) return;
 
-	// СЕРВЕР-ТОЛЬКО СИМУЛЯЦИЯ: физика включена ТОЛЬКО на сервере
-	const bool bNewSim = HasAuthority();
-	const bool bWasSim = ShipMesh->IsSimulatingPhysics();
+	const bool bAuth      = HasAuthority();
+	const bool bWantSim   = bAuth;                // Симулируем ТОЛЬКО на сервере
+	const bool bWasSim    = ShipMesh->IsSimulatingPhysics();
 
-	if (bNewSim != bWasSim)
+	// Общие флаги коллизий/гравитации
+	ShipMesh->SetEnableGravity(false);
+	ShipMesh->SetCollisionObjectType(ECC_Pawn);
+	ShipMesh->SetCollisionEnabled(bWantSim ? ECollisionEnabled::QueryAndPhysics
+	                                       : ECollisionEnabled::QueryOnly);
+
+	if (bWantSim != bWasSim)
 	{
-		ShipMesh->SetSimulatePhysics(bNewSim);
-		ShipMesh->SetEnableGravity(false);
-		ShipMesh->SetCollisionEnabled(bNewSim ? ECollisionEnabled::QueryAndPhysics
-											  : ECollisionEnabled::QueryOnly);
+		ShipMesh->SetSimulatePhysics(bWantSim);
 
-		if (!bNewSim)
+		if (bWantSim)
 		{
-			// Клиенты: полностью «усыпляем» физику и обнуляем скорости
-			ShipMesh->SetAllPhysicsLinearVelocity(FVector::ZeroVector);
-			ShipMesh->SetAllPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+			// Переход в симуляцию: гарантированно разбудим и обнулим мусорные скорости
+			ShipMesh->WakeAllRigidBodies();
+			ShipMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false);
+			ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
+
+			// Нормализуем позу физики под текущий трансформ компонента
+			ShipMesh->SetAllPhysicsPosition(ShipMesh->GetComponentLocation());
+			ShipMesh->SetAllPhysicsRotation(ShipMesh->GetComponentQuat());
+
+			// Небольшая подстраховка для динамики
+			ShipMesh->BodyInstance.bUseCCD = true;
+			ShipMesh->SetLinearDamping(0.02f);
+			ShipMesh->SetAngularDamping(0.02f);
+			ShipMesh->SetPhysicsMaxAngularVelocityInDegrees(36000.f, false);
+		}
+		else
+		{
+			// Переход из симуляции: остановить и усыпить
+			ShipMesh->SetAllPhysicsLinearVelocity(FVector::ZeroVector, false);
+			ShipMesh->SetAllPhysicsAngularVelocityInDegrees(FVector::ZeroVector, false);
 			ShipMesh->PutAllRigidBodiesToSleep();
 		}
 	}
 
-	// Тик Flight строго синхронизируем с фактом симуляции
+	// Тик полёта строго привязан к факту симуляции
 	if (Flight)
 	{
-		Flight->SetComponentTickEnabled(bNewSim);
+		Flight->SetComponentTickEnabled(bWantSim);
 	}
 
 #if !UE_BUILD_SHIPPING
-	UE_LOG(LogTemp, Log, TEXT("UpdateSimFlags: Sim=%d (Auth=%d Local=%d) FlightTick=%d"),
-		int(bNewSim), int(HasAuthority()), int(IsLocallyControlled()),
+	UE_LOG(LogTemp, Log, TEXT("UpdateSimFlags: Auth=%d WantSim=%d WasSim=%d FlightTick=%d"),
+		int(bAuth), int(bWantSim), int(bWasSim),
 		Flight ? int(Flight->IsComponentTickEnabled()) : -1);
 #endif
 }
