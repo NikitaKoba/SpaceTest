@@ -57,9 +57,25 @@ void ALaserBolt::Tick(float DeltaSeconds)
 
 	if (SpeedUUps > 1.f)
 	{
-		const FVector vForward = GetActorForwardVector() * SpeedUUps;
-		const FVector vTotal   = vForward + BaseVelW;                // ← добавили скорость корабля
-		const FVector Delta    = vTotal * DeltaSeconds;
+		// ИСПРАВЛЕНИЕ: Для прицельной стрельбы НЕ наследуем скорость корабля
+		// Болты летят строго к курсору без искривления траектории
+		// Если нужна "реалистичная" баллистика - используйте InheritOwnerVelPct > 0
+		
+		const FVector BoltForward = GetActorForwardVector();
+		const FVector vForward = BoltForward * SpeedUUps;
+		
+		// Опционально: можно добавить небольшой процент продольной скорости
+		// для эффекта "выстрела с движущегося корабля"
+		FVector vTotal = vForward;
+		
+		if (InheritOwnerVelPct > 0.001f)
+		{
+			// Наследуем только компонент вдоль направления полёта болта
+			const float InheritedSpeed = FVector::DotProduct(BaseVelW, BoltForward);
+			vTotal += BoltForward * FMath::Max(0.f, InheritedSpeed) * InheritOwnerVelPct;
+		}
+		
+		const FVector Delta = vTotal * DeltaSeconds;
 
 		// Визуальный снаряд — телепортом без sweep
 		SetActorLocation(GetActorLocation() + Delta, false, nullptr, ETeleportType::None);

@@ -11,19 +11,18 @@
 #include "Math/RotationMatrix.h"
 #include "Kismet/KismetMathLibrary.h"
 
-// ---- utils ----
-static FRotator MakeRotFromDir(const FVector& Dir)
+static FRotator RotFromDir(const FVector& D)
 {
-	return FRotationMatrix::MakeFromX(Dir.GetSafeNormal()).Rotator();
+	return FRotationMatrix::MakeFromX(D.GetSafeNormal()).Rotator();
 }
 
-static FVector JitterDir(const FVector& Dir, float Deg)
+static FVector Jitter(const FVector& D, float Deg)
 {
-	if (Deg <= KINDA_SMALL_NUMBER) return Dir.GetSafeNormal();
-	return UKismetMathLibrary::RandomUnitVectorInConeInDegrees(Dir.GetSafeNormal(), Deg).GetSafeNormal();
+	if (Deg <= KINDA_SMALL_NUMBER) return D.GetSafeNormal();
+	return UKismetMathLibrary::RandomUnitVectorInConeInDegrees(D.GetSafeNormal(), Deg).GetSafeNormal();
 }
 
-// ---- component ----
+// === ctor ===
 UShipLaserComponent::UShipLaserComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -36,53 +35,216 @@ UShipLaserComponent::UShipLaserComponent()
 void UShipLaserComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	ResolveRootPrim();
+
+	// кэшнём рут-примитив (чтобы унаследовать скорость при спавне болта)
+	if (AActor* Ow = GetOwner())
+	{
+		if (UPrimitiveComponent* P = Cast<UPrimitiveComponent>(Ow->GetRootComponent()))
+			CachedRootPrim = P;
+	}
+
+	// инициал для client-driven
+	if (UWorld* W = GetWorld())
+		ClientNextShotTimeS = W->GetTimeSeconds();
 }
 
-void UShipLaserComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UShipLaserComponent::TickComponent(float Dt, ELevelTick TickType, FActorComponentTickFunction* ThisTick)
 {
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	Super::TickComponent(Dt, TickType, ThisTick);
 
 	const APawn* P  = Cast<APawn>(GetOwner());
 	const APlayerController* PC = P ? Cast<APlayerController>(P->GetController()) : nullptr;
 	const bool bOwningClient = P && PC && P->IsLocallyControlled();
 
-	if (bOwningClient && bLocalFireHeld && bUseReticleAim)
+	// === Client-driven cadence ===
+	if (bClientDrivesCadence && bOwningClient && bLocalFireHeld)
 	{
-		MaybeSendAimToServer(false);
-	}
-}
+		const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+		const double Period = 1.0 / FMath::Max(1.0f, FireRateHz);
 
-bool UShipLaserComponent::ResolveRootPrim()
-{
-	if (CachedRootPrim.IsValid()) return true;
-
-	if (AActor* Ow = GetOwner())
-	{
-		if (UPrimitiveComponent* P = Cast<UPrimitiveComponent>(Ow->GetRootComponent()))
+		while (Now + 1e-6 >= ClientNextShotTimeS)
 		{
-			CachedRootPrim = P;
-			return true;
+			FVector O, D;
+			if (!bUseReticleAim || !ComputeAimRay_Client(O, D))
+			{
+				// фоллбек — смотрим по камере
+				FVector CamLoc; FRotator CamRot;
+				PC->GetPlayerViewPoint(CamLoc, CamRot);
+				O = CamLoc; D = CamRot.Vector();
+			}
+
+			ServerFireShot(O, D);
+			ClientNextShotTimeS += Period;
 		}
 	}
-	return false;
 }
 
 void UShipLaserComponent::StartFire()
 {
 	bLocalFireHeld = true;
-	MaybeSendAimToServer(true);
 
-	if (GetOwner()) ServerStartFire();
+	if (!bClientDrivesCadence && GetOwner())
+		ServerStartFire();
 }
 
 void UShipLaserComponent::StopFire()
 {
 	bLocalFireHeld = false;
 
-	if (GetOwner()) ServerStopFire();
+	if (!bClientDrivesCadence && GetOwner())
+		ServerStopFire();
 }
 
+// === Aim (client) ===
+bool UShipLaserComponent::ComputeAimRay_Client(FVector& OutOrigin, FVector& OutDir) const
+{
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (!Pawn || !PC || !Pawn->IsLocallyControlled())
+		return false;
+
+	// 1) пробуем наш курсор-пилот (экранная точка = центр + CursorSm)
+	if (const UShipCursorPilotComponent* CP = Pawn->FindComponentByClass<UShipCursorPilotComponent>())
+	{
+		if (CP->GetAimRay(OutOrigin, OutDir))
+			return true;
+	}
+
+	// 2) фоллбек — центр камеры
+	FVector CamLoc; FRotator CamRot;
+	PC->GetPlayerViewPoint(CamLoc, CamRot);
+	OutOrigin = CamLoc;
+	OutDir    = CamRot.Vector().GetSafeNormal();
+	return true;
+}
+
+bool UShipLaserComponent::GetMuzzleTransform(const FName& Socket, FTransform& OutTM) const
+{
+	if (const UPrimitiveComponent* P = CachedRootPrim.Get())
+	{
+		if (P->DoesSocketExist(Socket))
+		{
+			OutTM = P->GetSocketTransform(Socket, ERelativeTransformSpace::RTS_World);
+			return true;
+		}
+	}
+
+	// фоллбек — из позиции/ротации актора
+	const AActor* Ow = GetOwner();
+	OutTM = FTransform(Ow ? Ow->GetActorRotation() : FRotator::ZeroRotator,
+	                   Ow ? Ow->GetActorLocation() : FVector::ZeroVector);
+	return false;
+}
+
+FVector UShipLaserComponent::DirFromMuzzle(const FVector& MuzzleLoc, const FVector& AimPoint) const
+{
+	return (AimPoint - MuzzleLoc).GetSafeNormal();
+}
+
+// === RPC: мгновенный шот с прицелом ===
+void UShipLaserComponent::ServerFireShot_Implementation(
+	const FVector_NetQuantize& Origin,
+	const FVector_NetQuantizeNormal& Dir)
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+
+	// ---- анти-скорострел (каденс сервера) ----
+	const double Now    = (double)W->GetTimeSeconds();
+	const double Period = 1.0 / FMath::Max(1.0f, FireRateHz);
+
+	// маленький допуск на сетевой джиттер
+	if ((Now - ServerLastShotTimeS) + 1e-6 < Period - (double)CadenceToleranceSec)
+	{
+		return; // рано — дропаем
+	}
+
+	// нормализуем входы
+	const FVector O = (FVector)Origin;
+	const FVector D = ((FVector)Dir).GetSafeNormal();
+
+	// ---- серверная валидация луча (анти-чит/ sanity) ----
+	if (!ValidateShot(O, D))
+	{
+		// по желанию можно не обновлять ServerLastShotTimeS,
+		// чтобы не позволять «ддосить» проверками. Оставим как есть.
+		return;
+	}
+
+	// ок — засчитываем шот по времени
+	ServerLastShotTimeS = Now;
+
+	// ---- считаем AimPoint ----
+	FVector AimPoint = O + D * MaxAimRangeUU;
+
+	if (bServerTraceAim)
+	{
+		FCollisionQueryParams Q(SCENE_QUERY_STAT(LaserAim), /*bTraceComplex*/true);
+		Q.AddIgnoredActor(GetOwner());
+
+		FHitResult Hit;
+		const bool bHit = W->LineTraceSingleByChannel(
+			Hit, O, O + D * MaxAimRangeUU, ECC_Visibility, Q);
+
+		if (bHit)
+		{
+			AimPoint = Hit.ImpactPoint;
+		}
+	}
+
+	// ---- спавн из выбранных стволов в AimPoint ----
+	ServerSpawn_FromAimPoint(AimPoint);
+}
+
+
+void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
+{
+	if (MuzzleSockets.Num() == 0) return;
+
+	auto FireFrom = [&](const FName& Sock)
+	{
+		FTransform TM; GetMuzzleTransform(Sock, TM);
+		const FVector Dir = Jitter(DirFromMuzzle(TM.GetLocation(), AimPoint), AimJitterDeg);
+		TM.SetRotation(RotFromDir(Dir).Quaternion());
+		Multicast_SpawnBolt(TM);
+	};
+
+	if (FirePattern == ELaserFirePattern::AllAtOnce)
+	{
+		for (const FName& S : MuzzleSockets) FireFrom(S);
+	}
+	else
+	{
+		static int32 NextIdx = 0;
+		if (NextIdx >= MuzzleSockets.Num()) NextIdx = 0;
+		FireFrom(MuzzleSockets[NextIdx++]);
+	}
+}
+
+// === Multicast: визуальный болт ===
+void UShipLaserComponent::Multicast_SpawnBolt_Implementation(const FTransform& SpawnTM)
+{
+	if (!GetOwner() || !BoltClass) return;
+
+	FActorSpawnParameters Params;
+	Params.Owner = GetOwner();
+	Params.Instigator = Cast<APawn>(GetOwner());
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	ALaserBolt* Bolt = GetWorld()->SpawnActor<ALaserBolt>(BoltClass, SpawnTM, Params);
+	if (!Bolt) return;
+
+	// Наследуем скорость носителя
+	FVector OwnerVel = FVector::ZeroVector;
+	if (const UPrimitiveComponent* P = CachedRootPrim.Get())
+		OwnerVel = P->GetComponentVelocity();
+	else if (const AActor* Ow = GetOwner())
+		OwnerVel = Ow->GetVelocity();
+
+	Bolt->SetBaseVelocity(OwnerVel * Bolt->InheritOwnerVelPct);
+}
+
+// === Старый режим (серверный таймер) — оставлен для совместимости ===
 void UShipLaserComponent::ServerStartFire_Implementation()
 {
 	if (bIsFiring) return;
@@ -101,161 +263,84 @@ void UShipLaserComponent::ServerStopFire_Implementation()
 	bIsFiring = false;
 
 	if (UWorld* W = GetWorld())
-	{
 		W->GetTimerManager().ClearTimer(FireTimer);
-	}
-}
-
-void UShipLaserComponent::ServerUpdateAim_Implementation(const FVector_NetQuantize& Origin, const FVector_NetQuantizeNormal& Dir)
-{
-	ServerAimOrigin = Origin;
-	ServerAimDir    = Dir;
-	bHaveServerAim  = true;
-}
-
-bool UShipLaserComponent::GetMuzzleTransform(const FName& Socket, FTransform& OutTM) const
-{
-	if (!GetOwner()) return false;
-
-	if (UPrimitiveComponent* P = CachedRootPrim.Get())
-	{
-		if (P->DoesSocketExist(Socket))
-		{
-			OutTM = P->GetSocketTransform(Socket, ERelativeTransformSpace::RTS_World);
-			return true;
-		}
-	}
-
-	OutTM = FTransform(GetOwner()->GetActorRotation(), GetOwner()->GetActorLocation());
-	return false;
-}
-
-
-// ==============================
-// ShipLaserComponent.cpp
-// ==============================
-
-bool UShipLaserComponent::ComputeAimRay_Client(FVector& OutOrigin, FVector& OutDir) const
-{
-	const APawn* Pawn = Cast<APawn>(GetOwner());
-	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
-	if (!Pawn || !PC || !Pawn->IsLocallyControlled()) return false;
-
-	if (const UShipCursorPilotComponent* CP = Pawn->FindComponentByClass<UShipCursorPilotComponent>())
-		if (CP->GetAimRay(OutOrigin, OutDir))
-			return true;
-
-	// фоллбек: центр вида
-	FVector CamLoc; FRotator CamRot;
-	PC->GetPlayerViewPoint(CamLoc, CamRot);
-	OutOrigin = CamLoc;
-	OutDir    = CamRot.Vector().GetSafeNormal();
-	return true;
-}
-
-
-bool UShipLaserComponent::ComputeAimPointOnServer(FVector& OutPoint) const
-{
-	if (!bHaveServerAim) return false;
-
-	const FVector Start = ServerAimOrigin;
-	const FVector End   = Start + ServerAimDir.GetSafeNormal() * MaxAimRangeUU;
-
-	FHitResult Hit;
-	FCollisionQueryParams Q(TEXT("LaserAim"), /*bTraceComplex=*/true, GetOwner());
-	Q.AddIgnoredActor(GetOwner());
-
-	if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Q) && Hit.bBlockingHit)
-	{
-		OutPoint = Hit.ImpactPoint;
-	}
-	else
-	{
-		OutPoint = End;
-	}
-	return true;
 }
 
 void UShipLaserComponent::Server_SpawnOnce()
 {
-	if (!GetOwner() || !GetOwner()->HasAuthority() || !BoltClass) return;
-	ResolveRootPrim();
-
-	const bool bAimEnabled = bUseReticleAim && bHaveServerAim;
-
-	// Единожды на тик находим реальную точку по лучу клиента
-	FVector AimPoint = FVector::ZeroVector;
-	if (bAimEnabled && bServerTraceAim)
+	// ИСПОЛЬЗУЕТ ПОСЛЕДНИЙ ПРИСЛАННЫЙ ЛУЧ (не моментальный).
+	if (!bUseReticleAim || !bHaveServerAim)
 	{
-		if (!ComputeAimPointOnServer(AimPoint))
-			return; // нет луча — не стреляем
+		// просто по forward каждого сокета
+		for (const FName& S : MuzzleSockets)
+		{
+			FTransform TM; GetMuzzleTransform(S, TM);
+			Multicast_SpawnBolt(TM);
+		}
+		return;
 	}
 
-	auto DirFromMuzzle = [&](const FVector& MuzzleLoc)
-	{
-		if (!bAimEnabled)     return ServerAimDir.GetSafeNormal(); // худший случай
-		if (!bServerTraceAim) return ServerAimDir.GetSafeNormal(); // параллельно лучу
-		return (AimPoint - MuzzleLoc).GetSafeNormal();             // сводим каждый ствол в одну точку
-	};
+	// иначе вычислим AimPoint по ServerAimOrigin/Dir (устаревшая схема)
+	FVector AimPoint = ServerAimOrigin + ServerAimDir * MaxAimRangeUU;
 
-	if (MuzzleSockets.Num() == 0) return;
-
-	auto FireFromSocket = [&](const FName& Sock)
+	if (bServerTraceAim)
 	{
-		FTransform TM; GetMuzzleTransform(Sock, TM);
-		const FVector Dir  = DirFromMuzzle(TM.GetLocation());
-		TM.SetRotation(MakeRotFromDir(JitterDir(Dir, AimJitterDeg)).Quaternion());
-		Multicast_SpawnBolt(TM);
-	};
-
-	if (FirePattern == ELaserFirePattern::AllAtOnce)
-		for (const FName& S : MuzzleSockets) FireFromSocket(S);
-	else
-	{
-		if (NextMuzzleIndex >= MuzzleSockets.Num()) NextMuzzleIndex = 0;
-		FireFromSocket(MuzzleSockets[NextMuzzleIndex++]);
+		FHitResult Hit;
+		FCollisionQueryParams Q(SCENE_QUERY_STAT(LaserAimLegacy), true, GetOwner());
+		if (GetWorld()->LineTraceSingleByChannel(Hit, ServerAimOrigin, AimPoint, ECC_Visibility, Q))
+			AimPoint = Hit.ImpactPoint;
 	}
+
+	ServerSpawn_FromAimPoint(AimPoint);
 }
-
-
-void UShipLaserComponent::Multicast_SpawnBolt_Implementation(const FTransform& SpawnTM)
+// --- server-side validation ---
+bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir) const
 {
-	if (!GetOwner() || !BoltClass) return;
+	const APawn* P = Cast<APawn>(GetOwner());
+	const AController* C = P ? P->GetController() : nullptr;
 
-	FActorSpawnParameters Params;
-	Params.Owner = GetOwner();
-	Params.Instigator = Cast<APawn>(GetOwner());
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	// 1) серверный viewpoint игрока
+	FVector ViewLoc = FVector::ZeroVector;
+	FRotator ViewRot = FRotator::ZeroRotator;
+	if (C)      { C->GetPlayerViewPoint(ViewLoc, ViewRot); }
+	else if (P) { ViewLoc = P->GetPawnViewLocation(); ViewRot = P->GetViewRotation(); }
 
-	ALaserBolt* Bolt = GetWorld()->SpawnActor<ALaserBolt>(BoltClass, SpawnTM, Params);
-	if (!Bolt) return;
+	// 2) расстояние Origin от камеры (защита от "телепортированного" Origin)
+	constexpr float MaxOriginDist = 150.f; // uu
+	if (FVector::DistSquared(Origin, ViewLoc) > FMath::Square(MaxOriginDist))
+		return false;
 
-	// Наследуем скорость стрелка (берём с корневого примитива, если есть)
-	FVector OwnerVel = FVector::ZeroVector;
-	if (const UPrimitiveComponent* P = CachedRootPrim.Get())
-		OwnerVel = P->GetComponentVelocity();
-	else if (const AActor* Ow = GetOwner())
-		OwnerVel = Ow->GetVelocity();
+	// 3) угол между направлением шота и «вперёд» камеры
+	const FVector ViewFwd = ViewRot.Vector();
+	constexpr float MaxAngleDeg = 45.f;
+	const float cosAngle = FVector::DotProduct(Dir.GetSafeNormal(), ViewFwd);
+	if (cosAngle < FMath::Cos(FMath::DegreesToRadians(MaxAngleDeg)))
+		return false;
 
-	Bolt->SetBaseVelocity(OwnerVel * Bolt->InheritOwnerVelPct);
-}
+	// 4) ограничение скорости поворота луча между шотами
+	// (простая защита от "warping" прицелом)
+	static thread_local double PrevTime = 0.0;
+	static thread_local FVector PrevDir = ViewFwd;
 
-void UShipLaserComponent::MaybeSendAimToServer(bool bForce)
-{
-	const APawn* Pawn = Cast<APawn>(GetOwner());
-	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
-	if (!Pawn || !PC || !Pawn->IsLocallyControlled()) return;
-
-	UWorld* W = GetWorld(); if (!W) return;
-
-	const double Now   = W->GetTimeSeconds();
-	const double MinDt = 1.0 / FMath::Max(5.f, AimUpdateHz);
-	if (!bForce && (Now - LastAimSendTimeS) < MinDt) return;
-
-	FVector O, D;
-	if (ComputeAimRay_Client(O, D))
+	const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+	if (PrevTime > 0.0)
 	{
-		LastAimSendTimeS = Now;
-		ServerUpdateAim(O, D);
+		const double dt = FMath::Max(1e-3, Now - PrevTime);
+		const double cosd = FMath::Clamp(FVector::DotProduct(PrevDir.GetSafeNormal(), Dir.GetSafeNormal()), -1.0, 1.0);
+		const double dAngDeg = FMath::RadiansToDegrees(FMath::Acos(cosd));
+
+		// щедро: до 1080°/с (3 оборота/сек) — пропускаем
+		constexpr double MaxDegPerSec = 1080.0;
+		if (dAngDeg / dt > MaxDegPerSec)
+		{
+			PrevTime = Now;
+			PrevDir  = Dir.GetSafeNormal();
+			return false;
+		}
 	}
+
+	PrevTime = Now;
+	PrevDir  = Dir.GetSafeNormal();
+	return true;
 }
+

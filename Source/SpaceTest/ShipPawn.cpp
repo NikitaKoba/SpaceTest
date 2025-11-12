@@ -55,10 +55,7 @@ AShipPawn::AShipPawn()
 	Camera->PrimaryComponentTick.bCanEverTick = false;
 	Laser = CreateDefaultSubobject<UShipLaserComponent>(TEXT("Laser")); // <—
 	// Базовые дефолты. Можно править в Details/Blueprint:
-	Laser->bUseReticleAim   = true;
-	Laser->bServerTraceAim  = true;      // <— вот это включи
-	Laser->FireRateHz       = 6.f;
-	Laser->AimUpdateHz      = 30.f;
+	Laser->bServerTraceAim     = true;     // пусть сервер всё равно трейсит точку (для попаданий)
 	Laser->MuzzleSockets    = { FName("Muzzle_L"), FName("Muzzle_R") }; // должны быть на ShipMesh
 	SpawnCollisionHandlingMethod = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 }

@@ -10,107 +10,108 @@ class UPrimitiveComponent;
 UENUM(BlueprintType)
 enum class ELaserFirePattern : uint8
 {
-	AllAtOnce,     // все сокеты одновременно
-	Alternating    // стволы по очереди
+	AllAtOnce,      // все сокеты одновременно
+	Alternating     // стволы по очереди
 };
 
 /**
- * Лазерные "болты": сервер спавнит трассеры, ориентируя их в точку прицеливания.
- * Клиент периодически шлёт на сервер луч (Origin+Dir) из центра экрана/ретикла.
+ * Лазер: спавнит болты в точку прицеливания.
+ * КЛЮЧЕВОЕ: при client-driven режиме каждый шот несёт свой Origin+Dir.
+ * Сервер валидирует КД и спавнит строго по новейшему лучу -> мгновенный отзыв.
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class SPACETEST_API UShipLaserComponent : public UActorComponent
 {
 	GENERATED_BODY()
-
 public:
 	UShipLaserComponent();
 
-	// === Reticle / Aim ===
-	/** Брать луч из центра экрана (совпадает с твоим ретиклом). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Reticle|Aim")
-	bool bUseViewportCenter = true;
-
-	/** На сервере искать реальную точку попадания трассингом по лучу. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Reticle|Aim")
-	bool bServerTraceAim = true;
-
-	/** Дальняя точка, если трассинг не попал ни во что. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Reticle|Aim")
-	float MaxAimRangeUU = 1000000.f; // без апострофов!
-
-	// === Параметры оружия ===
-	/** Класс визуального болта. BP-наследник от ALaserBolt тоже ок. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
-	TSubclassOf<ALaserBolt> BoltClass;
-
-	/** Сокеты на корневом меше корабля. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
-	TArray<FName> MuzzleSockets;
-
-	/** Базовая скорострельность, Гц. Для Alternating на каждый ствол будет FireRateHz/NumSockets. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser", meta=(ClampMin="1.0", UIMin="1.0", UIMax="30.0"))
-	float FireRateHz = 6.0f;
-
-	/** Паттерн огня. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
-	ELaserFirePattern FirePattern = ELaserFirePattern::Alternating;
-
-	/** Небольшой разброс (в градусах) для живости. 0 = идеально в точку. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
-	float AimJitterDeg = 0.0f;
-	 
-	/** Включить прицеливание по ретиклу/мыши (если false — стреляет по forward сокета). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
+	// === Aim / Reticle ===
+	/** Вести огонь по ретиклу/мыши. Если false — стреляет по forward сокета. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aim")
 	bool bUseReticleAim = true;
 
-	/** Частота отправки aim с клиента при удержании огня. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser", meta=(ClampMin="5.0", UIMin="5.0", UIMax="60.0"))
-	float AimUpdateHz = 30.f;
+	/** Трассить по присланному лучу на сервере (хиты/плэйн); иначе — дальняя точка. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aim")
+	bool bServerTraceAim = true;
 
-	/** Текущее состояние огня. */
-	UPROPERTY(BlueprintReadOnly, Category="Laser")
-	bool bIsFiring = false;
+	/** Дальность для прицельного луча (uu). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aim", meta=(ClampMin="1000"))
+	float MaxAimRangeUU = 1000000.f; // 10 км
 
-	UFUNCTION(BlueprintCallable, Category="Laser") void StartFire();
-	UFUNCTION(BlueprintCallable, Category="Laser") void StopFire();
+	/** Небольшой рандом для «живости», градусы. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aim", meta=(ClampMin="0", ClampMax="5"))
+	float AimJitterDeg = 0.0f;
+
+	// === Weapon ===
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
+	TSubclassOf<ALaserBolt> BoltClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
+	TArray<FName> MuzzleSockets;
+
+	/** Каденс (Гц). Для Alternating делится между стволами. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon", meta=(ClampMin="1.0", UIMin="1.0", UIMax="30.0"))
+	float FireRateHz = 6.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
+	ELaserFirePattern FirePattern = ELaserFirePattern::Alternating;
+
+	// === Схема шутинга ===
+	/** Клиент сам отсчитывает каденс и шлёт ServerFireShot(O,D) на каждый шот. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Net")
+	bool bClientDrivesCadence = true;
+
+	/** Допуск на рассинхрон каденса клиента, секунды (анти-скорострел). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Net", meta=(ClampMin="0.0", UIMin="0.0", UIMax="0.2"))
+	float CadenceToleranceSec = 0.05f;
+
+	// === API ===
+	UFUNCTION(BlueprintCallable) void StartFire();
+	UFUNCTION(BlueprintCallable) void StopFire();
+
+	// === UActorComponent ===
+	virtual void BeginPlay() override;
+	virtual void TickComponent(float Dt, ELevelTick, FActorComponentTickFunction*) override;
 
 protected:
-	virtual void BeginPlay() override;
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	// ----- Служебка -----
+	bool ComputeAimRay_Client(FVector& OutOrigin, FVector& OutDir) const; // берём из UShipCursorPilotComponent::GetAimRay
+	bool GetMuzzleTransform(const FName& Socket, FTransform& OutTM) const;
+	FVector DirFromMuzzle(const FVector& MuzzleLoc, const FVector& AimPoint) const;
 
-	UFUNCTION(Server, Reliable)   void ServerStartFire();
-	UFUNCTION(Server, Reliable)   void ServerStopFire();
-	UFUNCTION(Server, Unreliable) void ServerUpdateAim(const FVector_NetQuantize& Origin, const FVector_NetQuantizeNormal& Dir);
-	UFUNCTION(NetMulticast, Unreliable) void Multicast_SpawnBolt(const FTransform& SpawnTM);
+	// Спавн на сервере по точке AimPoint
+	void ServerSpawn_FromAimPoint(const FVector& AimPoint);
+
+	// --- RPC ---
+	UFUNCTION(Server, Reliable)
+	void ServerFireShot(const FVector_NetQuantize& Origin, const FVector_NetQuantizeNormal& Dir);
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_SpawnBolt(const FTransform& SpawnTM);
+
+	// Старый режим (серверный таймер) — оставлен на всякий случай
+	UFUNCTION(Server, Reliable) void ServerStartFire();
+	UFUNCTION(Server, Reliable) void ServerStopFire();
+	void Server_SpawnOnce(); // использует последний присланный луч (не рекомендую)
+	bool ValidateShot(const FVector& Origin, const FVector& Dir) const;
 
 private:
+	// Состояние
+	UPROPERTY(Transient) TWeakObjectPtr<UPrimitiveComponent> CachedRootPrim;
+
+	UPROPERTY(Transient) bool bLocalFireHeld = false;
+	UPROPERTY(Transient) bool bIsFiring = false;
+
+	// client-driven cadence
+	UPROPERTY(Transient) double ClientNextShotTimeS = 0.0;
+
+	// server validation
+	UPROPERTY(Transient) double ServerLastShotTimeS = -1e9;
+
+	// для режима «серверный таймер»
+	UPROPERTY(Transient) FVector ServerAimOrigin = FVector::ZeroVector;
+	UPROPERTY(Transient) FVector ServerAimDir    = FVector::ForwardVector;
+	UPROPERTY(Transient) bool   bHaveServerAim   = false;
 	FTimerHandle FireTimer;
-	TWeakObjectPtr<UPrimitiveComponent> CachedRootPrim;
-
-	// Актуальный aim на сервере
-	FVector ServerAimOrigin = FVector::ZeroVector;
-	FVector ServerAimDir    = FVector::ForwardVector;
-	bool    bHaveServerAim  = false;
-
-	// Локальное состояние владельца
-	bool   bLocalFireHeld   = false;
-	double LastAimSendTimeS = 0.0;
-
-	// Для Alternating
-	int32  NextMuzzleIndex  = 0;
-
-	// Helpers
-	bool ResolveRootPrim();
-	bool GetMuzzleTransform(const FName& Socket, FTransform& OutTM) const;
-	void Server_SpawnOnce();
-
-	// Клиент: построить луч прицеливания (центр экрана или OS-курсор)
-	bool ComputeAimRay_Client(FVector& OutOrigin, FVector& OutDir) const;
-
-	// Сервер: получить точку попадания вдоль ServerAimOrigin/Dir
-	bool ComputeAimPointOnServer(FVector& OutPoint) const;
-
-	// Отправка aim на сервер с ограничением частоты
-	void MaybeSendAimToServer(bool bForce=false);
 };

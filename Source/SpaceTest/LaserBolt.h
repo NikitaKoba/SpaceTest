@@ -63,7 +63,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Net")
 	bool bRepMove = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser|Move", meta=(ClampMin="0.0", ClampMax="2.0"))
-	float InheritOwnerVelPct = 1.0f;
+	float InheritOwnerVelPct = 0.0f; // ИСПРАВЛЕНО: 0 для прямых траекторий
 
 	// Установить базовую скорость мира, которую болт добавляет к своему полёту
 	UFUNCTION(BlueprintCallable, Category="Laser|Move")
