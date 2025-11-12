@@ -59,7 +59,7 @@ public:
 	/** Небольшой разброс (в градусах) для живости. 0 = идеально в точку. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
 	float AimJitterDeg = 0.0f;
-
+	 
 	/** Включить прицеливание по ретиклу/мыши (если false — стреляет по forward сокета). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser")
 	bool bUseReticleAim = true;

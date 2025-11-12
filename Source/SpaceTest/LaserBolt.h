@@ -62,7 +62,15 @@ public:
 	/** Реплицировать движение (по умолчанию true). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Net")
 	bool bRepMove = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser|Move", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float InheritOwnerVelPct = 1.0f;
 
+	// Установить базовую скорость мира, которую болт добавляет к своему полёту
+	UFUNCTION(BlueprintCallable, Category="Laser|Move")
+	void SetBaseVelocity(const FVector& V) { BaseVelW = V; }
+	// Базовая скорость мира, заданная при спавне
+	UPROPERTY()
+	FVector BaseVelW = FVector::ZeroVector;
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;

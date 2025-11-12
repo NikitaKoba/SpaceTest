@@ -57,11 +57,15 @@ void ALaserBolt::Tick(float DeltaSeconds)
 
 	if (SpeedUUps > 1.f)
 	{
-		const FVector Delta = GetActorForwardVector() * SpeedUUps * DeltaSeconds;
-		// Только визуал, телепортируем без sweep
+		const FVector vForward = GetActorForwardVector() * SpeedUUps;
+		const FVector vTotal   = vForward + BaseVelW;                // ← добавили скорость корабля
+		const FVector Delta    = vTotal * DeltaSeconds;
+
+		// Визуальный снаряд — телепортом без sweep
 		SetActorLocation(GetActorLocation() + Delta, false, nullptr, ETeleportType::None);
 	}
 }
+
 
 void ALaserBolt::ApplyShapeScale()
 {

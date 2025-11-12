@@ -227,7 +227,17 @@ void UShipLaserComponent::Multicast_SpawnBolt_Implementation(const FTransform& S
 	Params.Instigator = Cast<APawn>(GetOwner());
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	GetWorld()->SpawnActor<ALaserBolt>(BoltClass, SpawnTM, Params);
+	ALaserBolt* Bolt = GetWorld()->SpawnActor<ALaserBolt>(BoltClass, SpawnTM, Params);
+	if (!Bolt) return;
+
+	// Наследуем скорость стрелка (берём с корневого примитива, если есть)
+	FVector OwnerVel = FVector::ZeroVector;
+	if (const UPrimitiveComponent* P = CachedRootPrim.Get())
+		OwnerVel = P->GetComponentVelocity();
+	else if (const AActor* Ow = GetOwner())
+		OwnerVel = Ow->GetVelocity();
+
+	Bolt->SetBaseVelocity(OwnerVel * Bolt->InheritOwnerVelPct);
 }
 
 void UShipLaserComponent::MaybeSendAimToServer(bool bForce)
