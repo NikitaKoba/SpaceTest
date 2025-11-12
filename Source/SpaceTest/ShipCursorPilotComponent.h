@@ -51,11 +51,27 @@ public:
 	// Нормализованные смещения курсора [-1..1] в локальных экранных осях (X вправо, Y вверх)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Drive")
 	FVector2D NormalizedDeflect = FVector2D::ZeroVector;
+	// === Настройки HUD / курсора ===
+	UPROPERTY(EditAnywhere, Category="Cursor HUD|Reticle")
+	float ReticleGapPx = 64.f;              // было 40.f — внутренний зазор от центра до «скобок»
+	bool MakeAimRay(FVector& OutOrigin, FVector& OutDir) const;
+	UPROPERTY(EditAnywhere, Category="Cursor HUD|Reticle")
+	float ReticleBarLengthPx = 120.f;       // длина «скобок»
+	// --- Экранные размеры Canvas и последняя точка прицела в пикселях ---
+	UPROPERTY(Transient) int32 LastCanvasW = 0;
+	UPROPERTY(Transient) int32 LastCanvasH = 0;
+	UPROPERTY(Transient) FVector2D LastScreenAimPx = FVector2D::ZeroVector;
 
+
+	UPROPERTY(EditAnywhere, Category="Cursor HUD|Reticle")
+	float ReticleBarThicknessPx = 6.f;      // толщина «скобок»
+
+	bool GetAimRay(FVector& OutWorldOrigin, FVector& OutWorldDir) const;
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
 
 private:
 	// DebugDrawService

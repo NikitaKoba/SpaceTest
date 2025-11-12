@@ -53,7 +53,13 @@ AShipPawn::AShipPawn()
 	Camera->bUsePawnControlRotation = false;
 	Camera->FieldOfView = CameraFOV;
 	Camera->PrimaryComponentTick.bCanEverTick = false;
-
+	Laser = CreateDefaultSubobject<UShipLaserComponent>(TEXT("Laser")); // <—
+	// Базовые дефолты. Можно править в Details/Blueprint:
+	Laser->bUseReticleAim   = true;
+	Laser->bServerTraceAim  = true;      // <— вот это включи
+	Laser->FireRateHz       = 6.f;
+	Laser->AimUpdateHz      = 30.f;
+	Laser->MuzzleSockets    = { FName("Muzzle_L"), FName("Muzzle_R") }; // должны быть на ShipMesh
 	SpawnCollisionHandlingMethod = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 }
 
@@ -100,8 +106,18 @@ void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 	PlayerInputComponent->BindAxis(TEXT("Turn"),          this, &AShipPawn::Axis_MouseYaw);
 	PlayerInputComponent->BindAxis(TEXT("LookUp"),        this, &AShipPawn::Axis_MousePitch);
 	PlayerInputComponent->BindAction(TEXT("ToggleFlightAssist"), IE_Pressed, this, &AShipPawn::Action_ToggleFA);
+	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Pressed,  this, &AShipPawn::Action_FirePressed);
+	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Released, this, &AShipPawn::Action_FireReleased);
 }
-
+// --- Combat input ---
+void AShipPawn::Action_FirePressed()
+{
+	if (Laser) Laser->StartFire();   // компонент сам дернёт сервер и начнёт таймер спавна
+}
+void AShipPawn::Action_FireReleased()
+{
+	if (Laser) Laser->StopFire();
+}
 // === Camera ===
 void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {

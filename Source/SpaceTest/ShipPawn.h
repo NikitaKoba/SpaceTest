@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "ShipCursorPilotComponent.h"
+#include "ShipLaserComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Camera/CameraTypes.h"
 #include "ShipPawn.generated.h"
@@ -35,7 +36,13 @@ public:
 	// Components
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UStaticMeshComponent* ShipMesh;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat", meta=(AllowPrivateAccess="true"))
+	UShipLaserComponent* Laser; // <—
 
+	// ...
+	// Fire input
+	void Action_FirePressed();   // <—
+	void Action_FireReleased();  // <—
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UFlightComponent* Flight;
 

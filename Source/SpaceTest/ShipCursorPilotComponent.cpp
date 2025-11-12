@@ -13,6 +13,61 @@ UShipCursorPilotComponent::UShipCursorPilotComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup    = TG_PostPhysics; // после физики
 }
+// ShipCursorPilotComponent.cpp
+// ShipCursorPilotComponent.cpp
+// ==============================
+// ShipCursorPilotComponent.cpp
+// ==============================
+
+bool UShipCursorPilotComponent::MakeAimRay(FVector& OutOrigin, FVector& OutDir) const
+{
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (!Pawn || !PC || !Pawn->IsLocallyControlled()) return false;
+
+	int32 VW = 0, VH = 0;
+	PC->GetViewportSize(VW, VH);
+	if (VW <= 0 || VH <= 0) return false;
+
+	// Масштаб Canvas -> Viewport (DPI, windowed и т.п.)
+	const float scaleX = (LastCanvasW > 0) ? float(VW) / float(LastCanvasW) : 1.f;
+	const float scaleY = (LastCanvasH > 0) ? float(VH) / float(LastCanvasH) : 1.f;
+
+	const float sx = (LastCanvasW > 0) ? LastScreenAimPx.X * scaleX : (VW * 0.5f + CursorSm.X);
+	const float sy = (LastCanvasH > 0) ? LastScreenAimPx.Y * scaleY : (VH * 0.5f + CursorSm.Y);
+
+	FVector O, D;
+	if (!PC->DeprojectScreenPositionToWorld(sx, sy, O, D)) return false;
+
+	OutOrigin = O;
+	OutDir    = D.GetSafeNormal();
+	return true;
+}
+
+
+
+
+bool UShipCursorPilotComponent::GetAimRay(FVector& OutWorldOrigin, FVector& OutWorldDir) const
+{
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (!Pawn || !PC || !Pawn->IsLocallyControlled()) return false;
+
+	int32 VW=0, VH=0;
+	PC->GetViewportSize(VW, VH);
+
+	const FVector2D Center(VW * 0.5f, VH * 0.5f);
+	const FVector2D ScreenPos = Center + CursorSm;   // << твоя реальная HUD-точка
+
+	FVector O, D;
+	if (!PC->DeprojectScreenPositionToWorld(ScreenPos.X, ScreenPos.Y, O, D))
+		return false;
+
+	OutWorldOrigin = O;
+	OutWorldDir    = D.GetSafeNormal();
+	return true;
+}
+
 
 void UShipCursorPilotComponent::BeginPlay()
 {
@@ -84,113 +139,102 @@ void UShipCursorPilotComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	}
 }
 
+// ==============================
+// ShipCursorPilotComponent.cpp
+// ==============================
+
 void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* PC)
 {
-	if (!bDebugDraw || !Canvas || !GetOwner()) return;
+    if (!bDebugDraw || !Canvas || !GetOwner()) return;
 
-	APawn* Pawn = Cast<APawn>(GetOwner());
-	if (!Pawn || !Pawn->IsLocallyControlled()) return;
+    APawn* Pawn = Cast<APawn>(GetOwner());
+    if (!Pawn || !Pawn->IsLocallyControlled()) return;
 
-	const float SX = Canvas->ClipX;
-	const float SY = Canvas->ClipY;
-	const FVector2D C(SX * 0.5f, SY * 0.5f);
+    // 1) запомним реальные размеры Canvas и пиксельную точку прицела
+    LastCanvasW = int32(Canvas->ClipX);
+    LastCanvasH = int32(Canvas->ClipY);
 
-	// Позиция курсора/точки
-	const FVector2D P = C + CursorSm;
+    const FVector2D C(LastCanvasW * 0.5f, LastCanvasH * 0.5f);
+    const FVector2D P = C + CursorSm;       // та же формула, что и для отрисовки
+    LastScreenAimPx  = P;                    // сохраняем для MakeAimRay()
 
-	// Цвета
-	const FLinearColor ColMain (0.f, 0.9f, 1.f, 1.f);   // голубой
-	const FLinearColor ColFill (0.f, 1.f, 0.6f, 0.9f);  // бирюзовый
-	const FLinearColor ColHint (0.f, 0.4f, 0.6f, 0.75f);// тускло-голубой
+    // --- ниже просто отрисовка, можешь оставить как тебе нравится ---
 
-	// 1) Крест в центре + окружности: deadzone и max
-	DrawCrosshair(Canvas, C, 8.f, ColHint, 1.5f);
-	DrawCircle(Canvas, C, DeadzonePx, 64, ColHint, 1.f);
-	DrawCircle(Canvas, C, MaxDeflectPx, 64, ColHint, 1.f);
+    const FLinearColor ColMain (0.f, 0.9f, 1.f, 1.f);
+    const FLinearColor ColFill (0.f, 1.f, 0.6f, 0.9f);
+    const FLinearColor ColHint (0.f, 0.4f, 0.6f, 0.75f);
 
-	// 2) Линия от центра до курсора + хвостик мишени
-	{
-		FCanvasLineItem line(C, P);
-		line.SetColor(ColHint.ToFColor(true));
-		line.LineThickness = 1.5f;
-		Canvas->DrawItem(line);
+    // крест и окружности
+    DrawCrosshair(Canvas, C, 8.f, ColHint, 1.5f);
+    DrawCircle(Canvas,   C, DeadzonePx,   64, ColHint, 1.f);
+    DrawCircle(Canvas,   C, MaxDeflectPx, 64, ColHint, 1.f);
 
-		// маленький кружок в точке P
-		DrawCircle(Canvas, P, 6.f, 24, ColMain, 2.f);
-	}
+    // линия от центра к точке + маленький кружок в точке
+    {
+        FCanvasLineItem L(C, P);
+        L.SetColor(ColHint.ToFColor(true));
+        L.LineThickness = 1.5f;
+        Canvas->DrawItem(L);
+        DrawCircle(Canvas, P, 6.f, 24, ColMain, 2.f);
+    }
 
-	// 3) Вертикальные индикаторы (слева/справа): заполняются по |X|
-	{
-		const float margin = 40.f;       // расстояние от центра
-		const float H = 120.f;           // высота полосы
-		const float W = 6.f;             // толщина рамки
-		const float nx = FMath::Clamp(NormalizedDeflect.X, -1.f, 1.f);
-		const float fillX = FMath::Abs(nx);
+    // вертикальные индикаторы (|X|)
+    {
+        const float margin = ReticleGapPx;
+        const float H = ReticleBarLengthPx;
+        const float W = ReticleBarThicknessPx;
+        const float nx = FMath::Clamp(NormalizedDeflect.X, -1.f, 1.f);
+        const float fillX = FMath::Abs(nx);
 
-		const FVector2D LBarPos(C.X - margin - W, C.Y - H * 0.5f);
-		const FVector2D RBarPos(C.X + margin     , C.Y - H * 0.5f);
+        const FVector2D LBarPos(C.X - margin - W, C.Y - H * 0.5f);
+        const FVector2D RBarPos(C.X + margin     , C.Y - H * 0.5f);
 
-		auto DrawBarV = [&](const FVector2D& Pos, float Fill01, bool bFromBottom)
-		{
-			const float filled = H * FMath::Clamp(Fill01, 0.f, 1.f);
+        auto DrawBarV = [&](const FVector2D& Pos, float Fill01, bool bFromBottom)
+        {
+            const float filled = H * FMath::Clamp(Fill01, 0.f, 1.f);
+            FCanvasBoxItem box(Pos, FVector2D(W, H));
+            box.SetColor(FLinearColor(0.f,0.8f,1.f,0.5f).ToFColor(true));
+            Canvas->DrawItem(box);
 
-			// рамка
-			FCanvasBoxItem box(Pos, FVector2D(W, H));
-			box.SetColor( FLinearColor(0.f,0.8f,1.f,0.5f).ToFColor(true) );
-			Canvas->DrawItem(box);
+            const FVector2D P2 = bFromBottom ? FVector2D(Pos.X, Pos.Y + (H - filled)) : Pos;
+            FCanvasBoxItem fill(P2, FVector2D(W, filled));
+            fill.SetColor(ColFill.ToFColor(true));
+            Canvas->DrawItem(fill);
+        };
 
-			// заполнение
-			const FVector2D P2 = bFromBottom ? FVector2D(Pos.X, Pos.Y + (H - filled)) : Pos;
-			FCanvasBoxItem fill(P2, FVector2D(W, filled));
-			fill.SetColor( ColFill.ToFColor(true) );
-			Canvas->DrawItem(fill);
-		};
+        DrawBarV(LBarPos, fillX, /*bFromBottom=*/true);
+        DrawBarV(RBarPos, fillX, /*bFromBottom=*/false);
+    }
 
-		DrawBarV(LBarPos, fillX, /*bFromBottom=*/true);
-		DrawBarV(RBarPos, fillX, /*bFromBottom=*/false);
-	}
+    // горизонтальные индикаторы (|Y|)
+    {
+        const float margin = ReticleGapPx;
+        const float H = ReticleBarLengthPx;
+        const float W = ReticleBarThicknessPx;
+        const float ny = FMath::Clamp(NormalizedDeflect.Y, -1.f, 1.f);
+        const float fillY = FMath::Abs(ny);
 
-	// 4) Горизонтальные индикаторы (сверху/снизу): заполняются по |Y|
-	{
-		const float margin = 40.f;
-		const float H = 120.f;  // длина
-		const float W = 6.f;    // толщина
-		const float ny = FMath::Clamp(NormalizedDeflect.Y, -1.f, 1.f);
-		const float fillY = FMath::Abs(ny);
+        const FVector2D TBarPos(C.X - H * 0.5f, C.Y - margin - W);
+        const FVector2D BBarPos(C.X - H * 0.5f, C.Y + margin    );
 
-		const FVector2D TBarPos(C.X - H * 0.5f, C.Y - margin - W);
-		const FVector2D BBarPos(C.X - H * 0.5f, C.Y + margin    );
+        auto DrawBarH = [&](const FVector2D& Pos, float Fill01, bool bFromRight)
+        {
+            const float filled = H * FMath::Clamp(Fill01, 0.f, 1.f);
+            FCanvasBoxItem box(Pos, FVector2D(H, W));
+            box.SetColor(FLinearColor(0.f,0.8f,1.f,0.5f).ToFColor(true));
+            Canvas->DrawItem(box);
 
-		auto DrawBarH = [&](const FVector2D& Pos, float Fill01, bool bFromRight)
-		{
-			const float filled = H * FMath::Clamp(Fill01, 0.f, 1.f);
+            const FVector2D P2 = bFromRight ? FVector2D(Pos.X + (H - filled), Pos.Y) : Pos;
+            FCanvasBoxItem fill(P2, FVector2D(filled, W));
+            fill.SetColor(ColFill.ToFColor(true));
+            Canvas->DrawItem(fill);
+        };
 
-			FCanvasBoxItem box(Pos, FVector2D(H, W));
-			box.SetColor( FLinearColor(0.f,0.8f,1.f,0.5f).ToFColor(true) );
-			Canvas->DrawItem(box);
-
-			const FVector2D P2 = bFromRight ? FVector2D(Pos.X + (H - filled), Pos.Y) : Pos;
-			FCanvasBoxItem fill(P2, FVector2D(filled, W));
-			fill.SetColor( ColFill.ToFColor(true) );
-			Canvas->DrawItem(fill);
-		};
-
-		DrawBarH(TBarPos, fillY, /*bFromRight=*/true);
-		DrawBarH(BBarPos, fillY, /*bFromRight=*/false);
-	}
-
-	// 5) Маленькая “хвостовая” черта у точки — направление движения по экрану (визуальный штрих)
-	{
-		const FVector2D dir = (CursorSm.IsNearlyZero()) ? FVector2D(1.f,0.f) : CursorSm.GetSafeNormal();
-		const FVector2D tailA = P - dir * 14.f;
-		const FVector2D tailB = P + dir * 6.f;
-
-		FCanvasLineItem head(tailA, tailB);
-		head.SetColor(ColMain.ToFColor(true));
-		head.LineThickness = 2.f;
-		Canvas->DrawItem(head);
-	}
+        DrawBarH(TBarPos, fillY, /*bFromRight=*/true);
+        DrawBarH(BBarPos, fillY, /*bFromRight=*/false);
+    }
 }
+
 
 void UShipCursorPilotComponent::DrawCircle(UCanvas* Canvas, const FVector2D& Center, float Radius, int32 Segments, const FLinearColor& Color, float Thickness) const
 {
