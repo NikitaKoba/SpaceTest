@@ -38,6 +38,9 @@ public:
 	UStaticMeshComponent* ShipMesh;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat", meta=(AllowPrivateAccess="true"))
 	UShipLaserComponent* Laser; // <—
+	// ShipPawn.h
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AI") class UShipAIPilotComponent* BotPilot = nullptr;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AI") class UShipBrainComponent*  BotBrain = nullptr;
 
 	// ...
 	// Fire input

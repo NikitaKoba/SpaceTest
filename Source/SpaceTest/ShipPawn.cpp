@@ -1,6 +1,8 @@
 // ShipPawn.cpp
 #include "ShipPawn.h"
 #include "FlightComponent.h"
+#include "ShipAIPilotComponent.h"
+#include "ShipBrainComponent.h"
 #include "ShipNetComponent.h"
 #include "ShipCursorPilotComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -58,6 +60,7 @@ AShipPawn::AShipPawn()
 	Laser->bServerTraceAim     = true;     // пусть сервер всё равно трейсит точку (для попаданий)
 	Laser->MuzzleSockets    = { FName("Muzzle_L"), FName("Muzzle_R") }; // должны быть на ShipMesh
 	SpawnCollisionHandlingMethod = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	
 }
 
 
