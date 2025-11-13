@@ -472,23 +472,42 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
         uFwd *= fAlign;
     }
 
-    // ---------- 9. Анти-таран ----------
-    if (Target && DistToAimM > 1.f)
+    // ---------- 9. Анти-таран + ограничение ЗАДНЕГО ХОДА ----------
     {
+        const bool bHaveTarget = (Target != nullptr);
+
+        // Радиус, внутри которого начинаем думать о торможении/таране
         const float NoRamRadiusM = FMath::Max(10.f, MinAppro * 0.9f);
-        if (DistToAimM < NoRamRadiusM)
+        const float BrakeRegionM = NoRamRadiusM * 1.8f; // чуть дальше, чем зона тарана
+
+        // БАЗОВО: далеко от цели — НИКАКОГО реверса, только вперёд / отпуск газа.
+        if (!bHaveTarget || DistToAimM > BrakeRegionM)
         {
-            const float Penetration = (NoRamRadiusM - DistToAimM) / NoRamRadiusM;
-            const float Brake       = -FMath::Lerp(0.2f, 1.0f, Penetration);
-            uFwd = FMath::Min(uFwd, Brake);
+            if (uFwd < 0.f)
+                uFwd = 0.f;
+        }
+        else
+        {
+            // Мы относительно близко → отрицательный uFwd = ТОРМОЖЕНИЕ, а не "лететь задом"
+            const float MaxBrake = 0.25f; // мягкий предел назад (раньше было до -0.6)
+
+            if (uFwd < -MaxBrake)
+                uFwd = -MaxBrake;
+
+            // Если совсем подлезли — принудительное тормозилово
+            if (DistToAimM < NoRamRadiusM)
+            {
+                const float Penetration = (NoRamRadiusM - DistToAimM) / NoRamRadiusM;   // 0..1
+                const float ExtraBrake  = FMath::Lerp(0.0f, MaxBrake, Penetration);     // 0..MaxBrake
+                uFwd = -ExtraBrake;  // чистый мягкий тормоз
+            }
         }
     }
 
-    const float MaxReverse = 0.6f;
-    uFwd = FMath::Clamp(uFwd, -MaxReverse, 1.f);
-
+    // Финальный кламп
     uRight = FMath::Clamp(uRight, -1.f, 1.f);
     uUp    = FMath::Clamp(uUp,    -1.f, 1.f);
+    uFwd   = FMath::Clamp(uFwd,   -1.f, 1.f);
 
     // ---------- 10. Сглаживание поступательных + yaw/pitch ----------
     {
@@ -507,23 +526,19 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
         if (FMath::Abs(SmoothedMousePitch) < 0.001f) SmoothedMousePitch = 0.f;
     }
 
-    // ---------- 11. КРЕН: PD по желаемому углу ----------
+    // ---------- 11. КРЕН (как в прошлой версии, PD по углу) ----------
     float rollAxis = 0.f;
-
     {
-        // Текущий угол крена: Up против WorldUp, проекция на ось Fwd
         const FVector WorldUp = FVector::UpVector;
-        const float rollSin   = FVector::DotProduct(WorldUp, Right); // ~sin(roll)
-        const float rollCos   = FVector::DotProduct(WorldUp, Up);    // ~cos(roll)
+        const float rollSin   = FVector::DotProduct(WorldUp, Right);
+        const float rollCos   = FVector::DotProduct(WorldUp, Up);
         const float rollAngleRad = FMath::Atan2(rollSin, rollCos);
         const float rollAngleDeg = FMath::RadiansToDegrees(rollAngleRad);
 
-        // Желаемый угол крена от yaw/strafe
-        const float BankFromYawDeg    = SmoothedMouseYaw    * 45.f; // при полном yaw ~45°
-        const float BankFromStrafeDeg = SmoothedThrustRight * 30.f; // при полном strafe ~30°
+        const float BankFromYawDeg    = SmoothedMouseYaw    * 45.f;
+        const float BankFromStrafeDeg = SmoothedThrustRight * 30.f;
         float desiredBankDeg          = BankFromYawDeg + BankFromStrafeDeg;
 
-        // Если почти не маневрируем — хотим ровный горизонт
         if (FMath::Abs(SmoothedMouseYaw) < 0.05f &&
             FMath::Abs(SmoothedThrustRight) < 0.05f)
         {
@@ -534,22 +549,18 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
 
         const float rollErrDeg = desiredBankDeg - rollAngleDeg;
 
-        const float KpRoll = 1.f / 35.f;   // 35° ошибки → ось ≈ 1
-        const float KdRoll = 1.f / 220.f;  // демпфирование по ωx
+        const float KpRoll = 1.f / 35.f;
+        const float KdRoll = 1.f / 220.f;
 
         rollAxis =
             KpRoll * rollErrDeg
           - KdRoll * angVelDegLocal.X;
 
-        // небольшая мёртвая зона, чтобы не дрожал
         if (FMath::Abs(rollErrDeg) < 1.5f && FMath::Abs(angVelDegLocal.X) < 2.f)
-        {
             rollAxis = 0.f;
-        }
 
         rollAxis = FMath::Clamp(rollAxis, -1.f, 1.f);
 
-        // сглаживание крена
         const float tauRoll = 0.25f;
         const float aRoll   = 1.f - FMath::Exp(-Dt / FMath::Max(0.001f, tauRoll));
         SmoothedRollAxis    = FMath::Lerp(SmoothedRollAxis, rollAxis, aRoll);
@@ -575,23 +586,19 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
         if (UWorld* W = GetWorld(); W && W->GetNetMode() != NM_DedicatedServer)
         {
             DrawDebugSphere(W, DesiredPos, 30.f, 12, FColor::Green, false, 0.f, 0, 1.5f);
-            DrawDebugLine(W, Loc, DesiredPos, FColor::Green, false, 0.f, 0, 1.f);
+            DrawDebugLine (W, Loc, DesiredPos, FColor::Green, false, 0.f, 0, 1.f);
             
             if (bHasAim && DistToAnchorM <= AnchorThresholdM)
             {
-                DrawDebugLine(W, Loc, AimPoint, FColor::Red, false, 0.f, 0, 1.5f);
+                DrawDebugLine  (W, Loc, AimPoint, FColor::Red, false, 0.f, 0, 1.5f);
                 DrawDebugSphere(W, AimPoint, 28.f, 16, FColor::Red, false, 0.f, 0, 1.5f);
             }
             
             DrawDebugLine(W, Loc, PointingTarget, FColor::Cyan, false, 0.f, 0, 2.f);
             
-            DrawDebugDirectionalArrow(W, Loc, Loc + Fwd   * 300.f, 40.f, FColor::Red,    false, 0.f, 0, 2.f);
-            DrawDebugDirectionalArrow(W, Loc, Loc + Right * 200.f, 40.f, FColor::Green,  false, 0.f, 0, 2.f);
-            DrawDebugDirectionalArrow(W, Loc, Loc + Up    * 150.f, 40.f, FColor::Blue,   false, 0.f, 0, 2.f);
+            DrawDebugDirectionalArrow(W, Loc, Loc + Fwd   * 300.f, 40.f, FColor::Red,   false, 0.f, 0, 2.f);
+            DrawDebugDirectionalArrow(W, Loc, Loc + Right * 200.f, 40.f, FColor::Green, false, 0.f, 0, 2.f);
+            DrawDebugDirectionalArrow(W, Loc, Loc + Up    * 150.f, 40.f, FColor::Blue,  false, 0.f, 0, 2.f);
         }
     }
 }
-
-
-
-
