@@ -248,8 +248,13 @@ void UFlightComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, 
 
 	// желаемые поступательные скорости (м/с)
 	InputSnap.VxDes_Mps = ThrustForward_Smooth * Longi.VxMax_Mps;
-	InputSnap.VrDes_Mps = ThrustRight_Smooth   * Lateral.VrMax_Mps;
-	InputSnap.VuDes_Mps = ThrustUp_Smooth      * Vertical.VuMax_Mps;
+
+	// коэффициенты боковой / вертикальной скорости
+	constexpr float LateralScale  = 0.65f;   // A/D ≈ в 3 раза слабее
+	constexpr float VerticalScale = 0.65f;   // Space/Ctrl ≈ в 3 раза слабее
+
+	InputSnap.VrDes_Mps = ThrustRight_Smooth * Lateral.VrMax_Mps  * LateralScale;
+	InputSnap.VuDes_Mps = ThrustUp_Smooth    * Vertical.VuMax_Mps * VerticalScale;
 
 	// желаемая угловая скорость крена (рад/с)
 	const float Wr_deg = FMath::Clamp(RollAxis_Smooth * 220.f, -220.f, +220.f);

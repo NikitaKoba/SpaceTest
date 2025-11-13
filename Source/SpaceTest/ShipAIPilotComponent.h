@@ -47,7 +47,7 @@ public:
 
 	/** Главный вызов – «виртуальная мышь» + страф/тяга к якорю. Зовёт мозг. */
 	void ApplyDirective(float Dt, const FShipDirective& D);
-
+	
 protected:
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -86,6 +86,7 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Aim", meta=(AllowPrivateAccess="true"))
 	bool bBoostTurnWhenTargetBehind = true;
 
+	float SmoothedRollAxis = 0.f;  // <-- ДОБАВЬ ЭТУ СТРОКУ
 	// === Линейная центровка к follow-якорю (strafe/up/forward) ===
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Move", meta=(AllowPrivateAccess="true"))
 	float LateralDeadzoneM  = 1.5f;

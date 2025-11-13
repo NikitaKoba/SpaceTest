@@ -282,7 +282,7 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
 
     const bool bHasAim = !AimPoint.IsNearlyZero();
 
-    // Если вообще нечего делать — отпускаем всё
+    // Ничего делать — отпускаем всё
     if (!bHasAim && !D.FollowAnchorW.IsSet() && !Target)
     {
         Flight->SetStrafeRight(0.f);
@@ -290,18 +290,19 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
         Flight->SetThrustForward(0.f);
         Flight->SetRollAxis(0.f);
         ResetTransientState();
-        AimHoldTimerS  = 0.f;
-        bAimHoldActive = false;
-        PrevRollAxis   = 0.f;
+        AimHoldTimerS    = 0.f;
+        bAimHoldActive   = false;
+        PrevRollAxis     = 0.f;
+        SmoothedRollAxis = 0.f;
         return;
     }
 
-    // ---------- 2. Базис корабля (никаких рамок) ----------
+    // ---------- 2. Базис корабля ----------
     const FTransform ShipTM = Ow->GetActorTransform();
     const FVector   Loc     = ShipTM.GetLocation();
-    const FVector   Fwd     = ShipTM.GetUnitAxis(EAxis::X); // вперёд
-    const FVector   Right   = ShipTM.GetUnitAxis(EAxis::Y); // вправо
-    const FVector   Up      = ShipTM.GetUnitAxis(EAxis::Z); // вверх
+    const FVector   Fwd     = ShipTM.GetUnitAxis(EAxis::X);
+    const FVector   Right   = ShipTM.GetUnitAxis(EAxis::Y);
+    const FVector   Up      = ShipTM.GetUnitAxis(EAxis::Z);
 
     // Физика
     UPrimitiveComponent* SelfPrim = GetSimPrim(Ow);
@@ -311,7 +312,7 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     if (SelfPrim)
     {
         const FVector wWorld = SelfPrim->GetPhysicsAngularVelocityInRadians();
-        angVelRadLocal = ShipTM.InverseTransformVectorNoScale(wWorld);
+        angVelRadLocal       = ShipTM.InverseTransformVectorNoScale(wWorld);
     }
     const FVector angVelDegLocal(
         FMath::RadiansToDegrees(angVelRadLocal.X),
@@ -320,10 +321,10 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
 
     // ---------- 3. Геометрия цели ----------
     const UPrimitiveComponent* TgtPrim = Target ? GetSimPrim(Target) : nullptr;
-    const FVector vTgtW = TgtPrim ? TgtPrim->GetComponentVelocity() : FVector::ZeroVector;
-    const FVector TgtFwd = Target ? Target->GetActorForwardVector() : FVector::ForwardVector;
+    const FVector vTgtW   = TgtPrim ? TgtPrim->GetComponentVelocity() : FVector::ZeroVector;
+    const FVector TgtFwd  = Target ? Target->GetActorForwardVector() : FVector::ForwardVector;
 
-    FVector AimDir = Fwd;
+    FVector AimDir     = Fwd;
     float   DistToAimM = 0.f;
     if (bHasAim)
     {
@@ -333,48 +334,7 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
             AimDir = ToAim.GetSafeNormal();
     }
 
-    // ---------- 4. Поворот носа (PD) ----------
-    float yawErrRad   = 0.f;
-    float pitchErrRad = 0.f;
-    if (bHasAim)
-    {
-        yawErrRad   = SignedAngleAroundAxisRad(Fwd, AimDir, Up);
-        pitchErrRad = SignedAngleAroundAxisRad(Fwd, AimDir, Right);
-    }
-
-    const float yawErrDeg   = FMath::RadiansToDegrees(yawErrRad);
-    const float pitchErrDeg = FMath::RadiansToDegrees(pitchErrRad);
-
-    // Kp: при ~60° ошибке даём полный поворот
-    const float MaxYawForFullDeg   = 60.f;
-    const float MaxPitchForFullDeg = 45.f;
-    const float KpYaw   = 1.f / MaxYawForFullDeg;
-    const float KpPitch = 1.f / MaxPitchForFullDeg;
-
-    // Kd: демпфер по угловой скорости
-    const float KdYaw   = 1.f / 180.f; // 180°/с -> -1
-    const float KdPitch = 1.f / 180.f;
-
-    float yawCmd =
-        KpYaw   * yawErrDeg
-      - KdYaw   * angVelDegLocal.Z; // Z ~ yaw вокруг Up
-
-    float pitchCmd =
-        -KpPitch * pitchErrDeg      // минус, чтобы "цель выше" -> pitch up
-      - KdPitch * angVelDegLocal.Y; // Y ~ pitch вокруг Right
-
-    yawCmd   = FMath::Clamp(yawCmd,   -1.f, 1.f);
-    pitchCmd = FMath::Clamp(pitchCmd, -1.f, 1.f);
-
-    // Превращаем в «виртуальную мышь»
-    float dYaw   = yawCmd   * MaxMouseDeltaPerFrame;
-    float dPitch = pitchCmd * MaxMouseDeltaPerFrame;
-
-    // Маленькая мёртвая зона — чтобы не дрожал на нуле
-    if (FMath::Abs(yawErrDeg) < YawDeadzoneDeg)     dYaw   = 0.f;
-    if (FMath::Abs(pitchErrDeg) < PitchDeadzoneDeg) dPitch = 0.f;
-
-    // ---------- 5. Follow-anchor (точка, где бот хочет быть) ----------
+    // ---------- 4. Follow-anchor ----------
     const float BackMeters = D.FollowBehindMetersOverride.IsSet() ? D.FollowBehindMetersOverride.GetValue() : FollowBehindMeters;
     const float LeadSec    = D.FollowLeadSecondsOverride.IsSet()  ? D.FollowLeadSecondsOverride.GetValue()  : FollowLeadSeconds;
     const float MinAppro   = D.MinApproachMetersOverride.IsSet()  ? D.MinApproachMetersOverride.GetValue()  : MinApproachMeters;
@@ -389,15 +349,13 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     {
         const FVector TgtFuture = Target->GetActorLocation() + vTgtW * LeadSec;
         const float   Back      = FMath::Max(BackMeters, MinAppro);
-        DesiredPos             = TgtFuture - TgtFwd * (Back * 100.f); // м → см
+        DesiredPos              = TgtFuture - TgtFwd * (Back * 100.f);
     }
 
-    const FVector ToDesiredW = DesiredPos - Loc;
-    const float   DistToAnchorM = ToDesiredW.Size() / 100.f;
-
-    // Локальные смещения и относительные скорости в базисе корабля
-    const FVector ToDesiredLocal = ShipTM.InverseTransformVectorNoScale(ToDesiredW); // см
-    const FVector vRelLocalUU    = ShipTM.InverseTransformVectorNoScale(vTgtW - vSelfW); // uu/s
+    const FVector ToDesiredW     = DesiredPos - Loc;
+    const float   DistToAnchorM  = ToDesiredW.Size() / 100.f;
+    const FVector ToDesiredLocal = ShipTM.InverseTransformVectorNoScale(ToDesiredW);
+    const FVector vRelLocalUU    = ShipTM.InverseTransformVectorNoScale(vTgtW - vSelfW);
 
     const float offFwdM   = ToDesiredLocal.X / 100.f;
     const float offRightM = ToDesiredLocal.Y / 100.f;
@@ -407,8 +365,61 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     const float relRightMS = vRelLocalUU.Y / 100.f;
     const float relUpMS    = vRelLocalUU.Z / 100.f;
 
-    // ---------- 6. Линейная PD-центровка ----------
-    // Kp берём из твоих настроек, Kd фиксированные
+    // ---------- 5. ВЫБОР ТОЧКИ ДЛЯ НАВЕДЕНИЯ НОСА ----------
+    FVector PointingTarget = DesiredPos;
+    const float AnchorThresholdM = 25.f;
+    
+    if (DistToAnchorM > AnchorThresholdM)
+    {
+        PointingTarget = DesiredPos; // далеко → летим к anchor
+    }
+    else if (bHasAim)
+    {
+        PointingTarget = AimPoint;   // близко и есть цель → целимся
+    }
+    else
+    {
+        PointingTarget = DesiredPos; // близко, цели нет → держим anchor
+    }
+
+    // ---------- 6. Поворот носа (PD) ----------
+    float yawErrRad   = 0.f;
+    float pitchErrRad = 0.f;
+
+    const FVector ToTarget = PointingTarget - Loc;
+    FVector TargetDir = Fwd;
+    if (!ToTarget.IsNearlyZero())
+    {
+        TargetDir = ToTarget.GetSafeNormal();
+        yawErrRad   = SignedAngleAroundAxisRad(Fwd, TargetDir, Up);
+        pitchErrRad = SignedAngleAroundAxisRad(Fwd, TargetDir, Right);
+    }
+
+    const float yawErrDeg   = FMath::RadiansToDegrees(yawErrRad);
+    const float pitchErrDeg = FMath::RadiansToDegrees(pitchErrRad);
+
+    const float AimFullTurnYawDeg   = 30.f;
+    const float AimFullTurnPitchDeg = 25.f;
+    const float KpYaw   = 1.f / AimFullTurnYawDeg;
+    const float KpPitch = 1.f / AimFullTurnPitchDeg;
+    const float KdYaw   = 1.f / 180.f;
+    const float KdPitch = 1.f / 180.f;
+
+    float yawAxis =
+        KpYaw   * yawErrDeg
+      - KdYaw   * angVelDegLocal.Z;
+
+    float pitchAxis =
+        -KpPitch * pitchErrDeg
+      - KdPitch * angVelDegLocal.Y;
+
+    if (FMath::Abs(yawErrDeg)   < YawDeadzoneDeg)   yawAxis   = 0.f;
+    if (FMath::Abs(pitchErrDeg) < PitchDeadzoneDeg) pitchAxis = 0.f;
+
+    yawAxis   = FMath::Clamp(yawAxis,   -1.f, 1.f);
+    pitchAxis = FMath::Clamp(pitchAxis, -1.f, 1.f);
+
+    // ---------- 7. Линейный PD (follow) ----------
     const float KdLat_InputPerMS = 0.20f;
     const float KdFwd_InputPerMS = 0.25f;
 
@@ -428,37 +439,65 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     uUp    = FMath::Clamp(uUp,    -1.f, 1.f);
     uFwd   = FMath::Clamp(uFwd,   -1.f, 1.f);
 
-    // Чуть завязать скорость на ориентацию к anchor,
-    // но НЕ обнулять — чтобы не зависал.
-    FVector dirToAnchor = ToDesiredW.IsNearlyZero() ? Fwd : ToDesiredW.GetSafeNormal();
-    const float alignToAnchor = FMath::Clamp(FVector::DotProduct(Fwd, dirToAnchor), -1.f, 1.f);
-    const float fAlign        = FMath::Clamp(0.2f + 0.8f * FMath::Max(alignToAnchor, 0.f), 0.2f, 1.f);
-    uFwd *= fAlign;
+    // ---------- 8. forward >> strafe ----------
+    if (DistToAnchorM > 10.f)
+    {
+        const FVector dirToAnchor = ToDesiredW.GetSafeNormal();
+        const float forwardAlign  = FVector::DotProduct(Fwd, dirToAnchor);
+        
+        if (forwardAlign > 0.3f)
+        {
+            const float strafeReduce = 0.2f;
+            const float forwardBoost = 1.5f;
+            
+            uRight *= strafeReduce;
+            uUp    *= strafeReduce;
+            uFwd   *= forwardBoost;
+        }
+    }
 
-    // ---------- 7. Анти-таран около цели ----------
+    const float FollowGainFwd   = 1.0f;
+    const float FollowGainRight = 0.3f;
+    const float FollowGainUp    = 0.3f;
+
+    uFwd   *= FollowGainFwd;
+    uRight *= FollowGainRight;
+    uUp    *= FollowGainUp;
+
+    if (!ToDesiredW.IsNearlyZero())
+    {
+        const FVector dirToAnchor = ToDesiredW.GetSafeNormal();
+        const float alignToAnchor = FMath::Clamp(FVector::DotProduct(Fwd, dirToAnchor), -1.f, 1.f);
+        const float fAlign        = FMath::Clamp(0.3f + 0.7f * FMath::Max(alignToAnchor, 0.f), 0.3f, 1.f);
+        uFwd *= fAlign;
+    }
+
+    // ---------- 9. Анти-таран ----------
     if (Target && DistToAimM > 1.f)
     {
         const float NoRamRadiusM = FMath::Max(10.f, MinAppro * 0.9f);
         if (DistToAimM < NoRamRadiusM)
         {
-            const float Penetration = (NoRamRadiusM - DistToAimM) / NoRamRadiusM; // 0..1
+            const float Penetration = (NoRamRadiusM - DistToAimM) / NoRamRadiusM;
             const float Brake       = -FMath::Lerp(0.2f, 1.0f, Penetration);
-            uFwd = FMath::Min(uFwd, Brake); // начинаем сдавать назад
+            uFwd = FMath::Min(uFwd, Brake);
         }
     }
 
-    // Ограничиваем задний ход
     const float MaxReverse = 0.6f;
     uFwd = FMath::Clamp(uFwd, -MaxReverse, 1.f);
 
-    // ---------- 8. Сглаживание ----------
-    {
-        const float tauMouse = 0.03f;
-        const float aMouse   = 1.f - FMath::Exp(-Dt / FMath::Max(0.001f, tauMouse));
-        SmoothedMouseYaw     = FMath::Lerp(SmoothedMouseYaw,   dYaw,   aMouse);
-        SmoothedMousePitch   = FMath::Lerp(SmoothedMousePitch, dPitch, aMouse);
+    uRight = FMath::Clamp(uRight, -1.f, 1.f);
+    uUp    = FMath::Clamp(uUp,    -1.f, 1.f);
 
-        const float tauThrust = 0.10f;
+    // ---------- 10. Сглаживание поступательных + yaw/pitch ----------
+    {
+        const float tauYaw   = 0.20f;
+        const float aYaw     = 1.f - FMath::Exp(-Dt / FMath::Max(0.001f, tauYaw));
+        SmoothedMouseYaw     = FMath::Lerp(SmoothedMouseYaw,   yawAxis,   aYaw);
+        SmoothedMousePitch   = FMath::Lerp(SmoothedMousePitch, pitchAxis, aYaw);
+
+        const float tauThrust = 0.18f;
         const float aThrust   = 1.f - FMath::Exp(-Dt / FMath::Max(0.001f, tauThrust));
         SmoothedThrustForward = FMath::Lerp(SmoothedThrustForward, uFwd,   aThrust);
         SmoothedThrustRight   = FMath::Lerp(SmoothedThrustRight,   uRight, aThrust);
@@ -468,8 +507,55 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
         if (FMath::Abs(SmoothedMousePitch) < 0.001f) SmoothedMousePitch = 0.f;
     }
 
-    // ---------- 9. Отправляем в FlightComponent ----------
-    // Здесь БЕЗ всякого ремапа: предполагаем, что Frame уже настроен под Actor.
+    // ---------- 11. КРЕН: PD по желаемому углу ----------
+    float rollAxis = 0.f;
+
+    {
+        // Текущий угол крена: Up против WorldUp, проекция на ось Fwd
+        const FVector WorldUp = FVector::UpVector;
+        const float rollSin   = FVector::DotProduct(WorldUp, Right); // ~sin(roll)
+        const float rollCos   = FVector::DotProduct(WorldUp, Up);    // ~cos(roll)
+        const float rollAngleRad = FMath::Atan2(rollSin, rollCos);
+        const float rollAngleDeg = FMath::RadiansToDegrees(rollAngleRad);
+
+        // Желаемый угол крена от yaw/strafe
+        const float BankFromYawDeg    = SmoothedMouseYaw    * 45.f; // при полном yaw ~45°
+        const float BankFromStrafeDeg = SmoothedThrustRight * 30.f; // при полном strafe ~30°
+        float desiredBankDeg          = BankFromYawDeg + BankFromStrafeDeg;
+
+        // Если почти не маневрируем — хотим ровный горизонт
+        if (FMath::Abs(SmoothedMouseYaw) < 0.05f &&
+            FMath::Abs(SmoothedThrustRight) < 0.05f)
+        {
+            desiredBankDeg = 0.f;
+        }
+
+        desiredBankDeg = FMath::Clamp(desiredBankDeg, -65.f, 65.f);
+
+        const float rollErrDeg = desiredBankDeg - rollAngleDeg;
+
+        const float KpRoll = 1.f / 35.f;   // 35° ошибки → ось ≈ 1
+        const float KdRoll = 1.f / 220.f;  // демпфирование по ωx
+
+        rollAxis =
+            KpRoll * rollErrDeg
+          - KdRoll * angVelDegLocal.X;
+
+        // небольшая мёртвая зона, чтобы не дрожал
+        if (FMath::Abs(rollErrDeg) < 1.5f && FMath::Abs(angVelDegLocal.X) < 2.f)
+        {
+            rollAxis = 0.f;
+        }
+
+        rollAxis = FMath::Clamp(rollAxis, -1.f, 1.f);
+
+        // сглаживание крена
+        const float tauRoll = 0.25f;
+        const float aRoll   = 1.f - FMath::Exp(-Dt / FMath::Max(0.001f, tauRoll));
+        SmoothedRollAxis    = FMath::Lerp(SmoothedRollAxis, rollAxis, aRoll);
+    }
+
+    // ---------- 12. В FlightComponent ----------
     if (UPrimitiveComponent* RootPrim = Cast<UPrimitiveComponent>(Ow->GetRootComponent()))
     {
         if (RootPrim->IsSimulatingPhysics())
@@ -481,25 +567,31 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     Flight->SetStrafeRight(SmoothedThrustRight);
     Flight->SetThrustUp   (SmoothedThrustUp);
     Flight->SetThrustForward(SmoothedThrustForward);
-    Flight->SetRollAxis(0.f); // крен пока ровный
+    Flight->SetRollAxis(SmoothedRollAxis);
 
-    // ---------- 10. Debug ----------
+    // ---------- 13. Debug ----------
     if (bDrawDebug)
     {
         if (UWorld* W = GetWorld(); W && W->GetNetMode() != NM_DedicatedServer)
         {
-            if (bHasAim)
+            DrawDebugSphere(W, DesiredPos, 30.f, 12, FColor::Green, false, 0.f, 0, 1.5f);
+            DrawDebugLine(W, Loc, DesiredPos, FColor::Green, false, 0.f, 0, 1.f);
+            
+            if (bHasAim && DistToAnchorM <= AnchorThresholdM)
             {
-                DrawDebugLine(W, Loc, AimPoint, FColor::Cyan, false, 0.f, 0, 1.5f);
+                DrawDebugLine(W, Loc, AimPoint, FColor::Red, false, 0.f, 0, 1.5f);
                 DrawDebugSphere(W, AimPoint, 28.f, 16, FColor::Red, false, 0.f, 0, 1.5f);
             }
-
-            DrawDebugSphere(W, DesiredPos, 30.f, 12, FColor::Green, false, 0.f, 0, 1.5f);
-            DrawDebugDirectionalArrow(W, Loc, Loc + Fwd   * 300.f, 40.f, FColor::Red,   false, 0.f, 0, 2.f);
-            DrawDebugDirectionalArrow(W, Loc, Loc + Right * 200.f, 40.f, FColor::Green, false, 0.f, 0, 2.f);
-            DrawDebugDirectionalArrow(W, Loc, Loc + Up    * 150.f, 40.f, FColor::Blue,  false, 0.f, 0, 2.f);
+            
+            DrawDebugLine(W, Loc, PointingTarget, FColor::Cyan, false, 0.f, 0, 2.f);
+            
+            DrawDebugDirectionalArrow(W, Loc, Loc + Fwd   * 300.f, 40.f, FColor::Red,    false, 0.f, 0, 2.f);
+            DrawDebugDirectionalArrow(W, Loc, Loc + Right * 200.f, 40.f, FColor::Green,  false, 0.f, 0, 2.f);
+            DrawDebugDirectionalArrow(W, Loc, Loc + Up    * 150.f, 40.f, FColor::Blue,   false, 0.f, 0, 2.f);
         }
     }
 }
+
+
 
 
