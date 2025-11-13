@@ -176,16 +176,21 @@ namespace
 			float d=FMath::Abs(FVector::DotProduct(C[i].DirW, NoseU)); if (d>BestUD){BestUD=d; BestU=i;}
 		}
 
-		if (BestF != INDEX_NONE && BestU != INDEX_NONE)
-		{
-			Flight->Frame.Forward = C[BestF].Sel; // «вперёд» = +X корпуса, ближайший к NoseF
-			Flight->Frame.Up      = C[BestU].Sel; // «вверх»  = +Z корпуса, ближайший к NoseU
-			UE_LOG(LogShipBot, Display, TEXT("[Bot] Rebound Flight frame to Nose  F=%d U=%d"),
-				(int32)C[BestF].Sel, (int32)C[BestU].Sel);
-		}
-	}
+                if (BestF != INDEX_NONE && BestU != INDEX_NONE)
+                {
+                        const EAxisSelector NewForward = C[BestF].Sel;
+                        const EAxisSelector NewUp      = C[BestU].Sel;
+                        if (Flight->Frame.Forward != NewForward || Flight->Frame.Up != NewUp)
+                        {
+                                Flight->Frame.Forward = NewForward; // «вперёд» = +X корпуса, ближайший к NoseF
+                                Flight->Frame.Up      = NewUp;      // «вверх»  = +Z корпуса, ближайший к NoseU
+                                UE_LOG(LogShipBot, Display, TEXT("[Bot] Rebound Flight frame to Nose  F=%d U=%d"),
+                                        (int32)NewForward, (int32)NewUp);
+                        }
+                }
+        }
 
-	// Ремап thrust из рамки носа -> базис, который читает Flight
+        // Ремап thrust из рамки носа -> базис, который читает Flight
 	static void RemapThrust_FromNoseToNetSimBasis(
 		const AActor* Ow, const UFlightComponent* Flight, const UPrimitiveComponent* BodyPrim,
 		const FVector& NoseF, const FVector& NoseR, const FVector& NoseU,
@@ -301,50 +306,94 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     const FTransform AimFrame = GetSelfAimFrame(Ow, SelfAimSock);
     const FVector Loc = AimFrame.GetLocation();
 
-    const FVector Xs = AimFrame.GetUnitAxis(EAxis::X).GetSafeNormal();
-    const FVector Ys = AimFrame.GetUnitAxis(EAxis::Y).GetSafeNormal();
-    const FVector Zs = AimFrame.GetUnitAxis(EAxis::Z).GetSafeNormal();
-
-    const FVector AFor = Ow->GetActorForwardVector().GetSafeNormal();
-    const FVector AUp  = Ow->GetActorUpVector().GetSafeNormal();
-
-    // выбираем, какая ось рамки больше всего похожа на ActorForward
-    FVector FwdCand[3]  = { Xs, Ys, Zs };
-    float   FwdScore[3] = {
-        FMath::Abs(FVector::DotProduct(Xs, AFor)),
-        FMath::Abs(FVector::DotProduct(Ys, AFor)),
-        FMath::Abs(FVector::DotProduct(Zs, AFor))
+    auto OwnerAxis = [&](TEnumAsByte<EAxis::Type> Axis)->FVector
+    {
+        return Ow->GetActorTransform().GetUnitAxis((EAxis::Type)Axis).GetSafeNormal();
     };
 
-    int32 iBestF = (FwdScore[1] > FwdScore[0] ? 1 : 0);
-    iBestF       = (FwdScore[2] > FwdScore[iBestF] ? 2 : iBestF);
+    FVector Fwd = FVector::ForwardVector;
+    FVector Up  = FVector::UpVector;
 
-    FVector Fwd = FwdCand[iBestF];
-    if (FVector::DotProduct(Fwd, AFor) < 0.f)
+    if (bForceNoseAxes)
     {
-        Fwd *= -1.f;
+        Fwd = OwnerAxis(NoseForwardAxis);
+        if (bInvertNoseForward)
+        {
+            Fwd *= -1.f;
+        }
+
+        Up = OwnerAxis(NoseUpAxis);
+    }
+    else
+    {
+        const FVector Xs = AimFrame.GetUnitAxis(EAxis::X).GetSafeNormal();
+        const FVector Ys = AimFrame.GetUnitAxis(EAxis::Y).GetSafeNormal();
+        const FVector Zs = AimFrame.GetUnitAxis(EAxis::Z).GetSafeNormal();
+
+        const FVector AFor = Ow->GetActorForwardVector().GetSafeNormal();
+        const FVector AUp  = Ow->GetActorUpVector().GetSafeNormal();
+
+        FVector FwdCand[3]  = { Xs, Ys, Zs };
+        float   FwdScore[3] = {
+            FMath::Abs(FVector::DotProduct(Xs, AFor)),
+            FMath::Abs(FVector::DotProduct(Ys, AFor)),
+            FMath::Abs(FVector::DotProduct(Zs, AFor))
+        };
+
+        int32 iBestF = (FwdScore[1] > FwdScore[0] ? 1 : 0);
+        iBestF       = (FwdScore[2] > FwdScore[iBestF] ? 2 : iBestF);
+
+        Fwd = FwdCand[iBestF];
+        if (FVector::DotProduct(Fwd, AFor) < 0.f)
+        {
+            Fwd *= -1.f;
+        }
+
+        FVector UpCand[2];
+        int32   idx = 0;
+        for (int32 i = 0; i < 3; ++i)
+        {
+            if (i != iBestF)
+            {
+                UpCand[idx++] = FwdCand[i];
+            }
+        }
+
+        Up = (FVector::DotProduct(UpCand[0], AUp) > FVector::DotProduct(UpCand[1], AUp))
+            ? UpCand[0] : UpCand[1];
+
+        if (FVector::DotProduct(Up, AUp) < 0.f)
+        {
+            Up *= -1.f;
+        }
     }
 
-    FVector UpCand[2]; int32 idx = 0;
-    for (int32 i = 0; i < 3; ++i)
+    if (Fwd.IsNearlyZero())
     {
-        if (i != iBestF)
-            UpCand[idx++] = FwdCand[i];
+        Fwd = Ow->GetActorForwardVector().GetSafeNormal();
+    }
+    if (Up.IsNearlyZero())
+    {
+        Up = Ow->GetActorUpVector().GetSafeNormal();
     }
 
-    FVector Up = (FVector::DotProduct(UpCand[0], AUp) > FVector::DotProduct(UpCand[1], AUp))
-        ? UpCand[0] : UpCand[1];
-
-    if (FVector::DotProduct(Up, AUp) < 0.f)
+    FVector Right = FVector::CrossProduct(Up, Fwd);
+    if (Right.IsNearlyZero())
     {
-        Up *= -1.f;
+        Right = FVector::CrossProduct(Fwd, FVector::UpVector);
+        if (Right.IsNearlyZero())
+        {
+            Right = Ow->GetActorRightVector().GetSafeNormal();
+        }
     }
-
-    FVector Right = FVector::CrossProduct(Up, Fwd).GetSafeNormal();
+    Right = Right.GetSafeNormal();
     Up = FVector::CrossProduct(Fwd, Right).GetSafeNormal();
 
     const FRotator NoseRot = FRotationMatrix::MakeFromXZ(Fwd, Up).Rotator();
     const FTransform Nose(NoseRot, Loc);
+
+    UPrimitiveComponent* SelfPrim = GetSimPrim(Ow);
+    SyncFlightAxesToNose(Flight.Get(), Nose, SelfPrim);
 
     // --- Цель, якорь follow и скорости ---
     const UPrimitiveComponent* TgtPrim = Target ? GetSimPrim(Target) : nullptr;
@@ -381,7 +430,6 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     const FVector ToAnchor = (FollowAnchor - Loc);
     const float   DistM    = ToAnchor.Size() / 100.f;
 
-    UPrimitiveComponent* SelfPrim = GetSimPrim(Ow);
     const FVector vSelfW      = SelfPrim ? SelfPrim->GetComponentVelocity() : FVector::ZeroVector;
     const float   SelfSpeedMS = vSelfW.Size() / 100.f;
     const float   TgtSpeedMS  = vTgtW.Size()  / 100.f;
@@ -401,7 +449,8 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     const float pitchErrDeg = FMath::RadiansToDegrees(SignedAngleAroundAxisRad(Fwd, AimDir, Right));
 
     // === Угловые скорости в рамке носа ===
-    const FVector ratesDeg        = GetLocalAngularRatesDeg_Frame(Ow, Nose);
+    const FVector ratesDeg         = GetLocalAngularRatesDeg_Frame(Ow, Nose);
+    const float   rollRateDegPerS  = ratesDeg.X;
     const float   yawRateDegPerS   = ratesDeg.Z;
     const float   pitchRateDegPerS = ratesDeg.Y;
 
@@ -418,11 +467,55 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     float dYaw   = (KpYaw   * yawCmdDeg)   - (KdYaw   * yawRateDegPerS);
     float dPitch = (KpPitch * pitchCmdDeg) - (KdPitch * pitchRateDegPerS);
 
+    const float facingDot = FVector::DotProduct(Fwd, AimDir);
+    float yawPitchBoost = 1.f;
+    if (bBoostTurnWhenTargetBehind && facingDot < -0.2f)
+    {
+        yawPitchBoost = FMath::GetMappedRangeValueClamped(FVector2D(-1.f, -0.2f), FVector2D(2.2f, 1.0f), facingDot);
+    }
+    dYaw   *= yawPitchBoost;
+    dPitch *= yawPitchBoost;
+
     // ограничиваем "виртуальную мышь" за кадр
     dYaw   = FMath::Clamp(dYaw,   -MaxMouseDeltaPerFrame, +MaxMouseDeltaPerFrame);
     dPitch = FMath::Clamp(dPitch, -MaxMouseDeltaPerFrame, +MaxMouseDeltaPerFrame);
 
-    const float boost = 1.f;
+    FVector UpReference = Up;
+    float rollAxisImmediate = 0.f;
+    {
+        const float AltitudeM = SampleAltitudeMeters(Ow->GetWorld(), Loc);
+        const bool  bHaveGround = AltitudeM < TNumericLimits<float>::Max();
+
+        FVector UpRef = FVector::UpVector;
+        if (!bHaveGround && Target)
+        {
+            const FVector TgtUp = Target->GetActorUpVector().GetSafeNormal();
+            if (!TgtUp.IsNearlyZero())
+            {
+                UpRef = TgtUp;
+            }
+        }
+
+        UpReference = UpRef;
+
+        FVector UpRefPlanar = (UpRef - Fwd * FVector::DotProduct(UpRef, Fwd)).GetSafeNormal();
+        if (UpRefPlanar.IsNearlyZero())
+        {
+            UpRefPlanar = Up;
+        }
+
+        float rollErrDeg = FMath::RadiansToDegrees(SignedAngleAroundAxisRad(Up, UpRefPlanar, Fwd));
+        rollErrDeg = Deadzone(rollErrDeg, RollDeadzoneDeg);
+
+        float desiredRollRate = (KpRoll_RatePerDeg * rollErrDeg) - (KdRoll_RatePerDegPerSec * rollRateDegPerS);
+        desiredRollRate = FMath::Clamp(desiredRollRate, -RollRateMaxDegPerSec, RollRateMaxDegPerSec);
+
+        const float FlightRollRateMax = 220.f;
+        if (FlightRollRateMax > KINDA_SMALL_NUMBER)
+        {
+            rollAxisImmediate = FMath::Clamp(desiredRollRate / FlightRollRateMax, -1.f, 1.f);
+        }
+    }
 
     // --- Линейная PD-центровка к follow-якорю ---
     const float offRightM = FVector::DotProduct(ToAnchor, Right) / 100.f;
@@ -501,8 +594,13 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
         SmoothedThrustRight   = FMath::Lerp(SmoothedThrustRight,   uRight, aThrust);
         SmoothedThrustUp      = FMath::Lerp(SmoothedThrustUp,      uUp,    aThrust);
 
+        const float tauRoll = FMath::Max(0.001f, RollSmoothingTime);
+        const float aRoll   = 1.f - FMath::Exp(-Dt / tauRoll);
+        PrevRollAxis        = FMath::Lerp(PrevRollAxis, rollAxisImmediate, aRoll);
+
         if (FMath::Abs(SmoothedMouseYaw)   < 0.002f) SmoothedMouseYaw   = 0.f;
         if (FMath::Abs(SmoothedMousePitch) < 0.002f) SmoothedMousePitch = 0.f;
+        if (FMath::Abs(PrevRollAxis)       < 0.002f) PrevRollAxis       = 0.f;
     }
 
     // --- Ремап thrust из рамки носа в базис Flight ---
@@ -523,12 +621,12 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
     }
 
     // --- Отправка команд в FlightComponent ---
-    Flight->AddMouseYaw   (SmoothedMouseYaw   * boost);
-    Flight->AddMousePitch (SmoothedMousePitch * boost);
+    Flight->AddMouseYaw   (SmoothedMouseYaw);
+    Flight->AddMousePitch (SmoothedMousePitch);
     Flight->SetStrafeRight(thR);
     Flight->SetThrustUp   (thU);
     Flight->SetThrustForward(thF);
-    Flight->SetRollAxis(0.f); // ролл пока не трогаем
+    Flight->SetRollAxis(PrevRollAxis);
 
     // --- Debug ---
     if (bDrawDebug)
@@ -548,6 +646,7 @@ void UShipAIPilotComponent::ApplyDirective(float Dt, const FShipDirective& D)
             DrawDebugDirectionalArrow(W, Loc, Loc + Fwd   * 250.f, 35.f, FColor::Red,   false, 0.f, 0, 2.f);
             DrawDebugDirectionalArrow(W, Loc, Loc + Right * 200.f, 35.f, FColor::Green, false, 0.f, 0, 2.f);
             DrawDebugDirectionalArrow(W, Loc, Loc + Up    * 150.f, 35.f, FColor::Blue,  false, 0.f, 0, 2.f);
+            DrawDebugDirectionalArrow(W, Loc, Loc + UpReference.GetSafeNormal() * 180.f, 35.f, FColor::Yellow, false, 0.f, 0, 1.6f);
         }
     }
 }
