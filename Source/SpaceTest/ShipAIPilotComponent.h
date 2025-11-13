@@ -103,11 +103,11 @@ private:
 	float ForwardDeadzoneM  = 6.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Move", meta=(AllowPrivateAccess="true"))
-	float KpForward_InputPerM = 0.0042f;
+        float KpForward_InputPerM = 0.0042f;
 
-	// === Нос/базис (у тебя +X вперёд, +Z вверх) ===
-	UPROPERTY(EditAnywhere, Category="Bot|NoseFrame", meta=(AllowPrivateAccess="true"))
-	bool bForceNoseAxes = true; // если true – использовать оси ниже
+        // === Нос/базис (у тебя +X вперёд, +Z вверх) ===
+        UPROPERTY(EditAnywhere, Category="Bot|NoseFrame", meta=(AllowPrivateAccess="true"))
+        bool bForceNoseAxes = true; // если true – использовать оси ниже
 
 	UPROPERTY(EditAnywhere, Category="Bot|NoseFrame", meta=(AllowPrivateAccess="true"))
 	TEnumAsByte<EAxis::Type> NoseForwardAxis = EAxis::X;
@@ -115,12 +115,28 @@ private:
 	UPROPERTY(EditAnywhere, Category="Bot|NoseFrame", meta=(AllowPrivateAccess="true"))
 	TEnumAsByte<EAxis::Type> NoseUpAxis = EAxis::Z;
 
-	UPROPERTY(EditAnywhere, Category="Bot|NoseFrame", meta=(AllowPrivateAccess="true"))
-	bool bInvertNoseForward = false;
+        UPROPERTY(EditAnywhere, Category="Bot|NoseFrame", meta=(AllowPrivateAccess="true"))
+        bool bInvertNoseForward = false;
 
-	// === Debug ===
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Debug", meta=(AllowPrivateAccess="true"))
-	bool bDrawDebug = true;
+        // === Ролл/стабилизация ориентации ===
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Aim", meta=(AllowPrivateAccess="true"))
+        float RollDeadzoneDeg = 1.5f;
+
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Aim", meta=(AllowPrivateAccess="true"))
+        float KpRoll_RatePerDeg = 1.35f; // желаемая угловая скорость (deg/s) за градус ошибки
+
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Aim", meta=(AllowPrivateAccess="true"))
+        float KdRoll_RatePerDegPerSec = 0.11f; // демпфирование по текущей скорости (deg/s)
+
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Aim", meta=(AllowPrivateAccess="true"))
+        float RollRateMaxDegPerSec = 140.f;
+
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Aim", meta=(AllowPrivateAccess="true"))
+        float RollSmoothingTime = 0.08f;
+
+        // === Debug ===
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bot|Debug", meta=(AllowPrivateAccess="true"))
+        bool bDrawDebug = true;
 
 public:
 	// Runtime сглаживание
