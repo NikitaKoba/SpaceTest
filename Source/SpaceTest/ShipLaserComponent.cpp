@@ -59,7 +59,10 @@ void UShipLaserComponent::TickComponent(float Dt, ELevelTick TickType, FActorCom
 	// === Client-driven cadence ===
 	if (bClientDrivesCadence && bOwningClient && bLocalFireHeld)
 	{
-		const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+		UWorld* W = GetWorld();
+		if (!W) return;
+
+		const double Now    = (double)W->GetTimeSeconds();
 		const double Period = 1.0 / FMath::Max(1.0f, FireRateHz);
 
 		while (Now + 1e-6 >= ClientNextShotTimeS)
@@ -70,21 +73,39 @@ void UShipLaserComponent::TickComponent(float Dt, ELevelTick TickType, FActorCom
 				// фоллбек — смотрим по камере
 				FVector CamLoc; FRotator CamRot;
 				PC->GetPlayerViewPoint(CamLoc, CamRot);
-				O = CamLoc; D = CamRot.Vector();
+				O = CamLoc;
+				D = CamRot.Vector();
 			}
 
+			// RPC на сервер
 			ServerFireShot(O, D);
+
 			ClientNextShotTimeS += Period;
 		}
 	}
 }
 
+
 void UShipLaserComponent::StartFire()
 {
 	bLocalFireHeld = true;
 
-	if (!bClientDrivesCadence && GetOwner())
-		ServerStartFire();
+	if (bClientDrivesCadence)
+	{
+		// Для client-driven режима — сбросить фазу, чтобы не было "догоняющих" шотов
+		if (UWorld* W = GetWorld())
+		{
+			ClientNextShotTimeS = W->GetTimeSeconds();
+		}
+	}
+	else
+	{
+		// Старый режим — сервер сам по таймеру спавнит болты
+		if (GetOwner())
+		{
+			ServerStartFire(); // Server RPC
+		}
+	}
 }
 
 void UShipLaserComponent::StopFire()
@@ -92,7 +113,9 @@ void UShipLaserComponent::StopFire()
 	bLocalFireHeld = false;
 
 	if (!bClientDrivesCadence && GetOwner())
-		ServerStopFire();
+	{
+		ServerStopFire(); // Server RPC
+	}
 }
 
 // === Aim (client) ===
@@ -293,54 +316,66 @@ void UShipLaserComponent::Server_SpawnOnce()
 
 	ServerSpawn_FromAimPoint(AimPoint);
 }
-// --- server-side validation ---
 bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir) const
 {
 	const APawn* P = Cast<APawn>(GetOwner());
 	const AController* C = P ? P->GetController() : nullptr;
 
+	// Если это не игрок/не контролируемый Pawn — не душим, пусть стреляет
+	if (!P || !C)
+	{
+		return true;
+	}
+
 	// 1) серверный viewpoint игрока
 	FVector ViewLoc = FVector::ZeroVector;
 	FRotator ViewRot = FRotator::ZeroRotator;
-	if (C)      { C->GetPlayerViewPoint(ViewLoc, ViewRot); }
-	else if (P) { ViewLoc = P->GetPawnViewLocation(); ViewRot = P->GetViewRotation(); }
+	C->GetPlayerViewPoint(ViewLoc, ViewRot);
 
-	// 2) расстояние Origin от камеры (защита от "телепортированного" Origin)
-	constexpr float MaxOriginDist = 150.f; // uu
+	const FVector DirNorm = Dir.GetSafeNormal();
+
+	// 2) расстояние Origin от камеры
+	// В мультиплеере камера клиента и сервера могут очень расходиться,
+	// плюс third-person, плюс наша хитрая CalcCamera → увеличиваем лимит.
+	constexpr float MaxOriginDist = 5000.f; // БЫЛО 150.f — этого вообще не хватает
 	if (FVector::DistSquared(Origin, ViewLoc) > FMath::Square(MaxOriginDist))
+	{
 		return false;
+	}
 
 	// 3) угол между направлением шота и «вперёд» камеры
 	const FVector ViewFwd = ViewRot.Vector();
-	constexpr float MaxAngleDeg = 45.f;
-	const float cosAngle = FVector::DotProduct(Dir.GetSafeNormal(), ViewFwd);
-	if (cosAngle < FMath::Cos(FMath::DegreesToRadians(MaxAngleDeg)))
+	constexpr float MaxAngleDeg = 75.f; // раньше было 45°, расширяем конус
+	const float CosLimit = FMath::Cos(FMath::DegreesToRadians(MaxAngleDeg));
+	const float CosAng   = FVector::DotProduct(DirNorm, ViewFwd);
+	if (CosAng < CosLimit)
+	{
 		return false;
+	}
 
 	// 4) ограничение скорости поворота луча между шотами
-	// (простая защита от "warping" прицелом)
 	static thread_local double PrevTime = 0.0;
-	static thread_local FVector PrevDir = ViewFwd;
+	static thread_local FVector PrevDir = FVector::ZeroVector;
 
-	const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+	const UWorld* W = GetWorld();
+	const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
 	if (PrevTime > 0.0)
 	{
-		const double dt = FMath::Max(1e-3, Now - PrevTime);
-		const double cosd = FMath::Clamp(FVector::DotProduct(PrevDir.GetSafeNormal(), Dir.GetSafeNormal()), -1.0, 1.0);
-		const double dAngDeg = FMath::RadiansToDegrees(FMath::Acos(cosd));
+		const double Dt = FMath::Max(1e-3, Now - PrevTime);
+		const double CosD = FMath::Clamp(FVector::DotProduct(PrevDir.GetSafeNormal(), DirNorm), -1.0, 1.0);
+		const double dAngDeg = FMath::RadiansToDegrees(FMath::Acos(CosD));
 
-		// щедро: до 1080°/с (3 оборота/сек) — пропускаем
+		// до 1080°/с (3 оборота/сек) — как и раньше
 		constexpr double MaxDegPerSec = 1080.0;
-		if (dAngDeg / dt > MaxDegPerSec)
+		if (dAngDeg / Dt > MaxDegPerSec)
 		{
 			PrevTime = Now;
-			PrevDir  = Dir.GetSafeNormal();
+			PrevDir  = DirNorm;
 			return false;
 		}
 	}
 
 	PrevTime = Now;
-	PrevDir  = Dir.GetSafeNormal();
+	PrevDir  = DirNorm;
 	return true;
 }
-
