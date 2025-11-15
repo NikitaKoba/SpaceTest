@@ -134,7 +134,13 @@ class SPACETEST_API UFlightComponent : public UActorComponent
 
 public:
 	UFlightComponent();
-
+	UFUNCTION(BlueprintCallable, Category="Flight|AI")
+	void SetAngularRateOverride(
+		bool  bEnable,
+		float PitchRateDegPerSec,
+		float YawRateDegPerSec,
+		float RollRateDegPerSec
+	);
 	// === Публичный инпут ===
 	UFUNCTION(BlueprintCallable, Category="Flight|Input") void SetThrustForward(float AxisValue);
 	UFUNCTION(BlueprintCallable, Category="Flight|Input") void SetStrafeRight (float AxisValue);
@@ -184,6 +190,12 @@ private:
 		float PitchRateDes_Rad = 0.f, YawRateDes_Rad = 0.f, RollRateDes_Rad = 0.f;
 		FVector F_loc = FVector(1,0,0), R_loc = FVector(0,1,0), U_loc = FVector(0,0,1);
 	} InputSnap;
+
+	// --- AI override угловых скоростей ---
+	bool  bHasAngularOverride   = false;
+	float OverridePitchRate_Rad = 0.f;
+	float OverrideYawRate_Rad   = 0.f;
+	float OverrideRollRate_Rad  = 0.f;
 
 	// Состояния для D-термов и jerk-диагностики
 	struct FJerkStats

@@ -113,6 +113,29 @@ void UFlightComponent::ResetInputFilters()
 	RollAxis_Smooth=0.f;
 	AccumFixed=0.0;
 	bPrevVxValid=bPrevVrValid=bPrevVuValid=false;
+	// AI override не трогаем – его управляет пилот
+}
+
+void UFlightComponent::SetAngularRateOverride(
+	bool  bEnable,
+	float PitchRateDegPerSec,
+	float YawRateDegPerSec,
+	float RollRateDegPerSec
+)
+{
+	if (!bEnable)
+	{
+		bHasAngularOverride   = false;
+		OverridePitchRate_Rad = 0.f;
+		OverrideYawRate_Rad   = 0.f;
+		OverrideRollRate_Rad  = 0.f;
+		return;
+	}
+
+	bHasAngularOverride   = true;
+	OverridePitchRate_Rad = DegToRad(PitchRateDegPerSec);
+	OverrideYawRate_Rad   = DegToRad(YawRateDegPerSec);
+	OverrideRollRate_Rad  = DegToRad(RollRateDegPerSec);
 }
 
 void UFlightComponent::TryBindBody()
@@ -243,6 +266,21 @@ void UFlightComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, 
 			const float YawDegps   = FMath::Clamp(StickY_Sm, -1.f, 1.f) *   Yaw.YawRateMax_Deg;
 			InputSnap.PitchRateDes_Rad = DegToRad(PitchDegps);
 			InputSnap.YawRateDes_Rad   = DegToRad(YawDegps);
+			// желаемая угловая скорость крена (рад/с)
+			const float Wr_deg = FMath::Clamp(RollAxis_Smooth * 220.f, -220.f, +220.f);
+			InputSnap.RollRateDes_Rad = DegToRad(Wr_deg);
+
+			// --- AI override yaw/pitch/roll ---
+			if (bHasAngularOverride)
+			{
+				InputSnap.PitchRateDes_Rad = OverridePitchRate_Rad;
+				InputSnap.YawRateDes_Rad   = OverrideYawRate_Rad;
+				InputSnap.RollRateDes_Rad  = OverrideRollRate_Rad;
+			}
+
+			// сброс пер-кадровой jerk-диагностики
+			Jerk.ResetPerFrame();
+
 		}
 	}
 

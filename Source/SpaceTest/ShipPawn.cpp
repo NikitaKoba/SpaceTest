@@ -1,8 +1,6 @@
 // ShipPawn.cpp
 #include "ShipPawn.h"
 #include "FlightComponent.h"
-#include "ShipAIPilotComponent.h"
-#include "ShipBrainComponent.h"
 #include "ShipNetComponent.h"
 #include "ShipCursorPilotComponent.h"
 #include "Components/StaticMeshComponent.h"
