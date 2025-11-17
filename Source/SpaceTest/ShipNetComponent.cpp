@@ -133,8 +133,8 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		// Если нужно ещё мягче — уменьши шаги вдвое.
 		constexpr float POS_STEP_CM   = 1.0f;   // позиция: 1 см
 		constexpr float VEL_STEP_CMPS = 1.0f;   // лин. скорость: 1 см/с
-		constexpr float ANG_STEP_DEGPS= 0.5f;   // угл. скорость: 0.5 °/с
-		constexpr float ROT_STEP_DEG  = 0.5f;   // ориентация (эйлеры): 0.5 °
+		constexpr float ANG_STEP_DEGPS= 0.1f;
+		constexpr float ROT_STEP_DEG  = 0.1f;   // ориентация (эйлеры): 0.5 °
 
 		const FTransform X   = ShipMesh->GetComponentTransform();
 		const FVector    V   = ShipMesh->GetComponentVelocity();

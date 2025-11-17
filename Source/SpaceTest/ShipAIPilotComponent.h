@@ -69,7 +69,11 @@ public:
 	/** Максимальная ось страфа (A/D), чтобы корабль не улетал боком. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Orient", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float MaxStrafeRightAxis = 0.35f;
-
+	// --- сглаженные команды ---
+	float SmoothedForwardAxis   = 0.f;
+	float SmoothedYawRateDeg    = 0.f;
+	float SmoothedPitchRateDeg  = 0.f;
+	float SmoothedRollRateDeg   = 0.f;
 	/** Максимальная ось вертикали (Space/Ctrl). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Orient", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float MaxThrustUpAxis = 0.35f;

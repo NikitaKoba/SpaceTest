@@ -21,8 +21,88 @@
 
 // RepGraph API
 #include "ReplicationGraph.h"
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_AlwaysIncludeMeters(
+	TEXT("space.RepGraph.AlwaysIncludeMeters"),
+	300.f,
+	TEXT("Radius (meters) around viewer where ships are always selected, ignoring score hysteresis (0 = disabled)."));
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_PlayerShipPriority(
+	TEXT("space.RepGraph.PlayerShipPriority"),
+	4.f,
+	TEXT("Priority weight for PLAYER-controlled ships in perceptual score"));
+
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_NPCShipPriority(
+	TEXT("space.RepGraph.NPCShipPriority"),
+	1.f,
+	TEXT("Priority weight for AI/NPC ships in perceptual score"));
+
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_NPCCullMeters(
+	TEXT("space.RepGraph.NPCCullMeters"),
+	0.f,
+	TEXT("Optional hard cap for NPC ship visibility (meters, 0 = use ShipCullMeters)"));
 
 DEFINE_LOG_CATEGORY_STATIC(LogSpaceRepGraph, Log, All);
+namespace
+{
+	struct FShipTypeCounts
+	{
+		int32 Total   = 0;
+		int32 Players = 0;
+		int32 NPCs    = 0;
+	};
+	static bool IsPlayerControlledShip(const AShipPawn* Ship)
+	{
+		if (!Ship) return false;
+		const APawn* Pawn = Cast<const APawn>(Ship);
+		if (!Pawn) return false;
+		const AController* Ctrl = Pawn->GetController();
+		return Ctrl && Ctrl->IsPlayerController();
+	}
+	// Обобщённо: работает и с TArray, и с TSet, и с чем угодно, что итерируется
+	template<typename ContainerType>
+	static FShipTypeCounts CalcShipTypeCounts(const ContainerType& TrackedShips)
+	{
+		FShipTypeCounts Out;
+
+		for (const TWeakObjectPtr<AShipPawn>& ShipPtr : TrackedShips)
+		{
+			const AShipPawn* Ship = ShipPtr.Get();
+			if (!IsValid(Ship))
+			{
+				continue;
+			}
+
+			++Out.Total;
+
+			const APawn* Pawn = Cast<APawn>(Ship);
+			if (!Pawn)
+			{
+				// Не Pawn — считаем NPC
+				++Out.NPCs;
+				continue;
+			}
+
+			const AController* C = Pawn->GetController();
+			if (!C)
+			{
+				// Необязанный — тоже NPC
+				++Out.NPCs;
+				continue;
+			}
+
+			if (C->IsPlayerController())
+			{
+				++Out.Players;
+			}
+			else
+			{
+				++Out.NPCs;
+			}
+		}
+
+		return Out;
+	}
+}
+
 
 // ---------------- CVars ----------------
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_UseSpatial3D(
@@ -47,7 +127,7 @@ static TAutoConsoleVariable<float> CVar_SpaceRepGraph_DefaultCullMeters(
 	TEXT("space.RepGraph.DefaultCullMeters"), 100000.f, TEXT("Default cull (meters)"));
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ShipCullMeters(
-	TEXT("space.RepGraph.ShipCullMeters"), 1000.f, TEXT("Ship coarse cull (meters)"));
+	TEXT("space.RepGraph.ShipCullMeters"), 10000.f, TEXT("Ship coarse cull (meters)"));
 
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_AutoRebias(
 	TEXT("space.RepGraph.AutoRebias"), 1, TEXT("Auto-rebias grid toward active players (0/1)"));
@@ -117,6 +197,19 @@ static FORCEINLINE bool SRG_ShouldLog() { return CVar_SpaceRepGraph_Debug.GetVal
 bool USpaceReplicationGraph::IsAlwaysRelevantByClass(const AActor* Actor)
 {
 	if (!Actor) return false;
+
+	// ===== НОВОЕ: Проверка Pawn на тип контроллера =====
+	if (const APawn* Pawn = Cast<APawn>(Actor))
+	{
+		const AController* Ctrl = Pawn->GetController();
+		// Боты (нет контроллера или контроллер не игроковский) НЕ AlwaysRelevant
+		if (!Ctrl || !Ctrl->IsPlayerController())
+		{
+			return false;
+		}
+		// Игроковские Pawns могут быть AlwaysRelevant, проверяем дальше
+	}
+
 	return  Actor->IsA(AGameStateBase::StaticClass())
 		|| Actor->IsA(AGameModeBase::StaticClass())
 		|| Actor->IsA(AWorldSettings::StaticClass())
@@ -299,44 +392,69 @@ void USpaceReplicationGraph::RemoveClientConnection(UNetConnection* NetConnectio
 	}
 }
 
-void USpaceReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo, FGlobalActorReplicationInfo& GlobalInfo)
+// ==================== 3. RouteAddNetworkActorToNodes ====================
+void USpaceReplicationGraph::RouteAddNetworkActorToNodes(
+    const FNewReplicatedActorInfo& ActorInfo, 
+    FGlobalActorReplicationInfo& GlobalInfo)
 {
-	AActor* Actor = ActorInfo.Actor;
-	if (!Actor) return;
+    AActor* Actor = ActorInfo.Actor;
+    if (!Actor) return;
 
-	// Контроллеры не кладём в глобальные узлы (их ведём per-connection)
-	if (Actor->IsA<APlayerController>()) return;
+    if (Actor->IsA<APlayerController>()) return;
 
-	// Системные «всегда релевантные»
-	if (IsAlwaysRelevantByClass(Actor))
-	{
-		if (AlwaysRelevantNode) AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
-		return;
-	}
+    // ===== НОВАЯ ЛОГИКА: определяем тип корабля по КЛАССУ, а не по Controller =====
+    if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
+    {
+        // ===== КРИТИЧНО: Проверяем класс Blueprint, а не Controller =====
+        const FString ClassName = Ship->GetClass()->GetName();
+        const bool bIsPlayerShipClass = ClassName.Contains(TEXT("BP_ShipPawn_C")); // Игроковский корабль
+        const bool bIsNPCClass = ClassName.Contains(TEXT("BP_ShipPawn_NPC_C"));   // Бот-корабль
+        
+        // Добавляем в tracking для ВСЕХ кораблей
+        TrackedShips.Add(Ship);
+        if (Spatial3D) Spatial3D->Add(Ship);
 
-	// Наш корабль — трекаем, в динамический грид и в Spatial3D
-	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
-	{
-		TrackedShips.Add(Ship);
+        if (SRG_ShouldLog())
+        {
+            UE_LOG(LogSpaceRepGraph, Log, 
+                TEXT("RouteAdd: [%s] Class=%s IsPlayerClass=%d IsNPCClass=%d -> TrackedShips + Spatial3D"),
+                *Ship->GetName(),
+                *ClassName,
+                bIsPlayerShipClass ? 1 : 0,
+                bIsNPCClass ? 1 : 0);
+        }
 
-		if (Spatial3D)  Spatial3D->Add(Ship);
+        return;
+    }
 
-		if (SRG_ShouldLog())
-			UE_LOG(LogSpaceRepGraph, Verbose, TEXT("RouteAdd: [%s|%s] -> tracked + Grid + Spatial3D"),
-				*Actor->GetClass()->GetName(), *Actor->GetName());
-		return;
-	}
+    // Системные «всегда релевантные»
+    if (IsAlwaysRelevantByClass(Actor))
+    {
+        if (AlwaysRelevantNode) 
+        {
+            AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
+            
+            if (SRG_ShouldLog())
+            {
+                UE_LOG(LogSpaceRepGraph, Verbose, 
+                    TEXT("RouteAdd: [%s] -> AlwaysRelevantNode (system actor)"),
+                    *Actor->GetName());
+            }
+        }
+        return;
+    }
 
-	// Остальные: по мобильности
-	if (GridNode)
-	{
-		const USceneComponent* Root = Cast<USceneComponent>(Actor->GetRootComponent());
-		const bool bMovable = Root && Root->Mobility == EComponentMobility::Movable;
-		if (bMovable) GridNode->AddActor_Dynamic(ActorInfo, GlobalInfo);
-		else          GridNode->AddActor_Static (ActorInfo, GlobalInfo);
-	}
+    // Остальные акторы: по мобильности в Grid
+    if (GridNode)
+    {
+        const USceneComponent* Root = Cast<USceneComponent>(Actor->GetRootComponent());
+        const bool bMovable = Root && Root->Mobility == EComponentMobility::Movable;
+        if (bMovable) 
+            GridNode->AddActor_Dynamic(ActorInfo, GlobalInfo);
+        else          
+            GridNode->AddActor_Static(ActorInfo, GlobalInfo);
+    }
 }
-
 
 void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo)
 {
@@ -368,7 +486,10 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 	}
 
 	// Прочие акторы
-	if (AlwaysRelevantNode) AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
+	if (AlwaysRelevantNode && IsAlwaysRelevantByClass(Actor))
+	{
+		AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
+	}
 
 	if (GridNode)
 	{
@@ -378,11 +499,7 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 		else          GridNode->RemoveActor_Static (ActorInfo);
 	}
 
-	// подчистить per-connection
-	for (auto& KV : PerConnAlwaysMap)
-		if (UReplicationGraphNode_AlwaysRelevant_ForConnection* Node = KV.Value.Get())
-			Node->NotifyRemoveNetworkActor(ActorInfo);
-
+	// Только состояние в ConnStates, без дергания PerConnAlways
 	for (auto& CKV : ConnStates)
 	{
 		FConnState& CS = CKV.Value;
@@ -404,9 +521,23 @@ void USpaceReplicationGraph::BeginDestroy()
 	Super::BeginDestroy();
 }
 
+// ==================== 2. HandlePawnPossessed ====================
 void USpaceReplicationGraph::HandlePawnPossessed(APawn* Pawn)
 {
 	if (!Pawn) return;
+
+	// ===== НОВОЕ: Проверка что это именно игрок, а не бот =====
+	AController* Ctrl = Pawn->GetController();
+	if (!Ctrl || !Ctrl->IsPlayerController())
+	{
+		if (SRG_ShouldLog())
+		{
+			UE_LOG(LogSpaceRepGraph, Warning, 
+				TEXT("HandlePawnPossessed: SKIP bot/AI [%s] - not adding to AlwaysRelevant"),
+				*GetNameSafe(Pawn));
+		}
+		return; // Бот - игнорируем, не добавляем в per-connection AlwaysRelevant
+	}
 
 	UNetConnection* NetConn = FindOwnerConnection(Pawn);
 	if (!NetConn) return;
@@ -526,9 +657,20 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 	const bool  bDoLiveLog  = (CVar_SpaceRepGraph_LiveLog.GetValueOnAnyThread() != 0);
 	const bool  bDoDebugLog = SRG_ShouldLog();
 
+	// Общий радиус для кораблей (игроки)
 	const float ShipCullM = FMath::Max(1.f, CVar_SpaceRepGraph_ShipCullMeters.GetValueOnAnyThread());
 	const float CullSqUU  = FMath::Square(ShipCullM * 100.f);
 
+	// Отдельный радиус для NPC (если 0 — используем общий ShipCullM)
+	const float NPCCullMConfig = FMath::Max(0.f, CVar_SpaceRepGraph_NPCCullMeters.GetValueOnAnyThread());
+	const float NPCCullM       = (NPCCullMConfig > 0.f) ? NPCCullMConfig : ShipCullM;
+	const float NPCCullSqUU    = FMath::Square(NPCCullM * 100.f);
+
+	// Принудительная ближняя зона отключена
+	const float AlwaysInclM    = FMath::Max(0.f, CVar_SpaceRepGraph_AlwaysIncludeMeters.GetValueOnAnyThread());
+	const float AlwaysInclSqUU = (AlwaysInclM > 0.f) ? FMath::Square(AlwaysInclM * 100.f) : 0.f;
+
+	
 	// 1) авто-ребайас по центру активных игроков
 	if (GridNode && CVar_SpaceRepGraph_AutoRebias.GetValueOnAnyThread() != 0)
 	{
@@ -594,6 +736,9 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 	const float TickHz = float(FMath::Max(1, CVar_SpaceRepGraph_TickHz.GetValueOnAnyThread()));
 	const float GroupCellUU = FMath::Max(1.f, CVar_SpaceRepGraph_GroupCellMeters.GetValueOnAnyThread()) * 100.f;
 	const float HeaderCost = FMath::Max(0.f, CVar_SpaceRepGraph_HeaderCostBytes.GetValueOnAnyThread());
+
+	// Порог входа для хистерезиса — нужен и при сборе кандидатов, и при выборе
+	const float S_enter = CVar_SpaceRepGraph_ScoreEnter.GetValueOnAnyThread();
 
 	int32 NumTrackedShipsWorld = 0;
 	for (auto ShipPtr : TrackedShips) if (ShipPtr.IsValid()) ++NumTrackedShipsWorld;
@@ -666,27 +811,35 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				if (!Ship || Ship == ViewerPawn) continue;
 				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
 
-				// Доп. страховочный дистанционный гейт (почти всегда пройдёт)
-				const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
-				if (DistSq > CullSqUU) continue;
+				const bool  bIsPlayerShip = IsPlayerControlledShip(Ship);
+				const float DistSq        = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
+
+				// Игрокам — общий радиус, ботам — свой (меньше/равен)
+				if (bIsPlayerShip)
+				{
+					if (DistSq > CullSqUU) continue;
+				}
+				else
+				{
+					if (DistSq > NPCCullSqUU) continue;
+				}
 
 				FActorEMA& AStat = CS.ActorStats.FindOrAdd(Ship);
 				float CostB = 0.f, U = 0.f;
-				const float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
+				float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
 				if (Score <= 0.f) continue;
 
 				FCandidate C;
-				C.Actor = Ship;
-				C.Cost  = CostB;
-				C.U     = U;
-				C.Score = Score;
+				C.Actor    = Ship;
+				C.Cost     = CostB;
+				C.U        = U;
+				C.Score    = Score;
 				C.GroupKey = MakeGroupKey(ViewLoc, Ship->GetActorLocation(), GroupCellUU);
 				Candidates.Add(C);
 			}
 		}
-		else
+		else  // fallback: полный проход по TrackedShips
 		{
-			// --- СТАРЫЙ ПУТЬ: полный проход по TrackedShips ---
 			const float CoarseCullSq = CullSqUU;
 			for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
 			{
@@ -694,19 +847,29 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				if (!Ship || Ship == ViewerPawn) continue;
 				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
 
-				const float DistSq = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
-				if (DistSq > CoarseCullSq) continue;
+				const bool  bIsPlayerShip = IsPlayerControlledShip(Ship);
+				const float DistSq        = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
+
+				// Игрок — по ShipCullMeters, бот — по NPCCullMeters (если задан)
+				if (bIsPlayerShip)
+				{
+					if (DistSq > CullSqUU) continue;
+				}
+				else
+				{
+					if (DistSq > NPCCullSqUU) continue;
+				}
 
 				FActorEMA& AStat = CS.ActorStats.FindOrAdd(Ship);
 				float CostB = 0.f, U = 0.f;
-				const float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
+				float Score = ComputePerceptualScore(Ship, ViewerPawn, AStat, CS.Viewer, DeltaTime, CostB, U);
 				if (Score <= 0.f) continue;
 
 				FCandidate C;
-				C.Actor = Ship;
-				C.Cost  = CostB;
-				C.U     = U;
-				C.Score = Score;
+				C.Actor    = Ship;
+				C.Cost     = CostB;
+				C.U        = U;
+				C.Score    = Score;
 				C.GroupKey = MakeGroupKey(ViewLoc, Ship->GetActorLocation(), GroupCellUU);
 				Candidates.Add(C);
 			}
@@ -737,7 +900,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		float UsedBytes = 0.f;
 		int32 NumChosen = 0;
 
-		const float S_enter = CVar_SpaceRepGraph_ScoreEnter.GetValueOnAnyThread();
+		// S_enter уже объявлен выше, тут только порог выхода
 		const float S_exit  = CVar_SpaceRepGraph_ScoreExit .GetValueOnAnyThread();
 
 		for (FCandidate& C : Candidates)
@@ -746,8 +909,33 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			const float CostWithHeader = C.Cost + (bGroupEmpty ? HeaderCost : 0.f);
 
 			const bool bWasVisible = CS.Visible.Contains(C.Actor);
-			const bool bPassHyst   = (C.Score >= S_enter) || (bWasVisible && C.Score >= S_exit);
-			if (!bPassHyst) continue;
+
+			// Пересчитаем дистанцию, чтобы понять, в ближней ли зоне
+			FVector TargetLoc = ViewLoc;
+
+			if (C.Actor.IsValid())
+			{
+				TargetLoc = C.Actor->GetActorLocation();
+			}
+
+			const float DistSq = FVector::DistSquared(ViewLoc, TargetLoc);
+
+			const bool bInAlwaysZone = (AlwaysInclSqUU > 0.f) && (DistSq <= AlwaysInclSqUU);
+
+			bool bPassHyst = false;
+			if (bInAlwaysZone)
+			{
+				// В ближней зоне показываем всё, у чего вообще есть полезность
+				bPassHyst = (C.Score > 0.f);
+			}
+			else
+			{
+				bPassHyst = (C.Score >= S_enter) || (bWasVisible && C.Score >= S_exit);
+			}
+
+			if (!bPassHyst)
+				continue;
+
 
 			if (UsedBytes + CostWithHeader > BudgetBytes)
 				continue;
@@ -768,36 +956,74 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			}
 		}
 
-		// Обновляем per-connection AlwaysRelevant
+		// ===== ИСПРАВЛЕНО: Обновляем per-connection AlwaysRelevant с явным закрытием каналов =====
 		{
+			// Добавляем новые акторы
 			for (TWeakObjectPtr<AActor> APtr : NowSelected)
 			{
 				AActor* A = APtr.Get();
 				if (!A) continue;
 				if (!CS.Selected.Contains(APtr))
 				{
-					if (A->NetDormancy != DORM_Awake) A->SetNetDormancy(DORM_Awake);
+					if (A->NetDormancy != DORM_Awake)
+						A->SetNetDormancy(DORM_Awake);
+
 					A->ForceNetUpdate();
 
 					ARNode->NotifyAddNetworkActor(FNewReplicatedActorInfo(A));
 					LogChannelState(ConnMgr, A, TEXT("+ADD"));
 				}
 			}
+    
+			// Удаляем те, кто был в Selected, но не попал в NowSelected
 			for (TWeakObjectPtr<AActor> Prev : CS.Selected)
 			{
+				if (!Prev.IsValid())
+					continue;
+
 				if (!NowSelected.Contains(Prev))
 				{
-					if (AActor* A = Prev.Get())
-					{
-						ARNode->NotifyRemoveNetworkActor(FNewReplicatedActorInfo(A));
-						LogChannelState(ConnMgr, A, TEXT("-REM"));
-					}
+					AActor* A = Prev.Get();
+					if (!A) continue;
+
+					if (A->NetDormancy != DORM_DormantAll)
+						A->SetNetDormancy(DORM_DormantAll);
+
+					ARNode->NotifyRemoveNetworkActor(FNewReplicatedActorInfo(A));
+					LogChannelState(ConnMgr, A, TEXT("-REM"));
 				}
 			}
 
 			CS.Selected = MoveTemp(NowSelected);
 			CS.Visible  = CS.Selected;
 		}
+
+		// ===== ДИАГНОСТИКА: что в итоге выбрано для этого PC =====
+		if (CVar_SpaceRepGraph_Debug.GetValueOnAnyThread() >= 2)
+		{
+			for (TWeakObjectPtr<AActor> APtr : CS.Selected)
+			{
+				if (const AShipPawn* Ship = Cast<AShipPawn>(APtr.Get()))
+				{
+					const APawn* Pawn = Cast<APawn>(Ship);
+					const AController* Ctrl = Pawn ? Pawn->GetController() : nullptr;
+					const bool bIsBot = !Ctrl || !Ctrl->IsPlayerController();
+					const float DistM = FVector::Dist(ViewLoc, Ship->GetActorLocation()) / 100.f;
+					
+					if (bIsBot)
+					{
+						UE_LOG(LogSpaceRepGraph, Error,
+							TEXT("[FINAL_SELECTED] PC=%s Bot=%s Dist=%.0fm Controller=%s IsPlayerCtrl=%d IN_SELECTED=TRUE"),
+							*GetNameSafe(PC), 
+							*Ship->GetName(), 
+							DistM,
+							*GetNameSafe(Ctrl),
+							Ctrl ? (Ctrl->IsPlayerController() ? 1 : 0) : -1);
+					}
+				}
+			}
+		}
+		// ===== КОНЕЦ ДИАГНОСТИКИ =====
 
 		// Адаптивный бюджет
 		UpdateAdaptiveBudget(ConnMgr, CS, UsedBytes, 1.f/TickHz);
@@ -809,12 +1035,10 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		}
 		if (CVar_SpaceRepGraph_Debug.GetValueOnAnyThread() > 0)
 			DrawDebugSphere(W, ViewLoc, ShipCullM*100.f, 32, FColor::Cyan, false, 0.1f, 0, 2.f);
-
 	}
 
 	return true;
 }
-
 
 // ====================== Приоритизация: расчёт Score =========================
 
@@ -969,22 +1193,40 @@ float USpaceReplicationGraph::ComputePerceptualScore(
 	const float θ0 = FMath::Max(0.001f, CVar_SpaceRepGraph_Theta0Deg.GetValueOnAnyThread() * (PI/180.f));
 	const float Eang = FMath::Sqrt( FMath::Square(θ_pos/θ0) + FMath::Square(θ_self/θ0) );
 
-	// ===== КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Базовый вес по дистанции =====
-	// Даём минимальную полезность U_base, которая убывает с расстоянием
-	// Это гарантирует, что близкие корабли ВСЕГДА видны, даже если стоят на месте
+	// Базовый вес по дистанции
+	// Базовый вес по дистанции: хотим, чтобы на границе кулла Score был >= S_enter.
+	// Берём ShipCullMeters как "референсную" дистанцию.
 	const float d_meters = d / 100.f; // см → метры
-	const float U_base = FMath::Max(0.5f, 1000.f / FMath::Max(1.f, d_meters)); // гипербола: 1000м→1.0, 100м→10.0, 10м→100.0
-	
-	// Динамическая полезность (как было)
+	const float ShipCullM = FMath::Max(1.f, CVar_SpaceRepGraph_ShipCullMeters.GetValueOnAnyThread());
+
+	// На дистанции = ShipCullM получаем U_base ≈ 1 → Score ≈ 1 / 16 ≈ 0.06 (> 0.015)
+	const float U_base   = FMath::Max(0.5f, ShipCullM / FMath::Max(1.f, d_meters));
+
+	// Дальше как было:
 	const float U_dynamic = W * Eang;
-	
-	// Итоговая полезность = максимум из базовой и динамической
-	OutU = FMath::Max(U_base, U_dynamic);
+
+
+	// Тип корабля: игрок / бот
+	bool bIsPlayerShip = false;
+	if (const APawn* Pawn = Cast<const APawn>(Actor))
+	{
+		if (const AController* Ctrl = Pawn->GetController())
+		{
+			bIsPlayerShip = Ctrl->IsPlayerController();
+		}
+	}
+
+	const float PlayerPriority = CVar_SpaceRepGraph_PlayerShipPriority.GetValueOnAnyThread();
+	const float NPCPriority    = CVar_SpaceRepGraph_NPCShipPriority.GetValueOnAnyThread();
+	const float TypeWeight     = bIsPlayerShip ? PlayerPriority : NPCPriority;
+
+	// Итоговая полезность: максимум (база, динамика) * вес типа
+	OutU = FMath::Max(U_base, U_dynamic) * TypeWeight;
 
 	// Стоимость: байты + CPU
 	const float Kcpu = CVar_SpaceRepGraph_CPUtoBytes.GetValueOnAnyThread();
-	const float c_i = AStat.BytesEMA + Kcpu * AStat.SerializeMsEMA;
-	OutCostB = FMath::Max(16.f, c_i);
+	const float c_i  = AStat.BytesEMA + Kcpu * AStat.SerializeMsEMA;
+	OutCostB         = FMath::Max(16.f, c_i);
 
 	return (OutU > 0.f) ? (OutU / (OutCostB + 1e-3f)) : 0.f;
 }
@@ -1032,21 +1274,67 @@ void USpaceReplicationGraph::UpdateAdaptiveBudget(UNetReplicationGraphConnection
 	CS.Viewer.BudgetBytesPerTick = EMA(CS.Viewer.BudgetBytesPerTick, B, 0.3f);
 }
 
-void USpaceReplicationGraph::LogPerConnTick(UNetReplicationGraphConnection* ConnMgr, const FConnState& CS, int32 NumTracked, int32 NumCand, int32 NumChosen, float UsedBytes, float TickDt)
+void USpaceReplicationGraph::LogPerConnTick(
+	UNetReplicationGraphConnection* ConnMgr,
+	const FConnState& CS,
+	int32 NumTracked,
+	int32 NumCand,
+	int32 NumChosen,
+	float UsedBytes,
+	float TickDt)
 {
 	if (!ConnMgr || !ConnMgr->NetConnection) return;
 
-	const float UsedKB = UsedBytes / 1024.f;
-	const float UsedKBs = UsedBytes / 1024.f / FMath::Max(1e-3f, TickDt);
-	const float BudgetKBs = CS.Viewer.BudgetBytesPerTick / 1024.f / FMath::Max(1e-3f, TickDt);
-
 	APlayerController* PC = ConnMgr->NetConnection->PlayerController;
 
+	const float UsedKB    = UsedBytes / 1024.f;
+	const float UsedKBs   = UsedBytes / 1024.f / FMath::Max(1e-3f, TickDt);
+	const float BudgetKBs = CS.Viewer.BudgetBytesPerTick / 1024.f / FMath::Max(1e-3f, TickDt);
+
+	// Считаем типы кораблей по всему миру
+	const FShipTypeCounts Counts = CalcShipTypeCounts(TrackedShips);
+
+	// Основная строка, как раньше, но с разбиением по типам
 	UE_LOG(LogSpaceRepGraph, Display,
-		TEXT("[REP] PC=%s | Ships(Tracked=%d) | Cand=%d -> Chosen=%d (Groups=%d) | Used=%.1f KB (%.1f KB/s) / Budget=%.1f KB/s | RTT=%.0f ms"),
+		TEXT("[REP] PC=%s | Ships(Total=%d Players=%d NPC=%d) | Cand=%d -> Chosen=%d (Groups=%d) | Used=%.1f KB (%.1f KB/s) / Budget=%.1f KB/s | RTT=%.0f ms"),
 		*GetNameSafe(PC),
-		NumTracked,
+		Counts.Total, Counts.Players, Counts.NPCs,
 		NumCand, NumChosen, CS.GroupsFormed,
 		UsedKB, UsedKBs, BudgetKBs,
 		CS.Viewer.RTTmsEMA);
+
+	// Детальный лог: какие конкретно корабли выбраны для этого PC
+	if (CVar_SpaceRepGraph_LiveLog.GetValueOnAnyThread() >= 2 && PC)
+	{
+		APawn* ViewerPawn = PC->GetPawn();
+		const FVector ViewLoc = ViewerPawn ? ViewerPawn->GetActorLocation() : FVector::ZeroVector;
+
+		FString Line = FString::Printf(TEXT("[REP] PC=%s ChosenShips:"), *GetNameSafe(PC));
+
+		for (TWeakObjectPtr<AActor> APtr : CS.Selected)
+		{
+			const AActor* A = APtr.Get();
+			if (!IsValid(A))
+				continue;
+
+			const AShipPawn* Ship = Cast<AShipPawn>(A);
+			if (!Ship)
+				continue;
+
+			const APawn* Pawn = Cast<APawn>(Ship);
+			const AController* C = Pawn ? Pawn->GetController() : nullptr;
+			const bool bIsPlayer = (C && C->IsPlayerController());
+
+			const float DistM = ViewerPawn
+				? FVector::Dist(ViewLoc, Ship->GetActorLocation()) / 100.f
+				: 0.f;
+
+			Line += FString::Printf(TEXT(" [%s %s %.0fm]"),
+				*GetNameSafe(Ship),
+				bIsPlayer ? TEXT("P") : TEXT("NPC"),
+				DistM);
+		}
+
+		UE_LOG(LogSpaceRepGraph, Display, TEXT("%s"), *Line);
+	}
 }
