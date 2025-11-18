@@ -29,6 +29,7 @@ public:
 		ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction
 	) override;
+	void UpdateAI_AttackLaser(float Dt, AActor* Target);
 
 	/** Кого преследуем. Если пусто и bAutoAcquirePlayer=true — выбираем ближайший корабль игрока. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Target")
@@ -41,8 +42,63 @@ public:
 	/** Дистанция (см) позади носа цели, на которой хотим висеть. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Follow")
 	float FollowDistanceCm = 6000.f; // 60 м
+	/** Наклоняться в поворот (ролл) или держать ровный корабль. */
 
-	/** Смещение по высоте (см) относительно цели (по её Up-вектору). */
+
+	// ----------------- ATTACK MODE (лазер) -----------------
+
+	/** Включить режим агрессивной атаки с лазером вместо обычного Follow. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	bool bAttackMode = true;
+
+	/** Комфортная дистанция атаки (см, по сути "кольцо" вокруг цели). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	float AttackIdealDistanceCm = 4000.f; // 40 м
+
+	/** "Далеко": дальше этого — жмём газ почти в пол. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	float AttackFarDistanceCm = 9000.f; // 90 м
+
+	/** "Слишком близко": ближе — не разгоняемся вперёд как бешеный. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	float AttackTooCloseDistanceCm = 1500.f; // 15 м
+
+	/** Насколько агрессивнее, чем Follow, разгоняться к цели (множитель для PosKp). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="0.1", ClampMax="10.0"))
+	float AttackPosKpMul = 2.f;
+
+	/** Насколько усилить демпфирование по скорости (множитель для PosKd). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="0.1", ClampMax="10.0"))
+	float AttackPosKdMul = 1.5f;
+
+	/** При каком угле (градусы), если цель за кормой, переходим в "мертвую петлю". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="0.0", ClampMax="180.0"))
+	float AttackLoopTriggerAngleDeg = 130.f;
+
+	/** Минимальная дистанция (м), при которой пускать петлю имеет смысл. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	float AttackLoopMinDistM = 500.f;
+
+	/** Максимальная дистанция стрельбы лазером (м). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	float AttackFireMaxDistM = 3000.f;
+
+	/** Допустимый угол (конуса) по носу для стрельбы (градусы). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="1.0", ClampMax="45.0"))
+	float AttackFireAngleDeg = 10.f;
+
+	/** Эффективная "скорость" лазера (м/с) для расчёта упреждения. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack")
+	float AttackLaserSpeedMps = 300000.f;
+
+	/** Серверное решение: хотим ли в этом тике жать триггер лазера. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AI|Attack")
+	bool bWantsToFireLaser = false;
+
+	/** Куда целиться лазером (мировая позиция с упреждением). Актуально, если bWantsToFireLaser=true. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AI|Attack")
+	FVector LaserAimWorldLocation = FVector::ZeroVector;
+	/** Смещен	ие по высоте (см) относительно цели (по её Up-вектору). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Follow")
 	float FollowHeightCm = 0.f;
 
@@ -65,6 +121,7 @@ public:
 	/** Гейн [deg/s per deg] для pitch (нос вверх/вниз). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Orient")
 	float PitchGain_DegPerDeg = 6.f;
+	void    UpdateAI_Follow(float Dt, AActor* Target);
 
 	/** Максимальная ось страфа (A/D), чтобы корабль не улетал боком. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Orient", meta=(ClampMin="0.0", ClampMax="1.0"))

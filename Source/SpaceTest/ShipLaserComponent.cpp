@@ -21,6 +21,31 @@ static FVector Jitter(const FVector& D, float Deg)
 	if (Deg <= KINDA_SMALL_NUMBER) return D.GetSafeNormal();
 	return UKismetMathLibrary::RandomUnitVectorInConeInDegrees(D.GetSafeNormal(), Deg).GetSafeNormal();
 }
+void UShipLaserComponent::FireFromAI(const FVector& AimWorldLocation)
+{
+	AActor* Ow = GetOwner();
+	UWorld* W  = GetWorld();
+	if (!Ow || !W)
+		return;
+
+	// Только сервер управляет AI-огнём
+	if (!Ow->HasAuthority())
+		return;
+
+	const double Now    = (double)W->GetTimeSeconds();
+	const double Period = 1.0 / FMath::Max(1.0f, FireRateHz);
+
+	// Уважение каденса, как и в ServerFireShot_Implementation
+	if ((Now - ServerLastShotTimeS) + 1e-6 < Period - (double)CadenceToleranceSec)
+	{
+		return;
+	}
+
+	ServerLastShotTimeS = Now;
+
+	// Используем уже готовую механику спавна из стволов
+	ServerSpawn_FromAimPoint(AimWorldLocation);
+}
 
 // === ctor ===
 UShipLaserComponent::UShipLaserComponent()
@@ -321,8 +346,10 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 	const APawn* P = Cast<APawn>(GetOwner());
 	const AController* C = P ? P->GetController() : nullptr;
 
-	// Если это не игрок/не контролируемый Pawn — не душим, пусть стреляет
-	if (!P || !C)
+	// Если это не игрок (нет PlayerController) — не включаем анти-чит.
+	// Боты/турели/серверные штуки могут стрелять свободно.
+	const APlayerController* PC = C ? Cast<APlayerController>(C) : nullptr;
+	if (!P || !PC)
 	{
 		return true;
 	}
@@ -330,14 +357,14 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 	// 1) серверный viewpoint игрока
 	FVector ViewLoc = FVector::ZeroVector;
 	FRotator ViewRot = FRotator::ZeroRotator;
-	C->GetPlayerViewPoint(ViewLoc, ViewRot);
+	PC->GetPlayerViewPoint(ViewLoc, ViewRot);
 
 	const FVector DirNorm = Dir.GetSafeNormal();
 
 	// 2) расстояние Origin от камеры
 	// В мультиплеере камера клиента и сервера могут очень расходиться,
 	// плюс third-person, плюс наша хитрая CalcCamera → увеличиваем лимит.
-	constexpr float MaxOriginDist = 5000.f; // БЫЛО 150.f — этого вообще не хватает
+	constexpr float MaxOriginDist = 5000.f;
 	if (FVector::DistSquared(Origin, ViewLoc) > FMath::Square(MaxOriginDist))
 	{
 		return false;
@@ -345,7 +372,7 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 
 	// 3) угол между направлением шота и «вперёд» камеры
 	const FVector ViewFwd = ViewRot.Vector();
-	constexpr float MaxAngleDeg = 75.f; // раньше было 45°, расширяем конус
+	constexpr float MaxAngleDeg = 75.f;
 	const float CosLimit = FMath::Cos(FMath::DegreesToRadians(MaxAngleDeg));
 	const float CosAng   = FVector::DotProduct(DirNorm, ViewFwd);
 	if (CosAng < CosLimit)
@@ -365,8 +392,7 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 		const double CosD = FMath::Clamp(FVector::DotProduct(PrevDir.GetSafeNormal(), DirNorm), -1.0, 1.0);
 		const double dAngDeg = FMath::RadiansToDegrees(FMath::Acos(CosD));
 
-		// до 1080°/с (3 оборота/сек) — как и раньше
-		constexpr double MaxDegPerSec = 1080.0;
+		constexpr double MaxDegPerSec = 1080.0; // до 3 оборотов/сек
 		if (dAngDeg / Dt > MaxDegPerSec)
 		{
 			PrevTime = Now;

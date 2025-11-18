@@ -73,7 +73,8 @@ public:
 	// === UActorComponent ===
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float Dt, ELevelTick, FActorComponentTickFunction*) override;
-
+	UFUNCTION(BlueprintCallable, Category="AI")
+	void FireFromAI(const FVector& AimWorldLocation);
 protected:
 	// ----- Служебка -----
 	bool ComputeAimRay_Client(FVector& OutOrigin, FVector& OutDir) const; // берём из UShipCursorPilotComponent::GetAimRay
