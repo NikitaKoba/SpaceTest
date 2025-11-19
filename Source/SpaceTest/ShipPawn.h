@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "ShipCursorPilotComponent.h"
 #include "ShipLaserComponent.h"
+#include "SpaceGlobalCoords.h"
 #include "GameFramework/Pawn.h"
 #include "Camera/CameraTypes.h"
 #include "ShipPawn.generated.h"
@@ -31,6 +32,7 @@ class SPACETEST_API AShipPawn : public APawn
 
 public:
 	AShipPawn();
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="HUD", meta=(AllowPrivateAccess="true"))
 	UShipCursorPilotComponent* CursorPilot = nullptr;
 	// Components
@@ -38,8 +40,19 @@ public:
 	UStaticMeshComponent* ShipMesh;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat", meta=(AllowPrivateAccess="true"))
 	UShipLaserComponent* Laser; // <—
-	// ShipPawn.h
+	// ShipPaw	n.h
+	// Глобальная позиция (серверный источник истины для "где в вселенной корабль")
+	const FGlobalPos& GetGlobalPos() const { return GlobalPos; }
+	UPROPERTY(VisibleInstanceOnly, Category = "Space|Global")
+	FGlobalPos GlobalPos;
+	// Установить глобальную позицию и телепортнуть Actor в соответствующее место мира
+	void SetGlobalPos(const FGlobalPos& InPos);
 
+	// Синхронизировать GlobalPos <- из текущего GetActorLocation (используем на сервере)
+	void SyncGlobalFromWorld();
+
+	// Синхронизировать ActorLocation <- из GlobalPos (когда захотим телепорт/ребазу)
+	void SyncWorldFromGlobal();
 	// ...
 	// Fire input
 	void Action_FirePressed();   // <—

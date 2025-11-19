@@ -61,12 +61,46 @@ AShipPawn::AShipPawn()
 	
 }
 
-
+// ShipPawn.cpp
+// ShipPawn.cpp
 void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// стартовый сэмпл для камеры
+	// ============ ПРИНУДИТЕЛЬНАЯ НОРМАЛИЗАЦИЯ ============
+	if (HasAuthority())
+	{
+		const FVector SpawnWorldLoc = GetActorLocation();
+		const float DistFromOrigin = SpawnWorldLoc.Size();
+        
+		constexpr float FAR_THRESHOLD_UU = 1000000.f; // 10 км
+        
+		if (DistFromOrigin > FAR_THRESHOLD_UU)
+		{
+			UE_LOG(LogTemp, Warning, 
+				TEXT("[Ship %s] BeginPlay: Spawned FAR (%.0f km) - FORCING to Offset coordinates"),
+				*GetName(), DistFromOrigin / 100000.f);
+
+			// 1) Сохраняем глобальную координату
+			GlobalPos = SpaceGlobal::WorldToGlobal(SpawnWorldLoc);
+            
+			// 2) ПРИНУДИТЕЛЬНО телепортируем к OFFSET (игнорируя Sector)
+			//    Offset обычно < 100 км, что безопасно для физики
+			const FVector LocalLoc = GlobalPos.Offset;
+            
+			SetActorLocation(LocalLoc, false, nullptr, ETeleportType::TeleportPhysics);
+            
+			UE_LOG(LogTemp, Warning,
+				TEXT("  -> FORCED to Offset: WorldLoc=%s Global=%s"),
+				*LocalLoc.ToString(), *GlobalPos.ToString());
+		}
+		else
+		{
+			SyncGlobalFromWorld();
+		}
+	}
+	
+	// ============ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ ============
 	FCamSample S;
 	S.Time = FApp::GetCurrentTime();
 	const FTransform X = ShipMesh->GetComponentTransform();
@@ -90,6 +124,23 @@ void AShipPawn::Tick(float DeltaSeconds)
 	S.Rot = X.GetRotation();
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
+	if (HasAuthority())
+	{
+		SyncGlobalFromWorld();
+
+		static float LogT = 0.f;
+		LogT += DeltaSeconds;
+		if (LogT > 1.f)
+		{
+			LogT = 0.f;
+			UE_LOG(LogTemp, Warning,
+				TEXT("[Ship %s] Tick WorldLoc=%s Global=%s"),
+				*GetName(),
+				*GetActorLocation().ToString(),
+				*GlobalPos.ToString());
+		}
+	}
+
 }
 
 void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -106,7 +157,8 @@ void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 	PlayerInputComponent->BindAction(TEXT("ToggleFlightAssist"), IE_Pressed, this, &AShipPawn::Action_ToggleFA);
 	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Pressed,  this, &AShipPawn::Action_FirePressed);
 	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Released, this, &AShipPawn::Action_FireReleased);
-}
+
+}	
 // --- Combat input ---
 void AShipPawn::Action_FirePressed()
 {
@@ -336,4 +388,35 @@ void AShipPawn::Axis_MousePitch(float V)
 void AShipPawn::Action_ToggleFA()
 {
 	if (Flight) Flight->ToggleFlightAssist();
+}
+void AShipPawn::SetGlobalPos(const FGlobalPos& InPos)
+{
+	GlobalPos = InPos;
+
+	// Пока просто телепорт по world-локации, без сложных сетевых фокусов.
+	// Потом, когда интегрируем с ShipNetComponent, можно будет вызывать
+	// что-то вроде "ApplySnapFromGlobal" или спец. API.
+	if (UWorld* World = GetWorld())
+	{
+		const FVector NewWorldLoc = SpaceGlobal::GlobalToWorld(GlobalPos);
+		SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
+void AShipPawn::SyncGlobalFromWorld()
+{
+	if (UWorld* World = GetWorld())
+	{
+		const FVector WorldLoc = GetActorLocation();
+		GlobalPos = SpaceGlobal::WorldToGlobal(WorldLoc);
+	}
+}
+
+void AShipPawn::SyncWorldFromGlobal()
+{
+	if (UWorld* World = GetWorld())
+	{
+		const FVector NewWorldLoc = SpaceGlobal::GlobalToWorld(GlobalPos);
+		SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+	}
 }
