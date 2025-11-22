@@ -4,61 +4,39 @@
 #include "CoreMinimal.h"
 #include "SpaceGlobalCoords.generated.h"
 
-// ------------------------------
-// Глобальная позиция во вселенной
-// ------------------------------
-//
-// Мы делим пространство на кубические "ячейки" (сектора) размером CellSizeUU см.
-// FGlobalPos = Sector * CellSizeUU + Offset, где:
-//   - Sector: целочисленный индекс ячейки (всё, что далеко)
-//   - Offset: локальное смещение внутри ячейки (float, до CellSizeUU по модулю)
-//
-// При этом игровые акторы живут в обычных world координатах
-// (GetActorLocation), а FGlobalPos — параллельный, устойчивый
-// к огромным расстояниям, без потери точности.
 USTRUCT(BlueprintType)
 struct SPACETEST_API FGlobalPos
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
 
-	// Целочисленный индекс "сектора" (ячейки глобальной сетки)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Space|Global")
-	FIntVector Sector = FIntVector::ZeroValue;
+public:
+    // Целочисленный сектор (в твоих логах Sector=(-24,15,38))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    FIntVector Sector = FIntVector::ZeroValue;
 
-	// Локальное смещение в пределах сектора, в UU (1uu = 1см)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Space|Global")
-	FVector Offset = FVector::ZeroVector;
+    // Смещение внутри сектора в UU (0..1'000'000)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    FVector Offset = FVector::ZeroVector;
 
-	FGlobalPos() = default;
-
-	// Просто удобный конструктор "из мира" (пользуется SpaceGlobal::WorldToGlobal)
-	explicit FGlobalPos(const FVector& WorldLoc);
-
-	// Для дебага
-	FString ToString() const;
-
-	// Построить из "абсолютной" позиции в UU (double)
-	static FGlobalPos FromAbsolute(const FVector3d& AbsPos, double CellSizeUU);
-
-	// Преобразовать в абсолютный вектор (double) в UU
-	FVector3d ToAbsolute(double CellSizeUU) const;
-
-	// Вектор от A к B (B - A) в UU (double)
-	static FVector3d Delta(const FGlobalPos& A, const FGlobalPos& B, double CellSizeUU);
+    // Удобный ToString для логов
+    FString ToString() const
+    {
+        return FString::Printf(
+            TEXT("Sector=(%d,%d,%d) Offset=%s"),
+            Sector.X, Sector.Y, Sector.Z,
+            *Offset.ToString()
+        );
+    }
 };
 
-// Набор вспомогательных функций в неймспейсе
 namespace SpaceGlobal
 {
-	// Размер ячейки (в UU). По умолчанию 1e8 uu = 1000 км, но можно менять через CVar.
-	SPACETEST_API double GetCellSizeUU();
+    // Один сектор = 1'000'000 UU
+    static constexpr double SectorUU = 1000000.0;
 
-	// Конвертация из world-space в глобальные координаты
-	SPACETEST_API FGlobalPos WorldToGlobal(const FVector& WorldLoc);
+    // FGlobalPos -> глобальный FVector3d
+    SPACETEST_API FVector3d ToGlobalVector(const FGlobalPos& P);
 
-	// Конвертация обратно (в данный момент 1:1, без floating origin)
-	SPACETEST_API FVector GlobalToWorld(const FGlobalPos& GP);
-
-	// Вектор B - A, удобный алиас к FGlobalPos::Delta
-	SPACETEST_API FVector3d Delta(const FGlobalPos& A, const FGlobalPos& B);
+    // Глобальный FVector3d -> FGlobalPos
+    SPACETEST_API void FromGlobalVector(const FVector3d& G, FGlobalPos& Out);
 }

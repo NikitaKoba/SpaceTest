@@ -69,7 +69,8 @@ public:
 	// Сетевой компонент (в нём вся сеть)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UShipNetComponent* Net;
-
+	UPROPERTY(EditAnywhere, Category="FloatingOrigin")
+	bool bEnableFloatingOrigin = true;
 	// Camera config
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera") bool bUseCalcCamera = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera", meta=(ClampMin="0.0", ClampMax="2.0"))
@@ -98,6 +99,7 @@ public:
 	// APawn
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+	void UpdateGlobalPosIncremental(float DeltaSeconds);
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
 

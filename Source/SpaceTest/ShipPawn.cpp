@@ -3,6 +3,7 @@
 #include "FlightComponent.h"
 #include "ShipNetComponent.h"
 #include "ShipCursorPilotComponent.h"
+#include "SpaceFloatingOriginSubsystem.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Camera/CameraComponent.h"
@@ -67,40 +68,35 @@ void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// ============ ПРИНУДИТЕЛЬНАЯ НОРМАЛИЗАЦИЯ ============
+	// --- 1. На сервере ОДИН РАЗ считаем GlobalPos из текущих world-координат ---
 	if (HasAuthority())
 	{
-		const FVector SpawnWorldLoc = GetActorLocation();
-		const float DistFromOrigin = SpawnWorldLoc.Size();
-        
-		constexpr float FAR_THRESHOLD_UU = 1000000.f; // 10 км
-        
-		if (DistFromOrigin > FAR_THRESHOLD_UU)
-		{
-			UE_LOG(LogTemp, Warning, 
-				TEXT("[Ship %s] BeginPlay: Spawned FAR (%.0f km) - FORCING to Offset coordinates"),
-				*GetName(), DistFromOrigin / 100000.f);
+		// ВАЖНО: Только ОДИН РАЗ при спавне!
+		// После этого GlobalPos обновляется ИНКРЕМЕНТНО в Tick()
+		SyncGlobalFromWorld();
+		
+		UE_LOG(LogTemp, Warning,
+			TEXT("[SHIP SPAWN] %s | WorldLoc=%s | GlobalPos=%s"),
+			*GetName(),
+			*GetActorLocation().ToString(),
+			*GlobalPos.ToString());
+	}
 
-			// 1) Сохраняем глобальную координату
-			GlobalPos = SpaceGlobal::WorldToGlobal(SpawnWorldLoc);
-            
-			// 2) ПРИНУДИТЕЛЬНО телепортируем к OFFSET (игнорируя Sector)
-			//    Offset обычно < 100 км, что безопасно для физики
-			const FVector LocalLoc = GlobalPos.Offset;
-            
-			SetActorLocation(LocalLoc, false, nullptr, ETeleportType::TeleportPhysics);
-            
-			UE_LOG(LogTemp, Warning,
-				TEXT("  -> FORCED to Offset: WorldLoc=%s Global=%s"),
-				*LocalLoc.ToString(), *GlobalPos.ToString());
-		}
-		else
+	// --- 2. Floating Origin anchor ---
+	if (HasAuthority() && bEnableFloatingOrigin)
+	{
+		if (UWorld* World = GetWorld())
 		{
-			SyncGlobalFromWorld();
+			if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ShipPawn] Enable FloatingOrigin, Anchor=%s"), *GetName());
+				FO->SetEnabled(true);
+				FO->SetAnchor(this);
+			}
 		}
 	}
-	
-	// ============ ОСТАЛЬНОЕ БЕЗ ИЗМЕНЕНИЙ ============
+
+	// --- 3. Камера (как у тебя было) ---
 	FCamSample S;
 	S.Time = FApp::GetCurrentTime();
 	const FTransform X = ShipMesh->GetComponentTransform();
@@ -109,14 +105,19 @@ void AShipPawn::BeginPlay()
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
 
-	if (Camera) Camera->SetFieldOfView(CameraFOV);
+	if (Camera)
+	{
+		Camera->SetFieldOfView(CameraFOV);
+	}
 }
+
+
 
 void AShipPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// свежий сэмпл для камеры
+	// Свежий сэмпл для камеры
 	FCamSample S;
 	S.Time = FApp::GetCurrentTime();
 	const FTransform X = ShipMesh->GetComponentTransform();
@@ -124,23 +125,91 @@ void AShipPawn::Tick(float DeltaSeconds)
 	S.Rot = X.GetRotation();
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
+
+	// ========================================================================
+	// КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Инкрементное обновление GlobalPos
+	// ========================================================================
 	if (HasAuthority())
 	{
-		SyncGlobalFromWorld();
+		// СТАРЫЙ КОД (НЕПРАВИЛЬНО):
+		// SyncGlobalFromWorld();  // ← Пересчёт каждый тик ломает всё!
 
+		// НОВЫЙ КОД (ПРАВИЛЬНО):
+		UpdateGlobalPosIncremental(DeltaSeconds);
+
+		// Диагностика (раз в секунду)
 		static float LogT = 0.f;
 		LogT += DeltaSeconds;
 		if (LogT > 1.f)
 		{
 			LogT = 0.f;
-			UE_LOG(LogTemp, Warning,
-				TEXT("[Ship %s] Tick WorldLoc=%s Global=%s"),
-				*GetName(),
-				*GetActorLocation().ToString(),
-				*GlobalPos.ToString());
+			
+			// Проверяем консистентность: recalc vs incremental
+			FGlobalPos RecalcGlobal;
+			if (UWorld* World = GetWorld())
+			{
+				if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+				{
+					FO->WorldToGlobal(GetActorLocation(), RecalcGlobal);
+					
+					const FVector3d GlobalVecIncr = SpaceGlobal::ToGlobalVector(GlobalPos);
+					const FVector3d GlobalVecRecalc = SpaceGlobal::ToGlobalVector(RecalcGlobal);
+					const double DriftDist = FVector3d::Distance(GlobalVecIncr, GlobalVecRecalc);
+					
+					if (DriftDist > 1000.0)  // >10 метров = проблема!
+					{
+						UE_LOG(LogTemp, Error,
+							TEXT("[SHIP DRIFT] %s | Incremental=%s | Recalc=%s | DRIFT=%.0f cm!"),
+							*GetName(),
+							*GlobalPos.ToString(),
+							*RecalcGlobal.ToString(),
+							DriftDist);
+						
+						// Корректируем дрейф (но это не должно происходить часто!)
+						GlobalPos = RecalcGlobal;
+					}
+					else
+					{
+						UE_LOG(LogTemp, Verbose,
+							TEXT("[SHIP OK] %s | Global=%s | Drift=%.1f cm"),
+							*GetName(),
+							*GlobalPos.ToString(),
+							DriftDist);
+					}
+				}
+			}
 		}
 	}
+}
+void AShipPawn::UpdateGlobalPosIncremental(float DeltaSeconds)
+{
+	if (!ShipMesh)
+		return;
 
+	// Получаем текущую velocity в world-space
+	const FVector VelocityWorld_cmps = ShipMesh->GetComponentVelocity();  // см/с
+
+	// Конвертируем в глобальный вектор скорости
+	// ВАЖНО: velocity в UE - это world-space направление + magnitude
+	// При floating origin shift направление velocity остаётся валидным!
+	const FVector3d VelocityGlobal_cmps(VelocityWorld_cmps);
+
+	// Инкрементальное обновление глобальной позиции
+	const FVector3d CurrentGlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
+	const FVector3d NewGlobalVec = CurrentGlobalVec + VelocityGlobal_cmps * (double)DeltaSeconds;
+
+	// Обновляем GlobalPos
+	SpaceGlobal::FromGlobalVector(NewGlobalVec, GlobalPos);
+
+	// ДИАГНОСТИКА: Логируем если скорость большая
+	if (VelocityWorld_cmps.Size() > 100000.f)  // >1 км/с
+	{
+		UE_LOG(LogTemp, VeryVerbose,
+			TEXT("[SHIP FAST] %s | Vel=%.0f m/s | Global=%s"),
+			*GetName(),
+			VelocityWorld_cmps.Size() / 100.0,
+			*GlobalPos.ToString());
+	}
 }
 
 void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -393,13 +462,19 @@ void AShipPawn::SetGlobalPos(const FGlobalPos& InPos)
 {
 	GlobalPos = InPos;
 
-	// Пока просто телепорт по world-локации, без сложных сетевых фокусов.
-	// Потом, когда интегрируем с ShipNetComponent, можно будет вызывать
-	// что-то вроде "ApplySnapFromGlobal" или спец. API.
 	if (UWorld* World = GetWorld())
 	{
-		const FVector NewWorldLoc = SpaceGlobal::GlobalToWorld(GlobalPos);
-		SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+		if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+		{
+			const FVector NewWorldLoc = FO->GlobalToWorld(GlobalPos);
+			SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+		}
+		else
+		{
+			// Фоллбек: origin = (0,0,0), просто раскладываем глобальные координаты
+			const FVector3d GlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
+			SetActorLocation(FVector(GlobalVec), false, nullptr, ETeleportType::TeleportPhysics);
+		}
 	}
 }
 
@@ -407,8 +482,17 @@ void AShipPawn::SyncGlobalFromWorld()
 {
 	if (UWorld* World = GetWorld())
 	{
-		const FVector WorldLoc = GetActorLocation();
-		GlobalPos = SpaceGlobal::WorldToGlobal(WorldLoc);
+		if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+		{
+			// Конвертим world -> global через сабсистему
+			FO->WorldToGlobal(GetActorLocation(), GlobalPos);
+		}
+		else
+		{
+			// Фоллбек: origin = (0,0,0)
+			const FVector3d GlobalVec(GetActorLocation());
+			SpaceGlobal::FromGlobalVector(GlobalVec, GlobalPos);
+		}
 	}
 }
 
@@ -416,7 +500,16 @@ void AShipPawn::SyncWorldFromGlobal()
 {
 	if (UWorld* World = GetWorld())
 	{
-		const FVector NewWorldLoc = SpaceGlobal::GlobalToWorld(GlobalPos);
-		SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+		if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+		{
+			const FVector NewWorldLoc = FO->GlobalToWorld(GlobalPos);
+			SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+		}
+		else
+		{
+			const FVector3d GlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
+			SetActorLocation(FVector(GlobalVec), false, nullptr, ETeleportType::TeleportPhysics);
+		}
 	}
 }
+

@@ -2,6 +2,7 @@
 #include "ShipNetComponent.h"
 #include "ShipPawn.h"
 #include "FlightComponent.h"
+#include "SpaceFloatingOriginSubsystem.h"
 
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
@@ -227,51 +228,107 @@ void UShipNetComponent::OnRep_ServerSnap()
 		}
 		else
 		{
-			// EMA для оффсета
 			ServerTimeToClientTime = FMath::Lerp(ServerTimeToClientTime, EstOffset, 0.10);
 		}
 
-		// выборка «остатка» для джиттера (чем ближе к нулю — тем точнее оффсет)
 		const double Residual = EstOffset - ServerTimeToClientTime;
 		AdaptiveInterpDelay_OnSample(Residual);
 	}
 
-	// --- Сим-прокси: интерп-буфер (клиентское время в снапе) + детектор телепорта ---
+	// --- Сим-прокси: интерп-буфер + телепорт-детектор ---
 	if (OwPawn && OwPawn->GetLocalRole() == ROLE_SimulatedProxy)
 	{
 		const double ClientTime = (double)ServerSnap.ServerTime + ServerTimeToClientTime;
 
-		// Телепорт-детектор по скачку относительно последнего узла буфера.
-		// Порог 100000 uu ≈ 1 км (подгони под свои масштабы).
-		const float TeleportCutoffUU = 100000.f;
-
+		// ====================================================================
+		// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Телепорт-детектор в ГЛОБАЛЬНЫХ координатах!
+		// ====================================================================
+		
+		const float TeleportCutoffUU = 100000.f;  // 1 км
 		bool bDidTeleport = false;
 
-		if (NetBuffer.Num() > 0)
+		if (NetBuffer.Num() > 0 && Ship)
 		{
 			const FInterpNode& Last = NetBuffer.Last();
-			const double Jump = FVector::Dist(ServerSnap.Loc, Last.Loc);
-
-			if (Jump > (double)TeleportCutoffUU)
+			
+			// СТАРЫЙ КОД (НЕПРАВИЛЬНО):
+			// const double Jump = FVector::Dist(ServerSnap.Loc, Last.Loc);  // ← В локальных координатах!
+			
+			// НОВЫЙ КОД (ПРАВИЛЬНО):
+			// Конвертируем обе позиции в глобальные и сравниваем там
+			UWorld* World = GetWorld();
+			USpaceFloatingOriginSubsystem* FO = World ? World->GetSubsystem<USpaceFloatingOriginSubsystem>() : nullptr;
+			
+			if (FO)
 			{
-				// Резкий разрыв: чистим буфер, добавляем единичный ключ и снапаем актор.
-				NetBuffer.Reset();
-
-				FInterpNode N;
-				N.Time   = ClientTime;
-				N.Loc    = ServerSnap.Loc;
-				N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
-				N.Vel    = ServerSnap.Vel;
-				N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f);
-				NetBuffer.Add(N);
-
-				if (Ship)
+				// Глобальные координаты последнего узла буфера
+				const FVector3d LastGlobal = FO->WorldToGlobalVector(Last.Loc);
+				
+				// Глобальные координаты нового снапа
+				const FVector3d SnapGlobal = FO->WorldToGlobalVector(ServerSnap.Loc);
+				
+				// Прыжок в ГЛОБАЛЬНЫХ координатах
+				const double JumpGlobal = FVector3d::Distance(SnapGlobal, LastGlobal);
+				
+				if (JumpGlobal > (double)TeleportCutoffUU)
 				{
+					// НАСТОЯЩИЙ телепорт (в глобальных координатах)
+					UE_LOG(LogShipNet, Warning,
+						TEXT("[TELEPORT DETECTED] %s | JumpGlobal=%.0f m | LastGlobal=%s | SnapGlobal=%s"),
+						*GetNameSafe(Ship),
+						JumpGlobal / 100.0,
+						*LastGlobal.ToString(),
+						*SnapGlobal.ToString());
+					
+					// Чистим буфер и снапаем
+					NetBuffer.Reset();
+
+					FInterpNode N;
+					N.Time   = ClientTime;
+					N.Loc    = ServerSnap.Loc;
+					N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
+					N.Vel    = ServerSnap.Vel;
+					N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f);
+					NetBuffer.Add(N);
+
 					Ship->SetActorLocationAndRotation(
 						N.Loc, N.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
-				}
 
-				bDidTeleport = true;
+					bDidTeleport = true;
+				}
+				else if (JumpGlobal > 50000.0)  // >500 м - логируем, но не телепортим
+				{
+					UE_LOG(LogShipNet, Verbose,
+						TEXT("[BIG JUMP] %s | JumpGlobal=%.0f m (below teleport threshold)"),
+						*GetNameSafe(Ship),
+						JumpGlobal / 100.0);
+				}
+			}
+			else
+			{
+				// Fallback без FloatingOrigin (старая логика)
+				const double Jump = FVector::Dist(ServerSnap.Loc, Last.Loc);
+				if (Jump > (double)TeleportCutoffUU)
+				{
+					UE_LOG(LogShipNet, Warning,
+						TEXT("[TELEPORT DETECTED - Fallback] %s | Jump=%.0f m"),
+						*GetNameSafe(Ship),
+						Jump / 100.0);
+					
+					NetBuffer.Reset();
+					FInterpNode N;
+					N.Time   = ClientTime;
+					N.Loc    = ServerSnap.Loc;
+					N.Rot    = ServerSnap.RotCS.ToRotator().Quaternion();
+					N.Vel    = ServerSnap.Vel;
+					N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f);
+					NetBuffer.Add(N);
+
+					Ship->SetActorLocationAndRotation(
+						N.Loc, N.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+
+					bDidTeleport = true;
+				}
 			}
 		}
 
@@ -286,14 +343,13 @@ void UShipNetComponent::OnRep_ServerSnap()
 			N.AngVel = (ServerSnap.AngVelDeg) * (PI / 180.f);
 			NetBuffer.Add(N);
 
-			// Подрезать старые узлы (держим ~1 секунду истории)
+			// Подрезать старые узлы
 			const double KeepFrom = Now - 1.0;
 			int32 FirstValid = 0;
 			while (FirstValid < NetBuffer.Num() && NetBuffer[FirstValid].Time < KeepFrom) ++FirstValid;
 			if (FirstValid > 0)
 				NetBuffer.RemoveAt(0, FirstValid, EAllowShrinking::No);
 
-			// ЛОГ
 			if (UE_LOG_ACTIVE(LogShipNet, VeryVerbose))
 			{
 				UE_LOG(LogShipNet, VeryVerbose, TEXT("[SIMPROXY] NetBuffer=%d delay=%.3f"),
@@ -320,9 +376,6 @@ void UShipNetComponent::OnRep_ServerSnap()
 		{
 			PendingInputs.RemoveAt(0, CutIdx+1, EAllowShrinking::No);
 		}
-
-		// [PREDICT] Здесь можно сделать настоящий rollback+replay по PendingInputs,
-		// пока оставляем мягкую реконсиляцию в Tick.
 	}
 }
 
@@ -454,24 +507,49 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	const FVector VelC = ShipMesh->GetComponentVelocity();
 	const FVector Wcur = ShipMesh->GetPhysicsAngularVelocityInRadians();
 
-	// --- метрики ошибки ---
-	const double PosErr = (LocS - LocC).Size();
-	const double VelErr = (VelS - VelC).Size();
-	const double AngErr = (Wrad - Wcur).Size();
+	// ========================================================================
+	// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Ошибка в ГЛОБАЛЬНЫХ координатах!
+	// ========================================================================
+	
+	double PosErr = 0.0;
+	double VelErr = (VelS - VelC).Size();
+	double AngErr = (Wrad - Wcur).Size();
+	
+	UWorld* World = GetWorld();
+	USpaceFloatingOriginSubsystem* FO = World ? World->GetSubsystem<USpaceFloatingOriginSubsystem>() : nullptr;
+	
+	if (FO)
+	{
+		// Конвертируем в глобальные координаты для корректного измерения ошибки
+		const FVector3d LocSGlobal = FO->WorldToGlobalVector(LocS);
+		const FVector3d LocCGlobal = FO->WorldToGlobalVector(LocC);
+		PosErr = FVector3d::Distance(LocSGlobal, LocCGlobal);
+	}
+	else
+	{
+		// Fallback
+		PosErr = (LocS - LocC).Size();
+	}
 
-	// --- пороги жёсткой ресинхронизации (без CVAR; подгони при желании) ---
-	const float POS_HARD_SNAP  = 8000.f;   // 80 м (uu = см)
-	const float VEL_HARD_SNAP  = 30000.f;  // 300 м/с в uu/s
-	const float ANGV_HARD_SNAP = 4.0f;     // ~230°/с в рад/с
+	// --- пороги жёсткой ресинхронизации ---
+	const float POS_HARD_SNAP  = 8000.f;   // 80 м
+	const float VEL_HARD_SNAP  = 30000.f;  // 300 м/с
+	const float ANGV_HARD_SNAP = 4.0f;     // ~230°/с
 
-	// Если после столкновения сервер сильно разошёлся с клиентом — жёсткий ресинк.
+	// Если сильное расхождение — жёсткий ресинк
 	if (PosErr > POS_HARD_SNAP || VelErr > VEL_HARD_SNAP || AngErr > ANGV_HARD_SNAP)
 	{
+		UE_LOG(LogShipNet, Warning,
+			TEXT("[HARD SNAP] %s | PosErr=%.0f m | VelErr=%.0f m/s | AngErr=%.1f rad/s"),
+			*GetNameSafe(Ship),
+			PosErr / 100.0,
+			VelErr / 100.0,
+			AngErr);
+		
 		ShipMesh->SetWorldLocationAndRotation(LocS, RotS.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
 		ShipMesh->SetPhysicsLinearVelocity(VelS, false);
 		ShipMesh->SetPhysicsAngularVelocityInRadians(Wrad, false);
 
-		// Срезаем неприменённые предсказанные инпуты — они уже невалидны после удара.
 		if (PendingInputs.Num() > 0)
 			PendingInputs.Reset();
 
@@ -479,16 +557,15 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	}
 
 	// --- мягкая реконсиляция (критически демпфированный PD) ---
-	const float TauPos   = 0.08f; // «время подтяжки» позиции
-	const float TauAng   = 0.10f; // «время подтяжки» ориентации
+	const float TauPos   = 0.08f;
+	const float TauAng   = 0.10f;
 	const float AlphaPos = 1.f - FMath::Exp(-DeltaSeconds / TauPos);
 	const float AlphaAng = 1.f - FMath::Exp(-DeltaSeconds / TauAng);
 
-	// Линейная часть: целевую скорость делаем как серверную + корректирующий термин по позиции
+	// Линейная часть
 	const FVector Vtgt = VelS + (LocS - LocC) / FMath::Max(1e-3f, TauPos);
 
-	// ограничение «пинка», чтобы не раскачать после контакта
-	const float MAX_VEL_NUDGE = 10000.f; // макс. изменение скорости за тик (uu/s)
+	const float MAX_VEL_NUDGE = 10000.f;
 	FVector Vnew = FMath::Lerp(VelC, Vtgt, AlphaPos);
 	const FVector Nudge = Vnew - VelC;
 	if (Nudge.Size() > MAX_VEL_NUDGE)
@@ -496,18 +573,15 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 
 	ShipMesh->SetPhysicsLinearVelocity(Vnew, false);
 
-	// Угловая часть: разница ориентаций + серверная угл. скорость
+	// Угловая часть
 	FVector Axis; float Angle = 0.f;
 	(RotS * RotC.Inverse()).ToAxisAndAngle(Axis, Angle);
 	if (Angle > PI) Angle -= 2.f * PI;
 	Axis = Axis.GetSafeNormal();
 
-	// Если почти нет вращательного расхождения — не дёргаем
 	if (!Axis.IsNearlyZero(1e-3f))
 	{
 		const FVector Wtgt = Wrad + Axis * (Angle / FMath::Max(1e-3f, TauAng));
-
-		// мягкий бленд без излишней агрессии
 		const FVector Wblend = FMath::Lerp(Wcur, Wtgt, AlphaAng);
 		ShipMesh->SetPhysicsAngularVelocityInRadians(Wblend, false);
 	}
