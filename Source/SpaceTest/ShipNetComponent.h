@@ -70,6 +70,9 @@ struct FShipServerSnap
 	// ACK: до какого инпута сервер досчитал
 	UPROPERTY() int32                  LastAckSeq = 0;
 
+	UPROPERTY() FVector_NetQuantize100 OriginGlobalM = FVector::ZeroVector;
+	UPROPERTY() FVector_NetQuantize    WorldOriginUU = FVector::ZeroVector;
+
 	bool NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess)
 	{
 		bool bOk = true, bTmp = true;
@@ -77,6 +80,8 @@ struct FShipServerSnap
 		bOk &= RotCS.NetSerialize(Ar, Map, bTmp);
 		bOk &= Vel.NetSerialize(Ar, Map, bTmp);
 		bOk &= AngVelDeg.NetSerialize(Ar, Map, bTmp);
+		bOk &= OriginGlobalM.NetSerialize(Ar, Map, bTmp);
+		bOk &= WorldOriginUU.NetSerialize(Ar, Map, bTmp);
 
 		Ar << ServerTime;
 
@@ -142,7 +147,9 @@ public:
 	// --- API из твоего кода ---
 	void SetLocalAxes(float F, float R, float U, float Roll);
 	void AddMouseDelta(float Dx, float Dy);
-
+	FVector3d PrevOriginGlobal = FVector3d::ZeroVector;
+	bool bHavePrevOrigin = false;
+	void HandleFloatingOriginShift();
 	// === Настройки ===
 	// Задержка для сим-прокси, будет адаптивно настраиваться
 	UPROPERTY(EditAnywhere) float NetInterpDelay = 0.12f;      // старт

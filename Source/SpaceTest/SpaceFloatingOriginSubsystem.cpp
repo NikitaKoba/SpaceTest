@@ -1,7 +1,9 @@
-// SpaceFloatingOriginSubsystem.cpp - КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ!
-// Плавный shift БЕЗ телепортов (Star Citizen style)
+// SpaceFloatingOriginSubsystem.cpp
 
 #include "SpaceFloatingOriginSubsystem.h"
+#include "ShipPawn.h"
+#include "SpaceWorldOriginActor.h"
+
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
@@ -10,16 +12,37 @@
 
 DEFINE_LOG_CATEGORY(LogSpaceFloatingOrigin);
 
-USpaceFloatingOriginSubsystem::USpaceFloatingOriginSubsystem()
+// ------------------------------
+// Initialize / Deinitialize
+// ------------------------------
+// Helper: сдвинуть весь мир (учитывает отсутствие UWorld::ApplyWorldOffset в сборке)
+static void ShiftEntireWorld(UWorld* World, const FVector& ShiftWorld)
 {
-}
+    if (!World || ShiftWorld.IsNearlyZero())
+    {
+        return;
+    }
 
+#if ENABLE_WORLD_ORIGIN_REBASING
+    World->ApplyWorldOffset(ShiftWorld, /*bWorldShift=*/true, FIntVector::ZeroValue, FIntVector::ZeroValue);
+#else
+    for (ULevel* Level : World->GetLevels())
+    {
+        if (Level)
+        {
+            Level->ApplyWorldOffset(ShiftWorld, /*bWorldShift=*/true);
+        }
+    }
+#endif
+}
 void USpaceFloatingOriginSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
 
-    OriginGlobal = FVector3d::ZeroVector;
+    OriginGlobal  = FVector3d::ZeroVector;
+    WorldOriginUU = FVector3d::ZeroVector;
     Anchor.Reset();
+    bHasValidOrigin = false;
 
     UE_LOG(LogSpaceFloatingOrigin, Log,
         TEXT("[FO] Initialize. OriginGlobal=%s"),
@@ -37,60 +60,190 @@ TStatId USpaceFloatingOriginSubsystem::GetStatId() const
     RETURN_QUICK_DECLARE_CYCLE_STAT(USpaceFloatingOriginSubsystem, STATGROUP_Tickables);
 }
 
+// ------------------------------
+// Enable / Anchor
+// ------------------------------
+
 void USpaceFloatingOriginSubsystem::SetEnabled(bool bInEnabled)
 {
     bEnabled = bInEnabled;
-
-    UE_LOG(LogSpaceFloatingOrigin, Log,
-        TEXT("[FO] SetEnabled=%d"), bEnabled ? 1 : 0);
+    UE_LOG(LogSpaceFloatingOrigin, Log, TEXT("[FO] SetEnabled=%d"), bEnabled ? 1 : 0);
 }
 
 void USpaceFloatingOriginSubsystem::SetAnchor(AActor* InAnchor)
 {
     Anchor = InAnchor;
-
     if (AActor* A = Anchor.Get())
     {
-        UE_LOG(LogSpaceFloatingOrigin, Log,
-            TEXT("[FO] SetAnchor=%s"), *A->GetName());
+        UE_LOG(LogSpaceFloatingOrigin, Log, TEXT("[FO] SetAnchor=%s"), *A->GetName());
     }
     else
     {
-        UE_LOG(LogSpaceFloatingOrigin, Log,
-            TEXT("[FO] SetAnchor=NULL"));
+        UE_LOG(LogSpaceFloatingOrigin, Log, TEXT("[FO] SetAnchor=NULL"));
     }
 }
+
+// ------------------------------
+// Tick: проверка расстояния и триггер shift
+// ------------------------------
 
 void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
 {
-    if (!bEnabled)
-        return;
-
     UWorld* World = GetWorld();
-    if (!World)
+    if (!World || !bEnabled)
+    {
         return;
+    }
 
-    AActor* AnchorActor = Anchor.Get();
-    if (!AnchorActor)
+    // Origin двигаем только на сервере / standalone.
+    const ENetMode NetMode = World->GetNetMode();
+    const bool bIsServerLike =
+        (NetMode == NM_Standalone || NetMode == NM_ListenServer || NetMode == NM_DedicatedServer);
+
+    if (!bIsServerLike)
+    {
+        // На клиентах Tick только для конвертации World<->Global, без сдвигов.
         return;
+    }
 
-    const FVector AnchorLoc = AnchorActor->GetActorLocation();
+    if (!Anchor.IsValid())
+    {
+        return;
+    }
+
+    if (!bHasValidOrigin)
+    {
+        // Инициализация: считаем текущий мир "нулём".
+        OriginGlobal  = FVector3d::ZeroVector;
+        WorldOriginUU = FVector::ZeroVector;
+        bHasValidOrigin = true;
+
+        const FVector ALoc = Anchor->GetActorLocation();
+        UE_LOG(LogSpaceFloatingOrigin, Log,
+            TEXT("[FO INIT] OriginGlobal=(0,0,0) WorldOriginUU=(0,0,0) AnchorLoc=(%.0f,%.0f,%.0f)"),
+            ALoc.X, ALoc.Y, ALoc.Z);
+    }
+
+    const FVector AnchorLoc = Anchor->GetActorLocation();
     const double Dist2      = AnchorLoc.SizeSquared();
     const double Radius2    = RecenterRadiusUU * RecenterRadiusUU;
 
-    // Если якорь ушёл дальше радиуса — сдвигаем мир
+    // Если корабль ушёл дальше радиуса — сдвигаем origin так, чтобы его глобальные координаты не менялись.
     if (Dist2 > Radius2)
     {
-        const FVector3d DeltaWorld(AnchorLoc);
-        const FVector3d NewOrigin = OriginGlobal + DeltaWorld;
-
-        ApplyOriginShift(NewOrigin);
+        const FVector3d AnchorGlobal = WorldToGlobalVector(AnchorLoc);
+        ApplyOriginShift(AnchorGlobal);
     }
 }
 
+
+// ------------------------------
+// Репликация origin'а через WorldOriginActor
+// ------------------------------
+
+void USpaceFloatingOriginSubsystem::ApplyReplicatedOrigin(const FVector3d& NewOriginGlobal,
+                                                          const FVector&  NewWorldOriginUU)
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    const ENetMode NetMode = World->GetNetMode();
+    const bool bIsClient   = (NetMode == NM_Client);
+
+    const FVector3d OldOrigin = OriginGlobal;
+    const FVector3d DeltaGlob = NewOriginGlobal - OldOrigin;
+
+    const FVector ShiftWorld(
+        static_cast<float>(-DeltaGlob.X),
+        static_cast<float>(-DeltaGlob.Y),
+        static_cast<float>(-DeltaGlob.Z));
+
+    OriginGlobal    = NewOriginGlobal;
+    WorldOriginUU   = FVector3d(NewWorldOriginUU);
+    bHasValidOrigin = true;
+
+    if (!bIsClient || ShiftWorld.IsNearlyZero())
+    {
+        UE_LOG(LogSpaceFloatingOrigin, Log,
+            TEXT("[FO REPL ORIGIN] (server/standalone) OriginGlobal=(%.0f,%.0f,%.0f) WorldOriginUU=(%.0f,%.0f,%.0f)"),
+            OriginGlobal.X, OriginGlobal.Y, OriginGlobal.Z,
+            WorldOriginUU.X, WorldOriginUU.Y, WorldOriginUU.Z);
+        return;
+    }
+
+    UE_LOG(LogSpaceFloatingOrigin, Log,
+        TEXT("[FO REPL ORIGIN] (client) OldOrigin=(%.0f,%.0f,%.0f) NewOrigin=(%.0f,%.0f,%.0f) ShiftWorld=(%.0f,%.0f,%.0f)"),
+        OldOrigin.X, OldOrigin.Y, OldOrigin.Z,
+        OriginGlobal.X, OriginGlobal.Y, OriginGlobal.Z,
+        ShiftWorld.X, ShiftWorld.Y, ShiftWorld.Z);
+
+    ShiftEntireWorld(World, ShiftWorld);
+
+    int32 ShipCount = 0;
+    for (TActorIterator<AShipPawn> ItShip(World); ItShip; ++ItShip)
+    {
+        AShipPawn* Ship = *ItShip;
+        Ship->SyncGlobalFromWorld();
+        ++ShipCount;
+    }
+
+    UE_LOG(LogSpaceFloatingOrigin, Log,
+        TEXT("[FO REPL ORIGIN END] ShipsResynced=%d"),
+        ShipCount);
+}
+
+// вызывать ТОЛЬКО на сервере, когда хочешь переставить world-origin (без физического shift'а)
+// вызывать ТОЛЬКО на сервере, когда хочешь переставить world-origin (без физического shift'а)
+void USpaceFloatingOriginSubsystem::ServerShiftWorldTo(const FVector& NewWorldOriginUU)
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    if (World->GetNetMode() == NM_Client)
+    {
+        // На клиентах ничего не делаем
+        return;
+    }
+
+    const FVector OldWorldOrigin = FVector(WorldOriginUU);
+    const FVector Delta          = NewWorldOriginUU - OldWorldOrigin;
+
+    if (!Delta.IsNearlyZero())
+    {
+        WorldOriginUU = FVector3d(NewWorldOriginUU);
+
+        // Обновляем актор-репликатор, чтобы клиенты получили новые Origin*
+        for (TActorIterator<ASpaceWorldOriginActor> It(World); It; ++It)
+        {
+            ASpaceWorldOriginActor* OriginActor = *It;
+            if (OriginActor && OriginActor->HasAuthority())
+            {
+                OriginActor->ServerSetOrigin(NewWorldOriginUU, OriginGlobal);
+                break;
+            }
+        }
+    }
+
+    bHasValidOrigin = true;
+}
+
+
+// ------------------------------
+// Конвертация World <-> Global
+// ------------------------------
+
 FVector3d USpaceFloatingOriginSubsystem::WorldToGlobalVector(const FVector& WorldLoc) const
 {
-    return OriginGlobal + FVector3d(WorldLoc);
+    // Всё в UU (см).
+    // WorldOriginUU — положение "нулевой" точки мира в World UU.
+    // Global = OriginGlobal + (WorldLoc - WorldOriginUU)
+    return OriginGlobal + (FVector3d(WorldLoc) - WorldOriginUU);
 }
 
 void USpaceFloatingOriginSubsystem::WorldToGlobal(const FVector& WorldLoc, FGlobalPos& OutPos) const
@@ -107,129 +260,107 @@ FVector USpaceFloatingOriginSubsystem::GlobalToWorld(const FGlobalPos& GP) const
 
 FVector USpaceFloatingOriginSubsystem::GlobalToWorld_Vector(const FVector3d& Global) const
 {
-    const FVector3d Local = Global - OriginGlobal;
+    // Обратное к WorldToGlobalVector:
+    // Global = OriginGlobal + (WorldLoc - WorldOriginUU)
+    // => WorldLoc = (Global - OriginGlobal) + WorldOriginUU
+    const FVector3d Local = (Global - OriginGlobal) + WorldOriginUU;
+
     return FVector(
-        (float)Local.X,
-        (float)Local.Y,
-        (float)Local.Z
-    );
+        static_cast<float>(Local.X),
+        static_cast<float>(Local.Y),
+        static_cast<float>(Local.Z));
 }
 
-// ============================================================================
-// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Плавный shift БЕЗ телепортов!
-// ============================================================================
+// ------------------------------
+// Основная функция сдвига origin'а и мира
+// ------------------------------
 
-void USpaceFloatingOriginSubsystem::ApplyOriginShift(const FVector3d& NewOriginGlobal)
+void USpaceFloatingOriginSubsystem::ApplyOriginShift(const FVector3d& NewOriginTarget)
 {
     UWorld* World = GetWorld();
     if (!World)
-        return;
-
-    const FVector3d DeltaGlobal = NewOriginGlobal - OriginGlobal;
-    const FVector3d OldOrigin = OriginGlobal;
-    OriginGlobal = NewOriginGlobal;
-
-    // Сдвиг в world-координатах (противоположный direction)
-    const FVector ShiftWorld(
-        (float)-DeltaGlobal.X,
-        (float)-DeltaGlobal.Y,
-        (float)-DeltaGlobal.Z
-    );
-
-    UE_LOG(LogSpaceFloatingOrigin, Warning,
-        TEXT("[FO SHIFT] ShiftWorld=%s (%.0f m) | OldOrigin=%s -> NewOrigin=%s"),
-        *ShiftWorld.ToString(),
-        ShiftWorld.Size() / 100.0,
-        *OldOrigin.ToString(),
-        *OriginGlobal.ToString());
-
-    // ========================================================================
-    // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ETeleportType::None вместо TeleportPhysics!
-    // ========================================================================
-    
-    int32 ActorCount = 0;
-    int32 PhysicsActorCount = 0;
-
-    for (TActorIterator<AActor> It(World); It; ++It)
     {
-        AActor* Actor = *It;
-        if (!Actor)
-            continue;
+        return;
+    }
 
-        ++ActorCount;
+    const ENetMode NetMode = World->GetNetMode();
+    const bool bIsServerLike =
+        (NetMode == NM_Standalone || NetMode == NM_ListenServer || NetMode == NM_DedicatedServer);
 
-        // Проверяем, есть ли у актора физика
-        bool bHasPhysics = false;
-        TArray<UPrimitiveComponent*> PhysicsComps;
-        Actor->GetComponents<UPrimitiveComponent>(PhysicsComps);
-        
-        for (UPrimitiveComponent* Comp : PhysicsComps)
-        {
-            if (Comp && Comp->IsSimulatingPhysics())
-            {
-                bHasPhysics = true;
-                ++PhysicsActorCount;
-                break;
-            }
-        }
+    if (!bIsServerLike)
+    {
+        return;
+    }
 
-        // ====================================================================
-        // КРИТИЧНО: None = НЕТ телепорта, НЕТ сброса velocity!
-        // ====================================================================
-        Actor->AddActorWorldOffset(
-            ShiftWorld,
-            false,                      // No sweep
-            nullptr,                    // No hit result
-            ETeleportType::None         // ← КЛЮЧЕВОЕ ИЗМЕНЕНИЕ!
-        );
+    if (!bHasValidOrigin)
+    {
+        OriginGlobal    = NewOriginTarget;
+        WorldOriginUU   = FVector3d::ZeroVector;
+        bHasValidOrigin = true;
+    }
 
-        // Для акторов с физикой дополнительно сдвигаем velocity в world-space
-        // (чтобы сохранить momentum относительно новых координат)
-        if (bHasPhysics)
-        {
-            for (UPrimitiveComponent* Comp : PhysicsComps)
-            {
-                if (!Comp || !Comp->IsSimulatingPhysics())
-                    continue;
+    const FVector3d OldOrigin = OriginGlobal;
+    FVector3d       DeltaGlob = NewOriginTarget - OldOrigin;
 
-                FBodyInstance* BI = Comp->GetBodyInstance();
-                if (!BI)
-                    continue;
+    const double DeltaLenUU = DeltaGlob.Length();
+    const double MaxStepUU  = MaxShiftPerTickUU;
 
-                // ВАЖНО: Velocity в UE уже в world-space, не нужно трогать!
-                // При сдвиге координат world-velocity остаётся валидным.
-                // Просто убедимся, что body "awake" чтобы физика продолжилась.
-                if (!BI->IsInstanceAwake())
-                {
-                    BI->WakeInstance();
-                }
-            }
-        }
+    if (MaxStepUU > 0.0 && DeltaLenUU > MaxStepUU)
+    {
+        const double Scale = MaxStepUU / DeltaLenUU;
+        DeltaGlob *= Scale;
+    }
+
+    const FVector ShiftWorld(
+        static_cast<float>(-DeltaGlob.X),
+        static_cast<float>(-DeltaGlob.Y),
+        static_cast<float>(-DeltaGlob.Z));
+
+    OriginGlobal = OldOrigin + DeltaGlob;
+
+    UE_LOG(LogSpaceFloatingOrigin, Log,
+        TEXT("[FO SHIFT BEGIN] OldOrigin=(%.0f,%.0f,%.0f) NewOrigin=(%.0f,%.0f,%.0f) ShiftWorld=(%.0f,%.0f,%.0f)"),
+        OldOrigin.X, OldOrigin.Y, OldOrigin.Z,
+        OriginGlobal.X, OriginGlobal.Y, OriginGlobal.Z,
+        ShiftWorld.X, ShiftWorld.Y, ShiftWorld.Z);
+
+    ShiftEntireWorld(World, ShiftWorld);
+
+    int32 ShipCount = 0;
+    for (TActorIterator<AShipPawn> ItShip(World); ItShip; ++ItShip)
+    {
+        AShipPawn* Ship = *ItShip;
+        Ship->SyncGlobalFromWorld();
+        ++ShipCount;
     }
 
     UE_LOG(LogSpaceFloatingOrigin, Log,
-        TEXT("[FO SHIFT] Shifted %d actors (%d with physics)"),
-        ActorCount, PhysicsActorCount);
+        TEXT("[FO SHIFT END] ShipsResynced=%d"),
+        ShipCount);
 
-    // Синхронизация RepGraph (если есть)
-    if (UGameInstance* GI = World->GetGameInstance())
+    if (NetMode != NM_Standalone)
     {
-        // Примечание: этот код зависит от твоей архитектуры RepGraph
-        // Убедись, что RepGraph обновляет Spatial3D после shift
-        
-        /*
-        if (UReplicationGraph* RepGraphBase = GI->GetSubsystem<UReplicationGraph>())
+        for (TActorIterator<ASpaceWorldOriginActor> ItOrigin(World); ItOrigin; ++ItOrigin)
         {
-            if (USpaceReplicationGraph* RepGraph = Cast<USpaceReplicationGraph>(RepGraphBase))
+            ASpaceWorldOriginActor* OriginActor = *ItOrigin;
+            if (!OriginActor || !OriginActor->HasAuthority())
             {
-                if (RepGraph->Spatial3D)
-                {
-                    // Spatial3D работает в глобальных координатах, но нужно
-                    // обновить world→global mapping для всех акторов
-                    RepGraph->Spatial3D->UpdateAllActorsAfterShift();
-                }
+                continue;
             }
+
+            const FVector OriginGlobalF(
+                static_cast<float>(OriginGlobal.X),
+                static_cast<float>(OriginGlobal.Y),
+                static_cast<float>(OriginGlobal.Z));
+
+            OriginActor->ServerSetOrigin(
+                FVector(WorldOriginUU),
+                OriginGlobalF);
+
+            break;
         }
-        */
     }
 }
+
+
+

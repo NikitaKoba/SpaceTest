@@ -65,7 +65,7 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UCameraComponent* Camera;
-
+	
 	// Сетевой компонент (в нём вся сеть)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UShipNetComponent* Net;

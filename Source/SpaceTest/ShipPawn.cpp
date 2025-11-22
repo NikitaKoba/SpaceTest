@@ -28,7 +28,7 @@ AShipPawn::AShipPawn()
 	// Root mesh (physics)
 	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
 	SetRootComponent(ShipMesh);
-	ShipMesh->SetSimulatePhysics(false);              // <--- ВАЖНО: изначально false
+	ShipMesh->SetSimulatePhysics(false);              // <--- Ð’ÐÐ–ÐÐž: Ð¸Ð·Ð½Ð°Ñ‡Ð°Ð»ÑŒÐ½Ð¾ false
 	ShipMesh->SetEnableGravity(false);
 	ShipMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	ShipMesh->SetCollisionObjectType(ECC_Pawn);
@@ -54,10 +54,10 @@ AShipPawn::AShipPawn()
 	Camera->bUsePawnControlRotation = false;
 	Camera->FieldOfView = CameraFOV;
 	Camera->PrimaryComponentTick.bCanEverTick = false;
-	Laser = CreateDefaultSubobject<UShipLaserComponent>(TEXT("Laser")); // <—
-	// Базовые дефолты. Можно править в Details/Blueprint:
-	Laser->bServerTraceAim     = true;     // пусть сервер всё равно трейсит точку (для попаданий)
-	Laser->MuzzleSockets    = { FName("Muzzle_L"), FName("Muzzle_R") }; // должны быть на ShipMesh
+	Laser = CreateDefaultSubobject<UShipLaserComponent>(TEXT("Laser")); // <â€”
+	// Ð‘Ð°Ð·Ð¾Ð²Ñ‹Ðµ Ð´ÐµÑ„Ð¾Ð»Ñ‚Ñ‹. ÐœÐ¾Ð¶Ð½Ð¾ Ð¿Ñ€Ð°Ð²Ð¸Ñ‚ÑŒ Ð² Details/Blueprint:
+	Laser->bServerTraceAim     = true;     // Ð¿ÑƒÑÑ‚ÑŒ ÑÐµÑ€Ð²ÐµÑ€ Ð²ÑÑ‘ Ñ€Ð°Ð²Ð½Ð¾ Ñ‚Ñ€ÐµÐ¹ÑÐ¸Ñ‚ Ñ‚Ð¾Ñ‡ÐºÑƒ (Ð´Ð»Ñ Ð¿Ð¾Ð¿Ð°Ð´Ð°Ð½Ð¸Ð¹)
+	Laser->MuzzleSockets    = { FName("Muzzle_L"), FName("Muzzle_R") }; // Ð´Ð¾Ð»Ð¶Ð½Ñ‹ Ð±Ñ‹Ñ‚ÑŒ Ð½Ð° ShipMesh
 	SpawnCollisionHandlingMethod = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 	
 }
@@ -68,11 +68,11 @@ void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// --- 1. На сервере ОДИН РАЗ считаем GlobalPos из текущих world-координат ---
+	// --- 1. ÐÐ° ÑÐµÑ€Ð²ÐµÑ€Ðµ ÐžÐ”Ð˜Ð Ð ÐÐ— ÑÑ‡Ð¸Ñ‚Ð°ÐµÐ¼ GlobalPos Ð¸Ð· Ñ‚ÐµÐºÑƒÑ‰Ð¸Ñ… world-ÐºÐ¾Ð¾Ñ€Ð´Ð¸Ð½Ð°Ñ‚ ---
 	if (HasAuthority())
 	{
-		// ВАЖНО: Только ОДИН РАЗ при спавне!
-		// После этого GlobalPos обновляется ИНКРЕМЕНТНО в Tick()
+		// Ð’ÐÐ–ÐÐž: Ð¢Ð¾Ð»ÑŒÐºÐ¾ ÐžÐ”Ð˜Ð Ð ÐÐ— Ð¿Ñ€Ð¸ ÑÐ¿Ð°Ð²Ð½Ðµ!
+		// ÐŸÐ¾ÑÐ»Ðµ ÑÑ‚Ð¾Ð³Ð¾ GlobalPos Ð¾Ð±Ð½Ð¾Ð²Ð»ÑÐµÑ‚ÑÑ Ð˜ÐÐšÐ Ð•ÐœÐ•ÐÐ¢ÐÐž Ð² Tick()
 		SyncGlobalFromWorld();
 		
 		UE_LOG(LogTemp, Warning,
@@ -96,7 +96,7 @@ void AShipPawn::BeginPlay()
 		}
 	}
 
-	// --- 3. Камера (как у тебя было) ---
+	// --- 3. ÐšÐ°Ð¼ÐµÑ€Ð° (ÐºÐ°Ðº Ñƒ Ñ‚ÐµÐ±Ñ Ð±Ñ‹Ð»Ð¾) ---
 	FCamSample S;
 	S.Time = FApp::GetCurrentTime();
 	const FTransform X = ShipMesh->GetComponentTransform();
@@ -117,7 +117,7 @@ void AShipPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// Свежий сэмпл для камеры
+	// --- Камера: без изменений ---
 	FCamSample S;
 	S.Time = FApp::GetCurrentTime();
 	const FTransform X = ShipMesh->GetComponentTransform();
@@ -126,91 +126,19 @@ void AShipPawn::Tick(float DeltaSeconds)
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
 
-	// ========================================================================
-	// КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Инкрементное обновление GlobalPos
-	// ========================================================================
+	// === ГЛОБАЛЬНЫЕ КООРДИНАТЫ ===
+	//
+	// ВАЖНО:
+	//  - Никакого инкрементального "прибавления дельт".
+	//  - Каждый тик на сервере просто пересчитываем GlobalPos из world-позиции.
+	//  - FloatingOrigin уже гарантирует, что World+Origin -> Global стабильны,
+	//    даже после ShiftOrigin().
 	if (HasAuthority())
 	{
-		// СТАРЫЙ КОД (НЕПРАВИЛЬНО):
-		// SyncGlobalFromWorld();  // ← Пересчёт каждый тик ломает всё!
-
-		// НОВЫЙ КОД (ПРАВИЛЬНО):
-		UpdateGlobalPosIncremental(DeltaSeconds);
-
-		// Диагностика (раз в секунду)
-		static float LogT = 0.f;
-		LogT += DeltaSeconds;
-		if (LogT > 1.f)
-		{
-			LogT = 0.f;
-			
-			// Проверяем консистентность: recalc vs incremental
-			FGlobalPos RecalcGlobal;
-			if (UWorld* World = GetWorld())
-			{
-				if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
-				{
-					FO->WorldToGlobal(GetActorLocation(), RecalcGlobal);
-					
-					const FVector3d GlobalVecIncr = SpaceGlobal::ToGlobalVector(GlobalPos);
-					const FVector3d GlobalVecRecalc = SpaceGlobal::ToGlobalVector(RecalcGlobal);
-					const double DriftDist = FVector3d::Distance(GlobalVecIncr, GlobalVecRecalc);
-					
-					if (DriftDist > 1000.0)  // >10 метров = проблема!
-					{
-						UE_LOG(LogTemp, Error,
-							TEXT("[SHIP DRIFT] %s | Incremental=%s | Recalc=%s | DRIFT=%.0f cm!"),
-							*GetName(),
-							*GlobalPos.ToString(),
-							*RecalcGlobal.ToString(),
-							DriftDist);
-						
-						// Корректируем дрейф (но это не должно происходить часто!)
-						GlobalPos = RecalcGlobal;
-					}
-					else
-					{
-						UE_LOG(LogTemp, Verbose,
-							TEXT("[SHIP OK] %s | Global=%s | Drift=%.1f cm"),
-							*GetName(),
-							*GlobalPos.ToString(),
-							DriftDist);
-					}
-				}
-			}
-		}
+		SyncGlobalFromWorld();
 	}
 }
-void AShipPawn::UpdateGlobalPosIncremental(float DeltaSeconds)
-{
-	if (!ShipMesh)
-		return;
 
-	// Получаем текущую velocity в world-space
-	const FVector VelocityWorld_cmps = ShipMesh->GetComponentVelocity();  // см/с
-
-	// Конвертируем в глобальный вектор скорости
-	// ВАЖНО: velocity в UE - это world-space направление + magnitude
-	// При floating origin shift направление velocity остаётся валидным!
-	const FVector3d VelocityGlobal_cmps(VelocityWorld_cmps);
-
-	// Инкрементальное обновление глобальной позиции
-	const FVector3d CurrentGlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
-	const FVector3d NewGlobalVec = CurrentGlobalVec + VelocityGlobal_cmps * (double)DeltaSeconds;
-
-	// Обновляем GlobalPos
-	SpaceGlobal::FromGlobalVector(NewGlobalVec, GlobalPos);
-
-	// ДИАГНОСТИКА: Логируем если скорость большая
-	if (VelocityWorld_cmps.Size() > 100000.f)  // >1 км/с
-	{
-		UE_LOG(LogTemp, VeryVerbose,
-			TEXT("[SHIP FAST] %s | Vel=%.0f m/s | Global=%s"),
-			*GetName(),
-			VelocityWorld_cmps.Size() / 100.0,
-			*GlobalPos.ToString());
-	}
-}
 
 void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
@@ -231,7 +159,7 @@ void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 // --- Combat input ---
 void AShipPawn::Action_FirePressed()
 {
-	if (Laser) Laser->StartFire();   // компонент сам дернёт сервер и начнёт таймер спавна
+	if (Laser) Laser->StartFire();   // ÐºÐ¾Ð¼Ð¿Ð¾Ð½ÐµÐ½Ñ‚ ÑÐ°Ð¼ Ð´ÐµÑ€Ð½Ñ‘Ñ‚ ÑÐµÑ€Ð²ÐµÑ€ Ð¸ Ð½Ð°Ñ‡Ð½Ñ‘Ñ‚ Ñ‚Ð°Ð¹Ð¼ÐµÑ€ ÑÐ¿Ð°Ð²Ð½Ð°
 }
 void AShipPawn::Action_FireReleased()
 {
@@ -251,7 +179,7 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	const double DelaySec= FMath::Clamp((double)CameraDelayFrames, 0.0, 2.0) * (1.0/60.0);
 	const double Tq      = Now - DelaySec;
 
-	// 1) задержанный трансформ корабля
+	// 1) Ð·Ð°Ð´ÐµÑ€Ð¶Ð°Ð½Ð½Ñ‹Ð¹ Ñ‚Ñ€Ð°Ð½ÑÑ„Ð¾Ñ€Ð¼ ÐºÐ¾Ñ€Ð°Ð±Ð»Ñ
 	FCamSample ShipT;
 	if (!SampleAtTime(Tq, ShipT))
 	{
@@ -259,7 +187,7 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 		ShipT.Time = Now; ShipT.Loc = X.GetLocation(); ShipT.Rot = X.GetRotation();
 	}
 
-	// 2) pivot = delayed Ship ∘ SpringArm(Relative)
+	// 2) pivot = delayed Ship âˆ˜ SpringArm(Relative)
 	FTransform ShipTM(ShipT.Rot, ShipT.Loc);
 	FTransform TargetPivot = ShipTM;
 	if (SpringArm)
@@ -310,7 +238,7 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 
 	const FTransform PivotSm(PivotRot_Sm, PivotLoc_Sm);
 
-	// 4) камера
+	// 4) ÐºÐ°Ð¼ÐµÑ€Ð°
 	const FVector CamLoc = PivotSm.TransformPosition(CameraLocalOffset);
 
 	FRotator CamRot;
@@ -329,7 +257,7 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 		CamRot = PivotRot_Sm.Rotator();
 	}
 
-	// 5) финальное сглаживание
+	// 5) Ñ„Ð¸Ð½Ð°Ð»ÑŒÐ½Ð¾Ðµ ÑÐ³Ð»Ð°Ð¶Ð¸Ð²Ð°Ð½Ð¸Ðµ
 	FVector OutLoc = CamLoc;
 	FRotator OutRot = CamRot;
 	if (FinalViewLerpAlpha > 0.f && bHaveLastView)
@@ -399,7 +327,7 @@ bool AShipPawn::SampleAtTime(double T, FCamSample& Out) const
 	return true;
 }
 
-// ==== Input passthrough (и зеркалим в Net для RPC) ====
+// ==== Input passthrough (Ð¸ Ð·ÐµÑ€ÐºÐ°Ð»Ð¸Ð¼ Ð² Net Ð´Ð»Ñ RPC) ====
 void AShipPawn::Axis_ThrustForward(float V)
 {
 	if (Flight) Flight->SetThrustForward(V);
@@ -437,7 +365,7 @@ void AShipPawn::Axis_Roll(float V)
 }
 void AShipPawn::Axis_MouseYaw(float V)
 {
-	// Если курсорный пилот активен — yaw/pitch уже подаются из компонента
+	// Ð•ÑÐ»Ð¸ ÐºÑƒÑ€ÑÐ¾Ñ€Ð½Ñ‹Ð¹ Ð¿Ð¸Ð»Ð¾Ñ‚ Ð°ÐºÑ‚Ð¸Ð²ÐµÐ½ â€” yaw/pitch ÑƒÐ¶Ðµ Ð¿Ð¾Ð´Ð°ÑŽÑ‚ÑÑ Ð¸Ð· ÐºÐ¾Ð¼Ð¿Ð¾Ð½ÐµÐ½Ñ‚Ð°
 	const bool bCursorActive = (CursorPilot && CursorPilot->IsActive());
 	if (!bCursorActive)
 	{
@@ -471,7 +399,7 @@ void AShipPawn::SetGlobalPos(const FGlobalPos& InPos)
 		}
 		else
 		{
-			// Фоллбек: origin = (0,0,0), просто раскладываем глобальные координаты
+			// Ð¤Ð¾Ð»Ð»Ð±ÐµÐº: origin = (0,0,0), Ð¿Ñ€Ð¾ÑÑ‚Ð¾ Ñ€Ð°ÑÐºÐ»Ð°Ð´Ñ‹Ð²Ð°ÐµÐ¼ Ð³Ð»Ð¾Ð±Ð°Ð»ÑŒÐ½Ñ‹Ðµ ÐºÐ¾Ð¾Ñ€Ð´Ð¸Ð½Ð°Ñ‚Ñ‹
 			const FVector3d GlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
 			SetActorLocation(FVector(GlobalVec), false, nullptr, ETeleportType::TeleportPhysics);
 		}
@@ -480,36 +408,44 @@ void AShipPawn::SetGlobalPos(const FGlobalPos& InPos)
 
 void AShipPawn::SyncGlobalFromWorld()
 {
-	if (UWorld* World = GetWorld())
+	UWorld* World = GetWorld();
+	if (!World)
+		return;
+
+	if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
 	{
-		if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
-		{
-			// Конвертим world -> global через сабсистему
-			FO->WorldToGlobal(GetActorLocation(), GlobalPos);
-		}
-		else
-		{
-			// Фоллбек: origin = (0,0,0)
-			const FVector3d GlobalVec(GetActorLocation());
-			SpaceGlobal::FromGlobalVector(GlobalVec, GlobalPos);
-		}
+		// Ð¾ÑÐ½Ð¾Ð²Ð½Ð¾Ð¹ Ð¿ÑƒÑ‚ÑŒ: Ñ‡ÐµÑ€ÐµÐ· Ð¿Ð»Ð°Ð²Ð°ÑŽÑ‰Ð¸Ð¹ origin
+		FO->WorldToGlobal(GetActorLocation(), GlobalPos);
+	}
+	else
+	{
+		// fallback, ÐµÑÐ»Ð¸ Ð¿Ð¾Ð´ÑÐ¸ÑÑ‚ÐµÐ¼Ð° Ð½Ðµ Ð¿Ð¾Ð´Ð½ÑÑ‚Ð° (Ð½Ð°Ð¿Ñ€Ð¸Ð¼ÐµÑ€, Ð² ÐºÐ°ÐºÐ¸Ñ…-Ñ‚Ð¾ Ñ‚ÐµÑÑ‚Ð°Ñ…)
+		const FVector3d GlobalVec = FVector3d(GetActorLocation()) / 100.0; // ÑÐ¼ -> Ð¼
+		SpaceGlobal::FromGlobalVector(GlobalVec, GlobalPos);
 	}
 }
 
 void AShipPawn::SyncWorldFromGlobal()
 {
-	if (UWorld* World = GetWorld())
+	// НА СЕРВЕРЕ world-позиция задаётся физикой и FloatingOrigin.
+	// Никакого пересчёта "из GlobalPos" там делать нельзя, иначе словим телепорт.
+	if (HasAuthority())
 	{
-		if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
-		{
-			const FVector NewWorldLoc = FO->GlobalToWorld(GlobalPos);
-			SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
-		}
-		else
-		{
-			const FVector3d GlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
-			SetActorLocation(FVector(GlobalVec), false, nullptr, ETeleportType::TeleportPhysics);
-		}
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+		return;
+
+	if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+	{
+		const FVector NewWorldLoc = FO->GlobalToWorld(GlobalPos);
+		SetActorLocation(NewWorldLoc, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+	else
+	{
+		const FVector3d GlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
+		SetActorLocation(FVector(GlobalVec), false, nullptr, ETeleportType::TeleportPhysics);
 	}
 }
-

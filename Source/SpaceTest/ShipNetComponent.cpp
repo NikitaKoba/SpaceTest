@@ -52,9 +52,50 @@ void UShipNetComponent::BeginPlay()
 		ShipMesh = Ship->ShipMesh;
 		Flight   = Ship->Flight;
 	}
-
+	if (UWorld* World = GetWorld())
+	{
+		if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+		{
+			PrevOriginGlobal = FO->GetOriginGlobal();
+			bHavePrevOrigin = true;
+		}
+	}
 	SetupTickOrder();
 	UpdatePhysicsSimState();
+}
+void UShipNetComponent::HandleFloatingOriginShift()
+{
+	if (!OwPawn) return;
+	UWorld* World = OwPawn->GetWorld();
+	USpaceFloatingOriginSubsystem* FO = World ? World->GetSubsystem<USpaceFloatingOriginSubsystem>() : nullptr;
+	if (!FO) return;
+
+	const FVector3d CurOrigin = FO->GetOriginGlobal();
+	if (!bHavePrevOrigin)
+	{
+		PrevOriginGlobal = CurOrigin;
+		bHavePrevOrigin = true;
+		return;
+	}
+
+	const FVector3d DeltaOrigin = CurOrigin - PrevOriginGlobal;
+	if (DeltaOrigin.IsNearlyZero()) return;
+
+	// Мир сдвинулся на -DeltaOrigin в UU
+	const FVector ShiftWorld(
+		static_cast<float>(-DeltaOrigin.X),
+		static_cast<float>(-DeltaOrigin.Y),
+		static_cast<float>(-DeltaOrigin.Z));
+
+	for (FInterpNode& N : NetBuffer)
+	{
+		N.Loc += ShiftWorld;
+	}
+
+	// Сдвинуть цель реконсиляции, чтобы не получить ложный телепорт
+	OwnerReconTarget.Loc += ShiftWorld;
+
+	PrevOriginGlobal = CurOrigin;
 }
 
 void UShipNetComponent::SetupTickOrder()
@@ -85,7 +126,7 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	if (!OwPawn || !ShipMesh) return;
-
+	HandleFloatingOriginShift();
 	UpdatePhysicsSimState();
 
 	// === 1) Владелец → сервер: RPC с инпутом + локальное кэширование ===
@@ -152,6 +193,14 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		ServerSnap.Vel        = VelQ;
 		ServerSnap.AngVelDeg  = AngQdeg;
 		ServerSnap.ServerTime = GetWorld()->GetTimeSeconds();
+		if (UWorld* World = GetWorld())
+		{
+			if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+			{
+				ServerSnap.OriginGlobalM = FVector(FO->GetOriginGlobal());
+				ServerSnap.WorldOriginUU = FVector(FO->GetWorldOriginUU());
+			}
+		}
 		// LastAckSeq сервер обновляет в Server_SendInput()
 	}
 }
@@ -216,7 +265,11 @@ void UShipNetComponent::Server_SendInput_Implementation(const FControlState& Sta
 // ===== OnRep (универсально: и owner, и сим-прокси) =====
 void UShipNetComponent::OnRep_ServerSnap()
 {
-	const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+    // �?�?��?�?��?��-�?����?���?�? �?�?�?�+���?��?�? origin �'�?�>���?�> �?�?�?�?�?��?���'��? �?�?�?�?�?�?�?
+    // �?�?�?�?�?���?�?: OnRep может прийти раньше Tick, поэтому буфер и цель рекона нужно сразу сместить в новую систему.
+    HandleFloatingOriginShift();
+
+    const double Now = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
 
 	// --- Подстройка оффсета времени (EMA) + выборка для адаптивного delay ---
 	{
@@ -233,6 +286,32 @@ void UShipNetComponent::OnRep_ServerSnap()
 
 		const double Residual = EstOffset - ServerTimeToClientTime;
 		AdaptiveInterpDelay_OnSample(Residual);
+	}
+
+	FVector3d SnapOrigin    = FVector3d(ServerSnap.OriginGlobalM);
+	FVector3d SnapWorldOrig = FVector3d(ServerSnap.WorldOriginUU);
+	if (!bHavePrevOrigin)
+	{
+		PrevOriginGlobal = SnapOrigin;
+		bHavePrevOrigin  = true;
+	}
+	else
+	{
+		const FVector3d DeltaOrigin = SnapOrigin - PrevOriginGlobal;
+		if (!DeltaOrigin.IsNearlyZero())
+		{
+			const FVector ShiftWorld(
+				static_cast<float>(-DeltaOrigin.X),
+				static_cast<float>(-DeltaOrigin.Y),
+				static_cast<float>(-DeltaOrigin.Z));
+
+			for (FInterpNode& N : NetBuffer)
+			{
+				N.Loc += ShiftWorld;
+			}
+			OwnerReconTarget.Loc += ShiftWorld;
+			PrevOriginGlobal = SnapOrigin;
+		}
 	}
 
 	// --- Сим-прокси: интерп-буфер + телепорт-детектор ---
