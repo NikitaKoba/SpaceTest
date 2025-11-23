@@ -297,9 +297,8 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 	}
 	else
 	{
-		static int32 NextIdx = 0;
-		if (NextIdx >= MuzzleSockets.Num()) NextIdx = 0;
-		FireFrom(MuzzleSockets[NextIdx++]);
+		if (NextMuzzleIndex >= MuzzleSockets.Num()) NextMuzzleIndex = 0;
+		FireFrom(MuzzleSockets[NextMuzzleIndex++]);
 	}
 }
 
@@ -421,7 +420,7 @@ void UShipLaserComponent::Server_SpawnOnce()
 
 	ServerSpawn_FromAimPoint(AimPoint);
 }
-bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir) const
+bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir)
 {
 	const APawn* P = Cast<APawn>(GetOwner());
 	const AController* C = P ? P->GetController() : nullptr;
@@ -461,30 +460,32 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 	}
 
 	// 4) ограничение скорости поворота луча между шотами
-	static thread_local double PrevTime = 0.0;
-	static thread_local FVector PrevDir = FVector::ZeroVector;
+	
+	
 
 	const UWorld* W = GetWorld();
 	const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
-	if (PrevTime > 0.0)
+	if (PrevValidateTimeS > 0.0)
 	{
-		const double Dt = FMath::Max(1e-3, Now - PrevTime);
-		const double CosD = FMath::Clamp(FVector::DotProduct(PrevDir.GetSafeNormal(), DirNorm), -1.0, 1.0);
+		const double Dt = FMath::Max(1e-3, Now - PrevValidateTimeS);
+		const double CosD = FMath::Clamp(FVector::DotProduct(PrevValidateDir.GetSafeNormal(), DirNorm), -1.0, 1.0);
 		const double dAngDeg = FMath::RadiansToDegrees(FMath::Acos(CosD));
 
 		constexpr double MaxDegPerSec = 1080.0; // до 3 оборотов/сек
 		if (dAngDeg / Dt > MaxDegPerSec)
 		{
-			PrevTime = Now;
-			PrevDir  = DirNorm;
+			PrevValidateTimeS = Now;
+			PrevValidateDir  = DirNorm;
 			return false;
 		}
 	}
 
-	PrevTime = Now;
-	PrevDir  = DirNorm;
+	PrevValidateTimeS = Now;
+	PrevValidateDir  = DirNorm;
 	return true;
 }
+
+
 
 
 

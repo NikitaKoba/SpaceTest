@@ -98,7 +98,7 @@ protected:
 	UFUNCTION(Server, Reliable) void ServerStartFire();
 	UFUNCTION(Server, Reliable) void ServerStopFire();
 	void Server_SpawnOnce(); // использует последний присланный луч (не рекомендую)
-	bool ValidateShot(const FVector& Origin, const FVector& Dir) const;
+	bool ValidateShot(const FVector& Origin, const FVector& Dir);
 
 private:
 	// Состояние
@@ -112,10 +112,14 @@ private:
 
 	// server validation
 	UPROPERTY(Transient) double ServerLastShotTimeS = -1e9;
+	UPROPERTY(Transient) double PrevValidateTimeS = 0.0;
+	UPROPERTY(Transient) FVector PrevValidateDir = FVector::ZeroVector;
 
 	// для режима «серверный таймер»
 	UPROPERTY(Transient) FVector ServerAimOrigin = FVector::ZeroVector;
 	UPROPERTY(Transient) FVector ServerAimDir    = FVector::ForwardVector;
 	UPROPERTY(Transient) bool   bHaveServerAim   = false;
+	UPROPERTY(Transient) int32  NextMuzzleIndex = 0;
 	FTimerHandle FireTimer;
 };
+
