@@ -1,6 +1,7 @@
 #include "ShipLaserComponent.h"
 #include "LaserBolt.h"
 #include "ShipCursorPilotComponent.h"
+#include "SpaceFloatingOriginSubsystem.h"
 
 #include "Components/PrimitiveComponent.h"
 #include "GameFramework/Actor.h"
@@ -103,7 +104,16 @@ void UShipLaserComponent::TickComponent(float Dt, ELevelTick TickType, FActorCom
 			}
 
 			// RPC на сервер
-			ServerFireShot(O, D);
+			FGlobalPos OriginGlobal;
+			if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
+			{
+				FO->WorldToGlobal(O, OriginGlobal);
+			}
+			else
+			{
+				SpaceGlobal::FromWorldLocationUU(O, OriginGlobal);
+			}
+			ServerFireShot(OriginGlobal, D);
 
 			ClientNextShotTimeS += Period;
 		}
@@ -191,7 +201,7 @@ FVector UShipLaserComponent::DirFromMuzzle(const FVector& MuzzleLoc, const FVect
 
 // === RPC: мгновенный шот с прицелом ===
 void UShipLaserComponent::ServerFireShot_Implementation(
-	const FVector_NetQuantize& Origin,
+	const FGlobalPos& Origin,
 	const FVector_NetQuantizeNormal& Dir)
 {
 	UWorld* W = GetWorld();
@@ -207,8 +217,14 @@ void UShipLaserComponent::ServerFireShot_Implementation(
 		return; // рано — дропаем
 	}
 
-	// нормализуем входы
-	const FVector O = (FVector)Origin;
+	// Shot origin converted via GlobalPos so server/world origin mismatch does not hide bolts
+	FVector OriginWorld = SpaceGlobal::ToWorldLocationUU(Origin);
+	if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
+	{
+		OriginWorld = FO->GlobalToWorld(Origin);
+	}
+
+	const FVector O = OriginWorld;
 	const FVector D = ((FVector)Dir).GetSafeNormal();
 
 	// ---- серверная валидация луча (анти-чит/ sanity) ----
@@ -245,6 +261,7 @@ void UShipLaserComponent::ServerFireShot_Implementation(
 }
 
 
+
 void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 {
 	if (MuzzleSockets.Num() == 0) return;
@@ -254,7 +271,24 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 		FTransform TM; GetMuzzleTransform(Sock, TM);
 		const FVector Dir = Jitter(DirFromMuzzle(TM.GetLocation(), AimPoint), AimJitterDeg);
 		TM.SetRotation(RotFromDir(Dir).Quaternion());
-		Multicast_SpawnBolt(TM);
+
+		// ИСПРАВЛЕНО: Используем FGlobalPos для надежной передачи координат
+		if (UWorld* W = GetWorld())
+		{
+			if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
+			{
+				FGlobalPos GlobalPos;
+				FO->WorldToGlobal(TM.GetLocation(), GlobalPos);
+				Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+			}
+			else
+			{
+				// Fallback без FloatingOrigin
+				FGlobalPos GlobalPos;
+				SpaceGlobal::FromWorldLocationUU(TM.GetLocation(), GlobalPos);
+				Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+			}
+		}
 	};
 
 	if (FirePattern == ELaserFirePattern::AllAtOnce)
@@ -269,8 +303,11 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 	}
 }
 
-// === Multicast: визуальный болт ===
-void UShipLaserComponent::Multicast_SpawnBolt_Implementation(const FTransform& SpawnTM)
+
+// ИСПРАВЛЕНО: Multicast с FGlobalPos
+void UShipLaserComponent::Multicast_SpawnBolt_Implementation(
+	const FGlobalPos& GlobalPos, 
+	const FRotator& Rot)
 {
 	if (!GetOwner() || !BoltClass) return;
 
@@ -279,10 +316,27 @@ void UShipLaserComponent::Multicast_SpawnBolt_Implementation(const FTransform& S
 	Params.Instigator = Cast<APawn>(GetOwner());
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
+	FTransform SpawnTM;
+	SpawnTM.SetRotation(Rot.Quaternion());
+
+	// КРИТИЧНО: Преобразуем FGlobalPos в world coordinates через FloatingOrigin
+	if (UWorld* W = GetWorld())
+	{
+		if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
+		{
+			SpawnTM.SetLocation(FO->GlobalToWorld(GlobalPos));
+		}
+		else
+		{
+			// Fallback: напрямую из GlobalPos
+			SpawnTM.SetLocation(SpaceGlobal::ToWorldLocationUU(GlobalPos));
+		}
+	}
+
 	ALaserBolt* Bolt = GetWorld()->SpawnActor<ALaserBolt>(BoltClass, SpawnTM, Params);
 	if (!Bolt) return;
 
-	// Наследуем скорость носителя
+	// Наследуем скорость владельца
 	FVector OwnerVel = FVector::ZeroVector;
 	if (const UPrimitiveComponent* P = CachedRootPrim.Get())
 		OwnerVel = P->GetComponentVelocity();
@@ -290,6 +344,15 @@ void UShipLaserComponent::Multicast_SpawnBolt_Implementation(const FTransform& S
 		OwnerVel = Ow->GetVelocity();
 
 	Bolt->SetBaseVelocity(OwnerVel * Bolt->InheritOwnerVelPct);
+
+	// ДИАГНОСТИКА: Логируем позицию спавна
+	UE_LOG(LogTemp, Verbose,
+		TEXT("[BOLT SPAWN] %s | GlobalPos=Sector(%d,%d,%d) Offset(%s) | WorldLoc=%s | Owner=%s"),
+		*GetNameSafe(Bolt),
+		GlobalPos.Sector.X, GlobalPos.Sector.Y, GlobalPos.Sector.Z,
+		*GlobalPos.Offset.ToString(),
+		*SpawnTM.GetLocation().ToString(),
+		*GetNameSafe(GetOwner()));
 }
 
 // === Старый режим (серверный таймер) — оставлен для совместимости ===
@@ -314,6 +377,7 @@ void UShipLaserComponent::ServerStopFire_Implementation()
 		W->GetTimerManager().ClearTimer(FireTimer);
 }
 
+// === ИСПРАВЛЕНО: Старый режим (серверный таймер) ===
 void UShipLaserComponent::Server_SpawnOnce()
 {
 	// ИСПОЛЬЗУЕТ ПОСЛЕДНИЙ ПРИСЛАННЫЙ ЛУЧ (не моментальный).
@@ -323,7 +387,23 @@ void UShipLaserComponent::Server_SpawnOnce()
 		for (const FName& S : MuzzleSockets)
 		{
 			FTransform TM; GetMuzzleTransform(S, TM);
-			Multicast_SpawnBolt(TM);
+            
+			// ИСПРАВЛЕНО: Через FGlobalPos
+			if (UWorld* W = GetWorld())
+			{
+				if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
+				{
+					FGlobalPos GlobalPos;
+					FO->WorldToGlobal(TM.GetLocation(), GlobalPos);
+					Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+				}
+				else
+				{
+					FGlobalPos GlobalPos;
+					SpaceGlobal::FromWorldLocationUU(TM.GetLocation(), GlobalPos);
+					Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+				}
+			}
 		}
 		return;
 	}
@@ -405,3 +485,6 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 	PrevDir  = DirNorm;
 	return true;
 }
+
+
+

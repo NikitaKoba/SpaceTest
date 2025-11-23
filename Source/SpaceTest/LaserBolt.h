@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "LaserBolt.generated.h"
@@ -69,8 +69,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Laser|Move")
 	void SetBaseVelocity(const FVector& V) { BaseVelW = V; }
 	// Базовая скорость мира, заданная при спавне
-	UPROPERTY()
-	FVector BaseVelW = FVector::ZeroVector;
+    UPROPERTY(Replicated)
+    FVector BaseVelW = FVector::ZeroVector;
+
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;

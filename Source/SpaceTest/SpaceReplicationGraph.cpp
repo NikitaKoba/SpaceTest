@@ -297,6 +297,12 @@ void USpaceReplicationGraph::InitGlobalActorClassSettings()
 		FClassReplicationInfo& GS = GlobalActorReplicationInfoMap.GetClassInfo(AGameStateBase::StaticClass());
 		GS.SetCullDistanceSquared(0.f);
 	}
+
+	{
+		FClassReplicationInfo& Bolt = GlobalActorReplicationInfoMap.GetClassInfo(ALaserBolt::StaticClass());
+		Bolt.ReplicationPeriodFrame = 1;
+		Bolt.SetCullDistanceSquared(0.f); // всегда реплицируем (проекты маложивущие)
+	}
 }
 
 void USpaceReplicationGraph::InitConnectionGraphNodes(UNetReplicationGraphConnection* ConnMgr)
@@ -357,20 +363,37 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(
 
 	if (Actor->IsA<APlayerController>()) return;
 
-if (Actor->IsA<ALaserBolt>())
-{
-    if (AlwaysRelevantNode)
-    {
-        AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
-        if (SRG_ShouldLog())
-        {
-            UE_LOG(LogSpaceRepGraph, Verbose,
-                TEXT("RouteAdd: %s -> AlwaysRelevantNode (LaserBolt)"),
-                *Actor->GetName());
-        }
-    }
-    return;
-}
+	if (Actor->IsA<ALaserBolt>())
+	{
+		if (UNetConnection* OwnerConn = FindOwnerConnection(Actor))
+		{
+			UNetReplicationGraphConnection* ConnMgr = FindOrAddConnectionManager(OwnerConn);
+			if (ConnMgr)
+			{
+				UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways = PerConnAlwaysMap.FindRef(ConnMgr).Get();
+				if (!PerConnAlways)
+				{
+					PerConnAlways = CreateNewNode<UReplicationGraphNode_AlwaysRelevant_ForConnection>();
+					AddConnectionGraphNode(PerConnAlways, ConnMgr);
+					PerConnAlwaysMap.Add(ConnMgr, PerConnAlways);
+				}
+				PerConnAlways->NotifyAddNetworkActor(ActorInfo);
+			}
+		}
+		else if (AlwaysRelevantNode)
+		{
+			AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
+		}
+
+		if (SRG_ShouldLog())
+		{
+			UE_LOG(LogSpaceRepGraph, Verbose,
+				TEXT("RouteAdd: %s -> AlwaysRelevant (LaserBolt) OwnerConn=%s"),
+				*Actor->GetName(),
+				*GetNameSafe(FindOwnerConnection(Actor)));
+		}
+		return;
+	}
 	// ИСПРАВЛЕНО: Добавляем ВСЕ ShipPawn в tracking независимо от контроллера
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{

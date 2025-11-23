@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "SpaceGlobalCoords.h"
 #include "ShipLaserComponent.generated.h"
 
 class ALaserBolt;
@@ -86,10 +87,12 @@ protected:
 
 	// --- RPC ---
 	UFUNCTION(Server, Reliable)
-	void ServerFireShot(const FVector_NetQuantize& Origin, const FVector_NetQuantizeNormal& Dir);
+	void ServerFireShot(const FGlobalPos& Origin, const FVector_NetQuantizeNormal& Dir);
 
 	UFUNCTION(NetMulticast, Unreliable)
-	void Multicast_SpawnBolt(const FTransform& SpawnTM);
+	void Multicast_SpawnBolt(
+		const FGlobalPos& GlobalPos,  // Вместо FVector3d
+		const FRotator& Rot);
 
 	// Старый режим (серверный таймер) — оставлен на всякий случай
 	UFUNCTION(Server, Reliable) void ServerStartFire();
