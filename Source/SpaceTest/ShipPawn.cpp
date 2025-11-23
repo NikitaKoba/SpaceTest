@@ -139,6 +139,7 @@ void AShipPawn::BeginPlay()
 
 	// Apply default cruise profile on start
 	ApplyFlightProfile(false);
+	bHyperDrivePrev = bHyperDriveActive;
 }
 
 void AShipPawn::Destroyed()
@@ -302,13 +303,24 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 		return;
 	}
 
-	const double Now     = FApp::GetCurrentTime();
-	const double DelaySec= FMath::Clamp((double)CameraDelayFrames, 0.0, 2.0) * (1.0/60.0);
+	const double Now = FApp::GetCurrentTime();
+	double DelayFrames = CameraDelayFrames;
+	if (bHyperDriveActive)
+	{
+		// В гипере не используем исторический лаг по кадрам
+		DelayFrames = 0.0;
+	}
+	const double DelaySec= FMath::Clamp(DelayFrames, 0.0, 2.0) * (1.0/60.0);
 	const double Tq      = Now - DelaySec;
 
 	// 1) Ð·Ð°Ð´ÐµÑ€Ð¶Ð°Ð½Ð½Ñ‹Ð¹ Ñ‚Ñ€Ð°Ð½ÑÑ„Ð¾Ñ€Ð¼ ÐºÐ¾Ñ€Ð°Ð±Ð»Ñ
 	FCamSample ShipT;
-	if (!SampleAtTime(Tq, ShipT))
+	const bool bUseHistory = !bHyperDriveActive;
+	if (bUseHistory && SampleAtTime(Tq, ShipT))
+	{
+		// ok
+	}
+	else
 	{
 		const FTransform X = ShipMesh->GetComponentTransform();
 		ShipT.Time = Now; ShipT.Loc = X.GetLocation(); ShipT.Rot = X.GetRotation();
@@ -324,6 +336,20 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	}
 
 	// 3) lag
+	const bool bHyperCam = bHyperDriveActive;
+	const bool bForceNoLag = (bHyperCam && HyperMaxPositionLagDistance <= KINDA_SMALL_NUMBER);
+	float PosLagSpeed    = PositionLagSpeed;
+	float MaxPosLag      = MaxPositionLagDistance;
+	float RotLagSpeed    = RotationLagSpeed;
+	float ViewLerpAlpha  = FinalViewLerpAlpha;
+	if (bHyperCam)
+	{
+		PosLagSpeed   = HyperPositionLagSpeed;
+		MaxPosLag     = HyperMaxPositionLagDistance;
+		RotLagSpeed   = HyperRotationLagSpeed;
+		ViewLerpAlpha = HyperFinalViewLerpAlpha;
+	}
+
 	if (!bPivotInit)
 	{
 		PivotLoc_Sm = TargetPivot.GetLocation();
@@ -332,34 +358,43 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	}
 	else
 	{
-		// position
-		if (PositionLagSpeed > 0.f && DeltaTime > KINDA_SMALL_NUMBER)
-		{
-			const float aL = 1.f - FMath::Exp(-PositionLagSpeed * DeltaTime);
-			PivotLoc_Sm = FMath::Lerp(PivotLoc_Sm, TargetPivot.GetLocation(), aL);
-
-			if (MaxPositionLagDistance > 0.f)
-			{
-				const FVector d = PivotLoc_Sm - TargetPivot.GetLocation();
-				const float d2 = d.SizeSquared();
-				const float m2 = FMath::Square(MaxPositionLagDistance);
-				if (d2 > m2) PivotLoc_Sm = TargetPivot.GetLocation() + d * (MaxPositionLagDistance / FMath::Sqrt(d2));
-			}
-		}
-		else
+		if (bForceNoLag)
 		{
 			PivotLoc_Sm = TargetPivot.GetLocation();
-		}
-
-		// rotation
-		if (RotationLagSpeed > 0.f && DeltaTime > KINDA_SMALL_NUMBER)
-		{
-			const float aR = 1.f - FMath::Exp(-RotationLagSpeed * DeltaTime);
-			PivotRot_Sm = FQuat::Slerp(PivotRot_Sm, TargetPivot.GetRotation(), aR);
+			PivotRot_Sm = TargetPivot.GetRotation();
+			ViewLerpAlpha = 0.f;
 		}
 		else
 		{
-			PivotRot_Sm = TargetPivot.GetRotation();
+			// position
+			if (PosLagSpeed > 0.f && DeltaTime > KINDA_SMALL_NUMBER)
+			{
+				const float aL = 1.f - FMath::Exp(-PosLagSpeed * DeltaTime);
+				PivotLoc_Sm = FMath::Lerp(PivotLoc_Sm, TargetPivot.GetLocation(), aL);
+
+				if (MaxPosLag > 0.f)
+				{
+					const FVector d = PivotLoc_Sm - TargetPivot.GetLocation();
+					const float d2 = d.SizeSquared();
+					const float m2 = FMath::Square(MaxPosLag);
+					if (d2 > m2) PivotLoc_Sm = TargetPivot.GetLocation() + d * (MaxPosLag / FMath::Sqrt(d2));
+				}
+			}
+			else
+			{
+				PivotLoc_Sm = TargetPivot.GetLocation();
+			}
+
+			// rotation
+			if (RotLagSpeed > 0.f && DeltaTime > KINDA_SMALL_NUMBER)
+			{
+				const float aR = 1.f - FMath::Exp(-RotLagSpeed * DeltaTime);
+				PivotRot_Sm = FQuat::Slerp(PivotRot_Sm, TargetPivot.GetRotation(), aR);
+			}
+			else
+			{
+				PivotRot_Sm = TargetPivot.GetRotation();
+			}
 		}
 	}
 
@@ -387,9 +422,9 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	// 5) Ñ„Ð¸Ð½Ð°Ð»ÑŒÐ½Ð¾Ðµ ÑÐ³Ð»Ð°Ð¶Ð¸Ð²Ð°Ð½Ð¸Ðµ
 	FVector OutLoc = CamLoc;
 	FRotator OutRot = CamRot;
-	if (FinalViewLerpAlpha > 0.f && bHaveLastView)
+	if (ViewLerpAlpha > 0.f && bHaveLastView)
 	{
-		const float A = Clamp01(FinalViewLerpAlpha);
+		const float A = Clamp01(ViewLerpAlpha);
 		OutLoc = FMath::Lerp(LastViewLoc, OutLoc, A);
 		OutRot = FMath::RInterpTo(LastViewRot, OutRot, 1.f, A);
 	}
@@ -615,6 +650,9 @@ void AShipPawn::OnRep_HyperDrive()
 
 void AShipPawn::OnHyperDriveChanged()
 {
+	const bool bWasHyper = bHyperDrivePrev;
+	bHyperDrivePrev = bHyperDriveActive;
+
 	if (GEngine)
 	{
 		const FColor C = bHyperDriveActive ? FColor::Purple : FColor::Green;
@@ -623,6 +661,12 @@ void AShipPawn::OnHyperDriveChanged()
 	}
 
 	ApplyFlightProfile(bHyperDriveActive);
+
+	// If exiting hyper, stop instantly to avoid long decel and camera trailing.
+	if (!bHyperDriveActive && bWasHyper)
+	{
+		StopAfterHyperDrive();
+	}
 }
 
 void AShipPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -656,4 +700,39 @@ void AShipPawn::ApplyFlightProfile(bool bHyper)
 		Flight->FA_Trans.RetroDotThreshold   = CruiseFA.RetroDotThreshold;
 		Flight->FA_Trans.Deadzone_Mps        = CruiseFA.Deadzone_Mps;
 	}
+}
+
+void AShipPawn::StopAfterHyperDrive()
+{
+	if (ShipMesh)
+	{
+		ShipMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false);
+		ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
+	}
+
+	if (Flight)
+	{
+		Flight->ResetInputFilters();
+		Flight->SetThrustForward(0.f);
+		Flight->SetStrafeRight(0.f);
+		Flight->SetThrustUp(0.f);
+		Flight->SetRollAxis(0.f);
+	}
+
+	ResetCameraBufferImmediate();
+}
+
+void AShipPawn::ResetCameraBufferImmediate()
+{
+	FCamSample S;
+	S.Time = FApp::GetCurrentTime();
+	const FTransform X = ShipMesh ? ShipMesh->GetComponentTransform() : GetActorTransform();
+	S.Loc = X.GetLocation();
+	S.Rot = X.GetRotation();
+	S.Vel = ShipMesh ? ShipMesh->GetComponentVelocity() : FVector::ZeroVector;
+
+	CamSamples.Empty();
+	PushCamSample(S);
+	bHaveLastView = false;
+	bPivotInit = false;
 }

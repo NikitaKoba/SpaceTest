@@ -554,12 +554,24 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	}
 
 	// --- РїРѕСЂРѕРіРё Р¶С‘СЃС‚РєРѕР№ СЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё ---
-	const float POS_HARD_SNAP  = 8000.f;   // 80 Рј
-	const float VEL_HARD_SNAP  = 30000.f;  // 300 Рј/СЃ
-	const float ANGV_HARD_SNAP = 4.0f;     // ~230В°/СЃ
+		const bool bHyper = (Ship && Ship->IsHyperDriveActive());
 
-	// Р•СЃР»Рё СЃРёР»СЊРЅРѕРµ СЂР°СЃС…РѕР¶РґРµРЅРёРµ вЂ” Р¶С‘СЃС‚РєРёР№ СЂРµСЃРёРЅРє
-	if (PosErr > POS_HARD_SNAP || VelErr > VEL_HARD_SNAP || AngErr > ANGV_HARD_SNAP)
+	float PosSnap_Soft = 8000.f;   // 80 m (cm)
+	float VelSnap_Soft = 30000.f;  // 300 m/s (cm/s)
+	float AngSnap_Soft = 4.0f;     // ~230 deg/s
+
+	const float HyperScale = bHyper ? 8.0f : 1.0f;
+	PosSnap_Soft *= HyperScale;
+	VelSnap_Soft *= HyperScale;
+
+	const float PosSnap_Hard = PosSnap_Soft * (bHyper ? 6.0f : 3.0f);
+	const float VelSnap_Hard = VelSnap_Soft * (bHyper ? 6.0f : 3.0f);
+	const float AngSnap_Hard = AngSnap_Soft * 2.5f;
+
+	const bool bHardSnap = (PosErr > PosSnap_Hard) || (VelErr > VelSnap_Hard) || (AngErr > AngSnap_Hard);
+	const bool bSoftSnap = !bHardSnap && ((PosErr > PosSnap_Soft) || (VelErr > VelSnap_Soft) || (AngErr > AngSnap_Soft));
+
+	if (bHardSnap)
 	{
 		UE_LOG(LogShipNet, Warning,
 			TEXT("[HARD SNAP] %s | PosErr=%.0f m | VelErr=%.0f m/s | AngErr=%.1f rad/s"),
@@ -579,15 +591,15 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	}
 
 	// --- РјСЏРіРєР°СЏ СЂРµРєРѕРЅСЃРёР»СЏС†РёСЏ (РєСЂРёС‚РёС‡РµСЃРєРё РґРµРјРїС„РёСЂРѕРІР°РЅРЅС‹Р№ PD) ---
-	const float TauPos   = 0.08f;
-	const float TauAng   = 0.10f;
+	const float TauPos   = bSoftSnap ? (bHyper ? 0.25f : 0.14f) : 0.08f;
+	const float TauAng   = bSoftSnap ? 0.18f : 0.10f;
 	const float AlphaPos = 1.f - FMath::Exp(-DeltaSeconds / TauPos);
 	const float AlphaAng = 1.f - FMath::Exp(-DeltaSeconds / TauAng);
 
 	// Р›РёРЅРµР№РЅР°СЏ С‡Р°СЃС‚СЊ
 	const FVector Vtgt = VelS + (LocS - LocC) / FMath::Max(1e-3f, TauPos);
 
-	const float MAX_VEL_NUDGE = 10000.f;
+	const float MAX_VEL_NUDGE = bSoftSnap ? (bHyper ? 60000.f : 25000.f) : 10000.f;
 	FVector Vnew = FMath::Lerp(VelC, Vtgt, AlphaPos);
 	const FVector Nudge = Vnew - VelC;
 	if (Nudge.Size() > MAX_VEL_NUDGE)

@@ -110,6 +110,15 @@ public:
 	float BankWithShipAlpha = 1.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float FinalViewLerpAlpha = 0.0f;
+	// Hyperdrive camera boost to reduce trailing at high speed
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="120.0"))
+	float HyperPositionLagSpeed = 80.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="2000.0"))
+	float HyperMaxPositionLagDistance = 200.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="120.0"))
+	float HyperRotationLagSpeed = 40.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float HyperFinalViewLerpAlpha = 0.35f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Advanced", meta=(ClampMin="0.05", ClampMax="0.5"))
 	float CameraBufferSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Advanced", meta=(ClampMin="16", ClampMax="512"))
@@ -127,6 +136,9 @@ public:
 
 private:
 	void ApplyFlightProfile(bool bHyper);
+	void StopAfterHyperDrive();
+	void ResetCameraBufferImmediate();
+	bool bHyperDrivePrev = false;
 	FLongitudinalTuning CruiseLongi;
 	FTransAssist        CruiseFA;
 	FLongitudinalTuning HyperLongi;
