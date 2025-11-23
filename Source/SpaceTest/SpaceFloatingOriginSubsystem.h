@@ -85,6 +85,8 @@ private:
     // Р Р°РґРёСѓСЃ, РїРѕСЃР»Рµ РєРѕС‚РѕСЂРѕРіРѕ РїРµСЂРµСЃС‚СЂР°РёРІР°РµРј origin (РІ UU)
     UPROPERTY(EditAnywhere, Category="FloatingOrigin")
     double RecenterRadiusUU = 2000000.0; // 2 РјР»РЅ UU
+    UPROPERTY(EditAnywhere, Category="FloatingOrigin")
+    double HyperRecenterRadiusScale = 20.0;
 
     // Р“Р»РѕР±Р°Р»СЊРЅС‹Рµ РєРѕРѕСЂРґРёРЅР°С‚С‹ origin'Р° (РІ РјРµС‚СЂР°С…, double)
     FVector3d OriginGlobal = FVector3d::ZeroVector;

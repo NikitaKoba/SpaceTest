@@ -7,6 +7,8 @@
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Camera/CameraComponent.h"
+#include "Engine/Engine.h"
+#include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "Misc/App.h"
 
@@ -152,6 +154,7 @@ void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 	PlayerInputComponent->BindAxis(TEXT("Turn"),          this, &AShipPawn::Axis_MouseYaw);
 	PlayerInputComponent->BindAxis(TEXT("LookUp"),        this, &AShipPawn::Axis_MousePitch);
 	PlayerInputComponent->BindAction(TEXT("ToggleFlightAssist"), IE_Pressed, this, &AShipPawn::Action_ToggleFA);
+	PlayerInputComponent->BindAction(TEXT("ToggleHyperDrive"),   IE_Pressed, this, &AShipPawn::Action_ToggleHyperDrive);
 	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Pressed,  this, &AShipPawn::Action_FirePressed);
 	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Released, this, &AShipPawn::Action_FireReleased);
 
@@ -386,6 +389,11 @@ void AShipPawn::Action_ToggleFA()
 {
 	if (Flight) Flight->ToggleFlightAssist();
 }
+
+void AShipPawn::Action_ToggleHyperDrive()
+{
+	ToggleHyperDrive();
+}
 void AShipPawn::SetGlobalPos(const FGlobalPos& InPos)
 {
 	GlobalPos = InPos;
@@ -448,4 +456,51 @@ void AShipPawn::SyncWorldFromGlobal()
 		const FVector3d GlobalVec = SpaceGlobal::ToGlobalVector(GlobalPos);
 		SetActorLocation(FVector(GlobalVec), false, nullptr, ETeleportType::TeleportPhysics);
 	}
+}
+
+void AShipPawn::SetHyperDriveActive(bool bActive)
+{
+	if (HasAuthority())
+	{
+		if (bHyperDriveActive != bActive)
+		{
+			bHyperDriveActive = bActive;
+			OnHyperDriveChanged();
+		}
+	}
+	else
+	{
+		ServerSetHyperDrive(bActive);
+	}
+}
+
+void AShipPawn::ToggleHyperDrive()
+{
+	SetHyperDriveActive(!bHyperDriveActive);
+}
+
+void AShipPawn::ServerSetHyperDrive_Implementation(bool bNewActive)
+{
+	SetHyperDriveActive(bNewActive);
+}
+
+void AShipPawn::OnRep_HyperDrive()
+{
+	OnHyperDriveChanged();
+}
+
+void AShipPawn::OnHyperDriveChanged()
+{
+	if (GEngine)
+	{
+		const FColor C = bHyperDriveActive ? FColor::Purple : FColor::Green;
+		GEngine->AddOnScreenDebugMessage((uint64)this + 777, 2.0f, C,
+			FString::Printf(TEXT("HYPERDRIVE: %s"), bHyperDriveActive ? TEXT("ON") : TEXT("OFF")));
+	}
+}
+
+void AShipPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AShipPawn, bHyperDriveActive);
 }

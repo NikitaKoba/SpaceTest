@@ -90,6 +90,9 @@ static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_UseKNearest(
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_MaxQueryRadiusMeters(
 	TEXT("space.RepGraph.MaxQueryRadiusMeters"), 0.f, TEXT("Optional hard cap on query radius"));
 
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_HyperAutoEnterMps(
+	TEXT("space.RepGraph.Hyper.AutoEnterMps"), 10000.f, TEXT("Auto-hyper profile if viewer speed exceeds this (m/s, 0=off)"));
+
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_Debug(
 	TEXT("space.RepGraph.Debug"), 1, TEXT("Verbose logging"));
 
@@ -662,12 +665,43 @@ static FVector GetPawnForward(const APawn* P)
 	return P ? P->GetActorForwardVector() : FVector::ForwardVector;
 }
 
+static bool IsHyperShip(const AShipPawn* Ship)
+{
+	return Ship && Ship->IsHyperDriveActive();
+}
+
+static bool IsOwnedByConnection(const UNetReplicationGraphConnection* ConnMgr, const AActor* Actor, const USpaceReplicationGraph* RG)
+{
+	if (!ConnMgr || !ConnMgr->NetConnection || !Actor || !RG) return false;
+	return RG->FindOwnerConnection(const_cast<AActor*>(Actor)) == ConnMgr->NetConnection;
+}
+
 // ============= LiveLog_Tick - ИСПРАВЛЕНО для больших координат =============
 
 bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 {
 	UWorld* W = GetWorld();
 	if (!W) return true;
+
+	// Keep spatial hash in sync with fast-moving ships
+	if (Spatial3D)
+	{
+		bool bHadInvalid = false;
+		for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
+		{
+			AShipPawn* Ship = ShipPtr.Get();
+			if (!Ship)
+			{
+				bHadInvalid = true;
+				continue;
+			}
+			Spatial3D->UpdateActor(Ship);
+		}
+		if (bHadInvalid)
+		{
+			Spatial3D->RemoveInvalids();
+		}
+	}
 
 	const bool bDoLiveLog  = (CVar_SpaceRepGraph_LiveLog.GetValueOnAnyThread() != 0);
 	const bool bDoDebugLog = SRG_ShouldLog();
@@ -697,6 +731,11 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			if (APlayerController* PC = ConnMgr->NetConnection->PlayerController)
 				if (APawn* P = PC->GetPawn())
 				{
+					const AShipPawn* Ship = Cast<AShipPawn>(P);
+					if (Ship && IsHyperShip(Ship))
+					{
+						continue; // ignore hyperdrive viewers for biasing to avoid thrash
+					}
 					CenterXYZ += P->GetActorLocation();
 					++Num;
 				}
@@ -803,6 +842,56 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		UReplicationGraphNode_AlwaysRelevant_ForConnection* ARNode = PerConnAlwaysMap.FindRef(ConnMgr).Get();
 		if (!ARNode) continue;
 
+		const AShipPawn* ViewerShip = Cast<AShipPawn>(ViewerPawn);
+		bool bViewerHyper = IsHyperShip(ViewerShip);
+		if (!bViewerHyper)
+		{
+			const float AutoMps = CVar_SpaceRepGraph_HyperAutoEnterMps.GetValueOnAnyThread();
+			if (AutoMps > 0.f && ViewerPawn)
+			{
+				const float SpeedMps = ViewerPawn->GetVelocity().Size() / 100.f;
+				if (SpeedMps >= AutoMps)
+					bViewerHyper = true;
+			}
+		}
+
+		if (bViewerHyper)
+		{
+			TSet<TWeakObjectPtr<AActor>> NowSelected;
+			NowSelected.Add(ViewerPawn);
+
+			if (!CS.Selected.Contains(ViewerPawn))
+			{
+				if (ViewerPawn->NetDormancy != DORM_Awake)
+					ViewerPawn->SetNetDormancy(DORM_Awake);
+				ViewerPawn->ForceNetUpdate();
+				ARNode->NotifyAddNetworkActor(FNewReplicatedActorInfo(ViewerPawn));
+				LogChannelState(ConnMgr, ViewerPawn, TEXT("+HYPER_ADD"));
+			}
+
+			for (TWeakObjectPtr<AActor> Prev : CS.Selected)
+			{
+				if (!Prev.IsValid() || Prev.Get() == ViewerPawn) continue;
+				AActor* A = Prev.Get();
+				if (!A) continue;
+				if (A->NetDormancy != DORM_DormantAll)
+					A->SetNetDormancy(DORM_DormantAll);
+				ARNode->NotifyRemoveNetworkActor(FNewReplicatedActorInfo(A));
+				LogChannelState(ConnMgr, A, TEXT("-HYPER_REM"));
+			}
+
+			CS.Selected = MoveTemp(NowSelected);
+			CS.Visible  = CS.Selected;
+			CS.GroupsFormed = 1;
+
+			UpdateAdaptiveBudget(ConnMgr, CS, 0.f, 1.f/TickHz);
+			if (bDoLiveLog)
+			{
+				LogPerConnTick(ConnMgr, CS, NumTrackedShipsWorld, 1, 1, 0.f, 1.f/TickHz);
+			}
+			continue;
+		}
+
 		const FVector ViewLoc = ViewerPawn->GetActorLocation();
 
 		// Обновление EMA зрителя
@@ -864,6 +953,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				AShipPawn* Ship = Cast<AShipPawn>(A);
 				if (!Ship || Ship == ViewerPawn) continue;
 				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
+				if (IsOwnedByConnection(ConnMgr, Ship, this)) continue; // skip own ship even if viewer not set yet
 
 				const bool  bIsPlayerShip = IsPlayerControlledShip(Ship);
 				const float DistSq        = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
@@ -898,6 +988,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				AShipPawn* Ship = ShipPtr.Get();
 				if (!Ship || Ship == ViewerPawn) continue;
 				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
+				if (IsOwnedByConnection(ConnMgr, Ship, this)) continue; // skip own ship even if viewer not set yet
 
 				const bool  bIsPlayerShip = IsPlayerControlledShip(Ship);
 				const float DistSq        = FVector::DistSquared(ViewLoc, Ship->GetActorLocation());
@@ -1031,12 +1122,24 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			for (TWeakObjectPtr<AActor> Prev : CS.Selected)
 			{
 				if (!Prev.IsValid())
-					continue;
-
-				if (!NowSelected.Contains(Prev))
 				{
-					AActor* A = Prev.Get();
-					if (!A) continue;
+					continue;
+				}
+
+				AActor* A = Prev.Get();
+				const bool bBeingDestroyed = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+
+				if (!NowSelected.Contains(Prev) || bBeingDestroyed)
+				{
+					if (!A || bBeingDestroyed)
+					{
+						continue;
+					}
+
+					if (IsOwnedByConnection(ConnMgr, A, this))
+					{
+						continue;
+					}
 
 					if (A->NetDormancy != DORM_DormantAll)
 						A->SetNetDormancy(DORM_DormantAll);
@@ -1336,6 +1439,26 @@ void USpaceReplicationGraph::HandleWorldShift()
     {
         Spatial3D->OnWorldShift();
     }
+
+	// Reset rebias state to avoid stale extreme values after large shifts
+	if (GridNode)
+	{
+		const float CellUU = FMath::Max(1.f, GridNode->CellSize);
+		LastAppliedCellX = (int64)FMath::FloorToDouble(GridNode->SpatialBias.X / CellUU);
+		LastAppliedCellY = (int64)FMath::FloorToDouble(GridNode->SpatialBias.Y / CellUU);
+		// Grid bias is 2D; reset Z to origin cell so AutoRebias3D can rebuild from viewer positions
+		LastAppliedCellZ = 0;
+		LastRebiasWall   = FPlatformTime::Seconds();
+	}
+
+	// Clear per-connection visibility caches so we do not try to remove stale actors after a big shift
+	for (auto& CKV : ConnStates)
+	{
+		FConnState& CS = CKV.Value;
+		CS.Visible.Empty();
+		CS.Selected.Empty();
+		CS.ActorStats.Empty();
+	}
 }
 
 

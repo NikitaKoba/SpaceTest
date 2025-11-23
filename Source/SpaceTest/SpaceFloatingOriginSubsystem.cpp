@@ -1,4 +1,4 @@
-// SpaceFloatingOriginSubsystem.cpp
+﻿// SpaceFloatingOriginSubsystem.cpp
 
 #include "SpaceFloatingOriginSubsystem.h"
 #include "ShipPawn.h"
@@ -16,7 +16,7 @@ DEFINE_LOG_CATEGORY(LogSpaceFloatingOrigin);
 // ------------------------------
 // Initialize / Deinitialize
 // ------------------------------
-// Helper: сдвинуть весь мир (учитывает отсутствие UWorld::ApplyWorldOffset в сборке)
+// Helper: СЃРґРІРёРЅСѓС‚СЊ РІРµСЃСЊ РјРёСЂ (СѓС‡РёС‚С‹РІР°РµС‚ РѕС‚СЃСѓС‚СЃС‚РІРёРµ UWorld::ApplyWorldOffset РІ СЃР±РѕСЂРєРµ)
 static void ShiftEntireWorld(UWorld* World, const FVector& ShiftWorld)
 {
     if (!World || ShiftWorld.IsNearlyZero())
@@ -85,7 +85,7 @@ void USpaceFloatingOriginSubsystem::SetAnchor(AActor* InAnchor)
 }
 
 // ------------------------------
-// Tick: проверка расстояния и триггер shift
+// Tick: РїСЂРѕРІРµСЂРєР° СЂР°СЃСЃС‚РѕСЏРЅРёСЏ Рё С‚СЂРёРіРіРµСЂ shift
 // ------------------------------
 
 void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
@@ -103,7 +103,6 @@ void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
 
     if (!bIsServerLike)
     {
-        // На клиентах Tick только для конвертации World<->Global, без сдвигов.
         return;
     }
 
@@ -112,9 +111,11 @@ void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
         return;
     }
 
+    const AShipPawn* AnchorShip = Cast<AShipPawn>(Anchor.Get());
+    const bool bAnchorHyper = AnchorShip && AnchorShip->IsHyperDriveActive();
+
     if (!bHasValidOrigin)
     {
-        // Инициализация: считаем текущий мир "нулём".
         OriginGlobal  = FVector3d::ZeroVector;
         WorldOriginUU = FVector::ZeroVector;
         bHasValidOrigin = true;
@@ -126,22 +127,22 @@ void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
     }
 
     const FVector AnchorLoc = Anchor->GetActorLocation();
-    const double Dist2      = AnchorLoc.SizeSquared();
-    const double Radius2    = RecenterRadiusUU * RecenterRadiusUU;
 
-    // Если корабль ушёл дальше радиуса — сдвигаем origin так, чтобы его глобальные координаты не менялись.
+    const double RadiusScaled = RecenterRadiusUU * (bAnchorHyper ? HyperRecenterRadiusScale : 1.0);
+    const double Radius2    = RadiusScaled * RadiusScaled;
+    const double Dist2      = AnchorLoc.SizeSquared();
+
+    if (bAnchorHyper)
+    {
+        return; // freeze origin while hyperdrive is active
+    }
+
     if (Dist2 > Radius2)
     {
         const FVector3d AnchorGlobal = WorldToGlobalVector(AnchorLoc);
         ApplyOriginShift(AnchorGlobal);
     }
 }
-
-
-// ------------------------------
-// Репликация origin'а через WorldOriginActor
-// ------------------------------
-
 void USpaceFloatingOriginSubsystem::ApplyReplicatedOrigin(const FVector3d& NewOriginGlobal,
                                                           const FVector&  NewWorldOriginUU)
 {
@@ -204,8 +205,8 @@ void USpaceFloatingOriginSubsystem::ApplyReplicatedOrigin(const FVector3d& NewOr
         ShipCount);
 }
 
-// вызывать ТОЛЬКО на сервере, когда хочешь переставить world-origin (без физического shift'а)
-// вызывать ТОЛЬКО на сервере, когда хочешь переставить world-origin (без физического shift'а)
+// РІС‹Р·С‹РІР°С‚СЊ РўРћР›Р¬РљРћ РЅР° СЃРµСЂРІРµСЂРµ, РєРѕРіРґР° С…РѕС‡РµС€СЊ РїРµСЂРµСЃС‚Р°РІРёС‚СЊ world-origin (Р±РµР· С„РёР·РёС‡РµСЃРєРѕРіРѕ shift'Р°)
+// РІС‹Р·С‹РІР°С‚СЊ РўРћР›Р¬РљРћ РЅР° СЃРµСЂРІРµСЂРµ, РєРѕРіРґР° С…РѕС‡РµС€СЊ РїРµСЂРµСЃС‚Р°РІРёС‚СЊ world-origin (Р±РµР· С„РёР·РёС‡РµСЃРєРѕРіРѕ shift'Р°)
 void USpaceFloatingOriginSubsystem::ServerShiftWorldTo(const FVector& NewWorldOriginUU)
 {
     UWorld* World = GetWorld();
@@ -216,7 +217,7 @@ void USpaceFloatingOriginSubsystem::ServerShiftWorldTo(const FVector& NewWorldOr
 
     if (World->GetNetMode() == NM_Client)
     {
-        // На клиентах ничего не делаем
+        // РќР° РєР»РёРµРЅС‚Р°С… РЅРёС‡РµРіРѕ РЅРµ РґРµР»Р°РµРј
         return;
     }
 
@@ -227,7 +228,7 @@ void USpaceFloatingOriginSubsystem::ServerShiftWorldTo(const FVector& NewWorldOr
     {
         WorldOriginUU = FVector3d(NewWorldOriginUU);
 
-        // Обновляем актор-репликатор, чтобы клиенты получили новые Origin*
+        // РћР±РЅРѕРІР»СЏРµРј Р°РєС‚РѕСЂ-СЂРµРїР»РёРєР°С‚РѕСЂ, С‡С‚РѕР±С‹ РєР»РёРµРЅС‚С‹ РїРѕР»СѓС‡РёР»Рё РЅРѕРІС‹Рµ Origin*
         for (TActorIterator<ASpaceWorldOriginActor> It(World); It; ++It)
         {
             ASpaceWorldOriginActor* OriginActor = *It;
@@ -244,13 +245,13 @@ void USpaceFloatingOriginSubsystem::ServerShiftWorldTo(const FVector& NewWorldOr
 
 
 // ------------------------------
-// Конвертация World <-> Global
+// РљРѕРЅРІРµСЂС‚Р°С†РёСЏ World <-> Global
 // ------------------------------
 
 FVector3d USpaceFloatingOriginSubsystem::WorldToGlobalVector(const FVector& WorldLoc) const
 {
-    // Всё в UU (см).
-    // WorldOriginUU — положение "нулевой" точки мира в World UU.
+    // Р’СЃС‘ РІ UU (СЃРј).
+    // WorldOriginUU вЂ” РїРѕР»РѕР¶РµРЅРёРµ "РЅСѓР»РµРІРѕР№" С‚РѕС‡РєРё РјРёСЂР° РІ World UU.
     // Global = OriginGlobal + (WorldLoc - WorldOriginUU)
     return OriginGlobal + (FVector3d(WorldLoc) - WorldOriginUU);
 }
@@ -269,7 +270,7 @@ FVector USpaceFloatingOriginSubsystem::GlobalToWorld(const FGlobalPos& GP) const
 
 FVector USpaceFloatingOriginSubsystem::GlobalToWorld_Vector(const FVector3d& Global) const
 {
-    // Обратное к WorldToGlobalVector:
+    // РћР±СЂР°С‚РЅРѕРµ Рє WorldToGlobalVector:
     // Global = OriginGlobal + (WorldLoc - WorldOriginUU)
     // => WorldLoc = (Global - OriginGlobal) + WorldOriginUU
     const FVector3d Local = (Global - OriginGlobal) + WorldOriginUU;
@@ -281,7 +282,7 @@ FVector USpaceFloatingOriginSubsystem::GlobalToWorld_Vector(const FVector3d& Glo
 }
 
 // ------------------------------
-// Основная функция сдвига origin'а и мира
+// РћСЃРЅРѕРІРЅР°СЏ С„СѓРЅРєС†РёСЏ СЃРґРІРёРіР° origin'Р° Рё РјРёСЂР°
 // ------------------------------
 
 void USpaceFloatingOriginSubsystem::ApplyOriginShift(const FVector3d& NewOriginTarget)
@@ -378,6 +379,7 @@ void USpaceFloatingOriginSubsystem::ApplyOriginShift(const FVector3d& NewOriginT
         }
     }
 }
+
 
 
 

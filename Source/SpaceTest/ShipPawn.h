@@ -71,6 +71,19 @@ public:
 	UShipNetComponent* Net;
 	UPROPERTY(EditAnywhere, Category="FloatingOrigin")
 	bool bEnableFloatingOrigin = true;
+	// Hyperdrive mode (replicated)
+	UPROPERTY(ReplicatedUsing=OnRep_HyperDrive, EditAnywhere, Category="Flight|Hyper")
+	bool bHyperDriveActive = false;
+	UFUNCTION() void OnRep_HyperDrive();
+	UFUNCTION(Server, Reliable) void ServerSetHyperDrive(bool bNewActive);
+	void OnHyperDriveChanged();
+public:
+	UFUNCTION(BlueprintCallable, Category="Flight|Hyper")
+	void SetHyperDriveActive(bool bActive);
+	UFUNCTION(BlueprintCallable, Category="Flight|Hyper")
+	void ToggleHyperDrive();
+	UFUNCTION(BlueprintPure, Category="Flight|Hyper")
+	bool IsHyperDriveActive() const { return bHyperDriveActive; }
 	// Camera config
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera") bool bUseCalcCamera = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera", meta=(ClampMin="0.0", ClampMax="2.0"))
@@ -102,6 +115,7 @@ public:
 	void UpdateGlobalPosIncremental(float DeltaSeconds);
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:
 	// Camera sample buffer
@@ -127,4 +141,5 @@ private:
 	void Axis_MouseYaw    (float V);
 	void Axis_MousePitch  (float V);
 	void Action_ToggleFA();
+	void Action_ToggleHyperDrive();
 };
