@@ -7,6 +7,7 @@
 
 // Forward declarations
 class AShipPawn;
+class ALaserBolt;
 class USRG_SpatialHash3D;
 
 /**
@@ -36,6 +37,9 @@ public:
 
 	// ========== Custom API ==========
 	void HandlePawnPossessed(APawn* Pawn);
+
+	// World shift (FloatingOrigin): перестроить spatial-хеш
+	void HandleWorldShift();
 	
 	// НОВОЕ: 3D rebias вместо только XY
 	void Rebias3D(const FVector& WorldLoc);

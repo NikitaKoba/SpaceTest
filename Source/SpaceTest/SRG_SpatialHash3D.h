@@ -1,4 +1,4 @@
-// SRG_SpatialHash3D.h
+﻿// SRG_SpatialHash3D.h
 #pragma once
 
 #include "CoreMinimal.h"
@@ -279,6 +279,13 @@ public:
 		return FMath::Clamp(TimeSinceLastSec / DeadlineTStarSec, 0.f, 1.f);
 	}
 
+public:
+    /** World shift: перестроить бакеты по текущим world-координатам */
+    void OnWorldShift()
+    {
+        RehashAll();
+    }
+
 private:
 	struct FBucket
 	{
@@ -332,3 +339,4 @@ private:
 		ActorToCell.Add(A, NewC); // перезапишет старое значение
 	}
 };
+

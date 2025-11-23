@@ -3,6 +3,7 @@
 #include "SpaceFloatingOriginSubsystem.h"
 #include "ShipPawn.h"
 #include "SpaceWorldOriginActor.h"
+#include "SpaceReplicationGraph.h"
 
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -190,6 +191,14 @@ void USpaceFloatingOriginSubsystem::ApplyReplicatedOrigin(const FVector3d& NewOr
         ++ShipCount;
     }
 
+    if (World->GetNetDriver())
+    {
+        if (USpaceReplicationGraph* RG = Cast<USpaceReplicationGraph>(World->GetNetDriver()->GetReplicationDriver()))
+        {
+            RG->HandleWorldShift();
+        }
+    }
+
     UE_LOG(LogSpaceFloatingOrigin, Log,
         TEXT("[FO REPL ORIGIN END] ShipsResynced=%d"),
         ShipCount);
@@ -332,6 +341,14 @@ void USpaceFloatingOriginSubsystem::ApplyOriginShift(const FVector3d& NewOriginT
         AShipPawn* Ship = *ItShip;
         Ship->SyncGlobalFromWorld();
         ++ShipCount;
+    }
+
+    if (World->GetNetDriver())
+    {
+        if (USpaceReplicationGraph* RG = Cast<USpaceReplicationGraph>(World->GetNetDriver()->GetReplicationDriver()))
+        {
+            RG->HandleWorldShift();
+        }
     }
 
     UE_LOG(LogSpaceFloatingOrigin, Log,

@@ -1,4 +1,4 @@
-// SpaceFloatingOriginSubsystem.h
+﻿// SpaceFloatingOriginSubsystem.h
 #pragma once
 
 #include "CoreMinimal.h"
@@ -12,9 +12,9 @@ class AActor;
 
 /**
  * Floating Origin:
- *  - Хранит глобальные координаты world-origin O (OriginGlobal).
- *  - Умеет конвертировать World <-> Global (через G = O + (World - WorldOriginUU) / 100).
- *  - При уходе якоря далеко от (0,0,0) сдвигает ВСЕ акторы на Δ = -AnchorLoc.
+ *  - РҐСЂР°РЅРёС‚ РіР»РѕР±Р°Р»СЊРЅС‹Рµ РєРѕРѕСЂРґРёРЅР°С‚С‹ world-origin O (OriginGlobal).
+ *  - РЈРјРµРµС‚ РєРѕРЅРІРµСЂС‚РёСЂРѕРІР°С‚СЊ World <-> Global (С‡РµСЂРµР· G = O + (World - WorldOriginUU) / 100).
+ *  - РџСЂРё СѓС…РѕРґРµ СЏРєРѕСЂСЏ РґР°Р»РµРєРѕ РѕС‚ (0,0,0) СЃРґРІРёРіР°РµС‚ Р’РЎР• Р°РєС‚РѕСЂС‹ РЅР° О” = -AnchorLoc.
  */
 UCLASS()
 class SPACETEST_API USpaceFloatingOriginSubsystem : public UTickableWorldSubsystem
@@ -22,25 +22,25 @@ class SPACETEST_API USpaceFloatingOriginSubsystem : public UTickableWorldSubsyst
     GENERATED_BODY()
 
 public:
-    // --- НОВЫЙ API ---
+    // --- РќРћР’Р«Р™ API ---
 
-    // Есть ли валидный origin (сервер его посчитал и/или пришёл от ASpaceWorldOriginActor)
+    // Р•СЃС‚СЊ Р»Рё РІР°Р»РёРґРЅС‹Р№ origin (СЃРµСЂРІРµСЂ РµРіРѕ РїРѕСЃС‡РёС‚Р°Р» Рё/РёР»Рё РїСЂРёС€С‘Р» РѕС‚ ASpaceWorldOriginActor)
     bool HasValidOrigin() const { return bHasValidOrigin; }
 
-    // Применение реплицированного origin'а на клиентах и сервере
+    // РџСЂРёРјРµРЅРµРЅРёРµ СЂРµРїР»РёС†РёСЂРѕРІР°РЅРЅРѕРіРѕ origin'Р° РЅР° РєР»РёРµРЅС‚Р°С… Рё СЃРµСЂРІРµСЂРµ
     void ApplyReplicatedOrigin(const FVector3d& NewOriginGlobal,
                                const FVector3d& NewWorldOriginUU);
 
-    // Вызывать ТОЛЬКО на сервере, когда ты решаешь «сдвинуть» origin
+    // Р’С‹Р·С‹РІР°С‚СЊ РўРћР›Р¬РљРћ РЅР° СЃРµСЂРІРµСЂРµ, РєРѕРіРґР° С‚С‹ СЂРµС€Р°РµС€СЊ В«СЃРґРІРёРЅСѓС‚СЊВ» origin
     void ServerShiftWorldTo(const FVector& NewWorldOriginUU);
 
-    // Геттеры, чтобы в других местах можно было спокойно читать origin
+    // Р“РµС‚С‚РµСЂС‹, С‡С‚РѕР±С‹ РІ РґСЂСѓРіРёС… РјРµСЃС‚Р°С… РјРѕР¶РЅРѕ Р±С‹Р»Рѕ СЃРїРѕРєРѕР№РЅРѕ С‡РёС‚Р°С‚СЊ origin
     const FVector3d& GetOriginGlobal() const  { return OriginGlobal; }
     const FVector3d& GetWorldOriginUU() const { return WorldOriginUU; }
 
-    // Максимальный сдвиг origin за один тик (в UU). Ограничиваем, чтобы избегать резкого «телепорта»
+    // РњР°РєСЃРёРјР°Р»СЊРЅС‹Р№ СЃРґРІРёРі origin Р·Р° РѕРґРёРЅ С‚РёРє (РІ UU). РћРіСЂР°РЅРёС‡РёРІР°РµРј, С‡С‚РѕР±С‹ РёР·Р±РµРіР°С‚СЊ СЂРµР·РєРѕРіРѕ В«С‚РµР»РµРїРѕСЂС‚Р°В»
     UPROPERTY(EditAnywhere, Category="FloatingOrigin")
-    double MaxShiftPerTickUU = 1000000.0; // 10 км за тик
+    double MaxShiftPerTickUU = 0.0; // 0 = без лимита шага; иначе ограничение в UU за тик // 10 РєРј Р·Р° С‚РёРє
 
     // USubsystem
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
@@ -50,11 +50,11 @@ public:
     virtual void Tick(float DeltaTime) override;
     virtual TStatId GetStatId() const override;
 
-    /** Включить/выключить сдвиг мира */
+    /** Р’РєР»СЋС‡РёС‚СЊ/РІС‹РєР»СЋС‡РёС‚СЊ СЃРґРІРёРі РјРёСЂР° */
     void SetEnabled(bool bInEnabled);
     bool IsEnabled() const { return bEnabled; }
 
-    /** Задать якорь (обычно — корабль игрока) */
+    /** Р—Р°РґР°С‚СЊ СЏРєРѕСЂСЊ (РѕР±С‹С‡РЅРѕ вЂ” РєРѕСЂР°Р±Р»СЊ РёРіСЂРѕРєР°) */
     void SetAnchor(AActor* InAnchor);
 
     /** World -> Global (double) */
@@ -69,29 +69,30 @@ public:
     /** Global FVector3d -> World */
     FVector GlobalToWorld_Vector(const FVector3d& Global) const;
 
-    // Флаг только для логирования (один раз показать, какие реальные значения взяли из CVars)
+    // Р¤Р»Р°Рі С‚РѕР»СЊРєРѕ РґР»СЏ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ (РѕРґРёРЅ СЂР°Р· РїРѕРєР°Р·Р°С‚СЊ, РєР°РєРёРµ СЂРµР°Р»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ РІР·СЏР»Рё РёР· CVars)
     bool bLoggedRuntimeSettings = false;
 
 private:
-    // Включён ли вообще механизм
+    // Р’РєР»СЋС‡С‘РЅ Р»Рё РІРѕРѕР±С‰Рµ РјРµС…Р°РЅРёР·Рј
     bool bEnabled = false;
 
-    // Флаг: origin инициализирован и согласован
+    // Р¤Р»Р°Рі: origin РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅ Рё СЃРѕРіР»Р°СЃРѕРІР°РЅ
     bool bHasValidOrigin = false;
 
-    // Якорный актор (корабль/игрок), вокруг которого считаем origin
+    // РЇРєРѕСЂРЅС‹Р№ Р°РєС‚РѕСЂ (РєРѕСЂР°Р±Р»СЊ/РёРіСЂРѕРє), РІРѕРєСЂСѓРі РєРѕС‚РѕСЂРѕРіРѕ СЃС‡РёС‚Р°РµРј origin
     TWeakObjectPtr<AActor> Anchor;
 
-    // Радиус, после которого перестраиваем origin (в UU)
+    // Р Р°РґРёСѓСЃ, РїРѕСЃР»Рµ РєРѕС‚РѕСЂРѕРіРѕ РїРµСЂРµСЃС‚СЂР°РёРІР°РµРј origin (РІ UU)
     UPROPERTY(EditAnywhere, Category="FloatingOrigin")
-    double RecenterRadiusUU = 2000000.0; // 2 млн UU
+    double RecenterRadiusUU = 2000000.0; // 2 РјР»РЅ UU
 
-    // Глобальные координаты origin'а (в метрах, double)
+    // Р“Р»РѕР±Р°Р»СЊРЅС‹Рµ РєРѕРѕСЂРґРёРЅР°С‚С‹ origin'Р° (РІ РјРµС‚СЂР°С…, double)
     FVector3d OriginGlobal = FVector3d::ZeroVector;
 
-    // World-origin в UU (если нужно смещать сам world origin, сейчас можешь держать = (0,0,0))
+    // World-origin РІ UU (РµСЃР»Рё РЅСѓР¶РЅРѕ СЃРјРµС‰Р°С‚СЊ СЃР°Рј world origin, СЃРµР№С‡Р°СЃ РјРѕР¶РµС€СЊ РґРµСЂР¶Р°С‚СЊ = (0,0,0))
     FVector3d WorldOriginUU = FVector3d::ZeroVector;
 
-    /** Основная функция: смена origin, сдвиг всего мира на Δ */
+    /** РћСЃРЅРѕРІРЅР°СЏ С„СѓРЅРєС†РёСЏ: СЃРјРµРЅР° origin, СЃРґРІРёРі РІСЃРµРіРѕ РјРёСЂР° РЅР° О” */
     void ApplyOriginShift(const FVector3d& NewOriginGlobal);
 };
+

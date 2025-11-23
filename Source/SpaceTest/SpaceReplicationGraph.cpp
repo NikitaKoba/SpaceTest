@@ -1,4 +1,4 @@
-// SpaceReplicationGraph.cpp - ИСПРАВЛЕННАЯ ВЕРСИЯ для больших координат
+﻿// SpaceReplicationGraph.cpp - ИСПРАВЛЕННАЯ ВЕРСИЯ для больших координат
 
 #include "SpaceReplicationGraph.h"
 #include "ShipPawn.h"
@@ -19,6 +19,7 @@
 #include "SRG_SpatialHash3D.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "ReplicationGraph.h"
+#include "LaserBolt.h"
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_AlwaysIncludeMeters(
 	TEXT("space.RepGraph.AlwaysIncludeMeters"),
@@ -356,6 +357,20 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(
 
 	if (Actor->IsA<APlayerController>()) return;
 
+if (Actor->IsA<ALaserBolt>())
+{
+    if (AlwaysRelevantNode)
+    {
+        AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
+        if (SRG_ShouldLog())
+        {
+            UE_LOG(LogSpaceRepGraph, Verbose,
+                TEXT("RouteAdd: %s -> AlwaysRelevantNode (LaserBolt)"),
+                *Actor->GetName());
+        }
+    }
+    return;
+}
 	// ИСПРАВЛЕНО: Добавляем ВСЕ ShipPawn в tracking независимо от контроллера
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{
@@ -417,6 +432,15 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 {
 	AActor* Actor = ActorInfo.Actor;
 	if (!Actor) return;
+
+	if (Actor->IsA<ALaserBolt>())
+	{
+		if (AlwaysRelevantNode)
+		{
+			AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
+		}
+		return;
+	}
 
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{
@@ -1282,6 +1306,15 @@ void USpaceReplicationGraph::LogPerConnTick(
 		UE_LOG(LogSpaceRepGraph, Display, TEXT("%s"), *Line);
 	}
 }
+// Вспомогательное: world-shift -> перестроить spatial-хэш
+void USpaceReplicationGraph::HandleWorldShift()
+{
+    if (Spatial3D)
+    {
+        Spatial3D->OnWorldShift();
+    }
+}
 
-// Остальные функции (ComputePerceptualScore, UpdateAdaptiveBudget, LogPerConnTick и т.д.) 
-// остаются БЕЗ ИЗМЕНЕНИЙ из исходного кода
+
+
+
