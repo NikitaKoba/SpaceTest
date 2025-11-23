@@ -3,11 +3,15 @@
 #include "FlightComponent.h"
 #include "ShipNetComponent.h"
 #include "ShipCursorPilotComponent.h"
+#include "SpacePlayerState.h"
 #include "SpaceFloatingOriginSubsystem.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "GameFramework/GameStateBase.h"
 #include "Camera/CameraComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
+#include "EngineUtils.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "Misc/App.h"
@@ -61,7 +65,28 @@ AShipPawn::AShipPawn()
 	Laser->bServerTraceAim     = true;     // Ð¿ÑƒÑÑ‚ÑŒ ÑÐµÑ€Ð²ÐµÑ€ Ð²ÑÑ‘ Ñ€Ð°Ð²Ð½Ð¾ Ñ‚Ñ€ÐµÐ¹ÑÐ¸Ñ‚ Ñ‚Ð¾Ñ‡ÐºÑƒ (Ð´Ð»Ñ Ð¿Ð¾Ð¿Ð°Ð´Ð°Ð½Ð¸Ð¹)
 	Laser->MuzzleSockets    = { FName("Muzzle_L"), FName("Muzzle_R") }; // Ð´Ð¾Ð»Ð¶Ð½Ñ‹ Ð±Ñ‹Ñ‚ÑŒ Ð½Ð° ShipMesh
 	SpawnCollisionHandlingMethod = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-	
+
+	// --- Cruise / Hyper flight profiles ---
+	CruiseLongi.VxMax_Mps  = 120.f;
+	CruiseLongi.AxMax_Mps2 = 15.f;
+	CruiseFA.VelocityPD.Kp = 1.5f;
+	CruiseFA.VelocityPD.Kd = 0.25f;
+	CruiseFA.VelocityPD.OutputAbsMax = 50.f;
+	CruiseFA.AccelMax_Mps2 = 60.f;
+	CruiseFA.RetroBoostMultiplier = 2.f;
+	CruiseFA.RetroDotThreshold   = -0.25f;
+	CruiseFA.Deadzone_Mps        = 0.05f;
+
+	HyperLongi.VxMax_Mps  = 128200.f;
+	HyperLongi.AxMax_Mps2 = 28200.f;
+	HyperFA.VelocityPD.Kp = 1.5f;
+	HyperFA.VelocityPD.Kd = 0.25f;
+	HyperFA.VelocityPD.OutputAbsMax = 128200.f;
+	HyperFA.AccelMax_Mps2 = 128200.f;
+	HyperFA.RetroBoostMultiplier = 2.f;
+	HyperFA.RetroDotThreshold   = -0.25f;
+	HyperFA.Deadzone_Mps        = 0.05f;
+
 }
 
 // ShipPawn.cpp
@@ -111,6 +136,9 @@ void AShipPawn::BeginPlay()
 	{
 		Camera->SetFieldOfView(CameraFOV);
 	}
+
+	// Apply default cruise profile on start
+	ApplyFlightProfile(false);
 }
 
 void AShipPawn::Destroyed()
@@ -169,6 +197,71 @@ void AShipPawn::Tick(float DeltaSeconds)
 	if (HasAuthority())
 	{
 		SyncGlobalFromWorld();
+
+		if (ASpacePlayerState* SPS = Cast<ASpacePlayerState>(GetPlayerState()))
+		{
+			SPS->SetReplicatedGlobalPos(GlobalPos);
+		}
+	}
+
+	// --- Debug marker to show where the other player is ---
+	if (IsLocallyControlled() && bDrawOtherPlayerMarker)
+	{
+		UWorld* World = GetWorld();
+		if (World && World->GetNetMode() != NM_DedicatedServer)
+		{
+			ASpacePlayerState* TargetPS = nullptr;
+			ASpacePlayerState* MyPS = Cast<ASpacePlayerState>(GetPlayerState());
+
+			if (AGameStateBase* GS = World->GetGameState())
+			{
+				for (APlayerState* PS : GS->PlayerArray)
+				{
+					if (PS && PS != MyPS)
+					{
+						TargetPS = Cast<ASpacePlayerState>(PS);
+						if (TargetPS)
+						{
+							break;
+						}
+					}
+				}
+			}
+
+			if (TargetPS)
+			{
+				const FGlobalPos& TargetGP = TargetPS->GetReplicatedGlobalPos();
+
+				FVector TargetWorld = FVector::ZeroVector;
+				if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+				{
+					TargetWorld = FO->GlobalToWorld(TargetGP);
+				}
+				else
+				{
+					const FVector3d G = SpaceGlobal::ToGlobalVector(TargetGP);
+					TargetWorld = FVector(G);
+				}
+
+				const FVector MyLoc = GetActorLocation();
+				const FVector Dir   = TargetWorld - MyLoc;
+				const double  Dist  = Dir.Length();
+				const FVector DirN  = Dir.IsNearlyZero() ? FVector::ForwardVector : Dir.GetSafeNormal();
+
+				const float MaxArrowLen = 20000.f; // clamp so it stays visible even for huge distances
+				const float ArrowLen    = (Dist > MaxArrowLen) ? MaxArrowLen : (float)Dist;
+				const FVector MarkerLoc = MyLoc + DirN * ArrowLen;
+
+				const FColor Color = FColor::Cyan;
+				DrawDebugSphere(World, MarkerLoc, OtherPlayerMarkerRadius, 16, Color, false, 0.f, 0, 2.f);
+				DrawDebugDirectionalArrow(World, MyLoc, MarkerLoc, 400.f, Color, false, 0.f, 0, 2.f);
+
+				// show distance in km (1 UU = 1 cm)
+				const float DistKm = (float)(Dist / 100000.0); // cm -> km
+				DrawDebugString(World, MarkerLoc + FVector(0.f, 0.f, OtherPlayerMarkerRadius + 150.f),
+					FString::Printf(TEXT("%.1f km"), DistKm), nullptr, Color, 0.f, true);
+			}
+		}
 	}
 }
 
@@ -528,10 +621,39 @@ void AShipPawn::OnHyperDriveChanged()
 		GEngine->AddOnScreenDebugMessage((uint64)this + 777, 2.0f, C,
 			FString::Printf(TEXT("HYPERDRIVE: %s"), bHyperDriveActive ? TEXT("ON") : TEXT("OFF")));
 	}
+
+	ApplyFlightProfile(bHyperDriveActive);
 }
 
 void AShipPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AShipPawn, bHyperDriveActive);
+}
+
+void AShipPawn::ApplyFlightProfile(bool bHyper)
+{
+	if (!Flight)
+	{
+		return;
+	}
+
+	if (bHyper)
+	{
+		Flight->Longi = HyperLongi;
+		Flight->FA_Trans.VelocityPD      = HyperFA.VelocityPD;
+		Flight->FA_Trans.AccelMax_Mps2   = HyperFA.AccelMax_Mps2;
+		Flight->FA_Trans.RetroBoostMultiplier = HyperFA.RetroBoostMultiplier;
+		Flight->FA_Trans.RetroDotThreshold   = HyperFA.RetroDotThreshold;
+		Flight->FA_Trans.Deadzone_Mps        = HyperFA.Deadzone_Mps;
+	}
+	else
+	{
+		Flight->Longi = CruiseLongi;
+		Flight->FA_Trans.VelocityPD      = CruiseFA.VelocityPD;
+		Flight->FA_Trans.AccelMax_Mps2   = CruiseFA.AccelMax_Mps2;
+		Flight->FA_Trans.RetroBoostMultiplier = CruiseFA.RetroBoostMultiplier;
+		Flight->FA_Trans.RetroDotThreshold   = CruiseFA.RetroDotThreshold;
+		Flight->FA_Trans.Deadzone_Mps        = CruiseFA.Deadzone_Mps;
+	}
 }

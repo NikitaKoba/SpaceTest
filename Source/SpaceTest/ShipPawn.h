@@ -5,6 +5,7 @@
 #include "ShipCursorPilotComponent.h"
 #include "ShipLaserComponent.h"
 #include "SpaceGlobalCoords.h"
+#include "FlightComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Camera/CameraTypes.h"
 #include "ShipPawn.generated.h"
@@ -73,6 +74,11 @@ public:
 	UShipNetComponent* Net;
 	UPROPERTY(EditAnywhere, Category="FloatingOrigin")
 	bool bEnableFloatingOrigin = true;
+	// Debug marker settings
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
+	bool bDrawOtherPlayerMarker = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
+	float OtherPlayerMarkerRadius = 800.f;
 	// Hyperdrive mode (replicated)
 	UPROPERTY(ReplicatedUsing=OnRep_HyperDrive, EditAnywhere, Category="Flight|Hyper")
 	bool bHyperDriveActive = false;
@@ -120,6 +126,11 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:
+	void ApplyFlightProfile(bool bHyper);
+	FLongitudinalTuning CruiseLongi;
+	FTransAssist        CruiseFA;
+	FLongitudinalTuning HyperLongi;
+	FTransAssist        HyperFA;
 	// Camera sample buffer
 	TArray<FCamSample> CamSamples;
 	void PushCamSample(const FCamSample& S);
