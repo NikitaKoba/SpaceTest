@@ -47,8 +47,10 @@ public:
 	FGlobalPos GlobalPos;
 	// Установить глобальную позицию и телепортнуть Actor в соответствующее место мира
 	void SetGlobalPos(const FGlobalPos& InPos);
-
-	// Синхронизировать GlobalPos <- из текущего GetActorLocation (используем на сервере)
+	virtual void Destroyed() override;
+	virtual void OutsideWorldBounds() override;
+	virtual void FellOutOfWorld(const class UDamageType& DamageType) override;
+	// Синхронизиро	вать GlobalPos <- из текущего GetActorLocation (используем на сервере)
 	void SyncGlobalFromWorld();
 
 	// Синхронизировать ActorLocation <- из GlobalPos (когда захотим телепорт/ребазу)

@@ -114,9 +114,10 @@ void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
     const AShipPawn* AnchorShip = Cast<AShipPawn>(Anchor.Get());
     const bool bAnchorHyper = AnchorShip && AnchorShip->IsHyperDriveActive();
 
+    // Инициализация origin при первом тике
     if (!bHasValidOrigin)
     {
-        OriginGlobal  = FVector3d::ZeroVector;
+        OriginGlobal = FVector3d::ZeroVector;
         WorldOriginUU = FVector::ZeroVector;
         bHasValidOrigin = true;
 
@@ -128,21 +129,24 @@ void USpaceFloatingOriginSubsystem::Tick(float DeltaTime)
 
     const FVector AnchorLoc = Anchor->GetActorLocation();
 
+    // В гипере просто увеличиваем радиус, но НЕ замораживаем origin
     const double RadiusScaled = RecenterRadiusUU * (bAnchorHyper ? HyperRecenterRadiusScale : 1.0);
-    const double Radius2    = RadiusScaled * RadiusScaled;
-    const double Dist2      = AnchorLoc.SizeSquared();
-
-    if (bAnchorHyper)
-    {
-        return; // freeze origin while hyperdrive is active
-    }
+    const double Radius2 = RadiusScaled * RadiusScaled;
+    const double Dist2   = AnchorLoc.SizeSquared();
 
     if (Dist2 > Radius2)
     {
         const FVector3d AnchorGlobal = WorldToGlobalVector(AnchorLoc);
         ApplyOriginShift(AnchorGlobal);
+
+        UE_LOG(LogSpaceFloatingOrigin, Log,
+            TEXT("[FO SHIFT] Hyper=%d Dist=%.0f m Radius=%.0f m"),
+            bAnchorHyper ? 1 : 0,
+            FMath::Sqrt((float)Dist2) / 100.0f,
+            (float)RadiusScaled / 100.0f);
     }
 }
+
 void USpaceFloatingOriginSubsystem::ApplyReplicatedOrigin(const FVector3d& NewOriginGlobal,
                                                           const FVector&  NewWorldOriginUU)
 {
