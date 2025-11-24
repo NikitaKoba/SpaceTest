@@ -193,6 +193,10 @@ void USpaceFloatingOriginSubsystem::ApplyReplicatedOrigin(const FVector3d& NewOr
     {
         AShipPawn* Ship = *ItShip;
         Ship->SyncGlobalFromWorld();
+        if (Ship && Ship->IsLocallyControlled())
+        {
+            Ship->OnFloatingOriginShifted();
+        }
         ++ShipCount;
     }
 
@@ -345,6 +349,10 @@ void USpaceFloatingOriginSubsystem::ApplyOriginShift(const FVector3d& NewOriginT
     {
         AShipPawn* Ship = *ItShip;
         Ship->SyncGlobalFromWorld();
+        if (Ship && Ship->IsLocallyControlled())
+        {
+            Ship->OnFloatingOriginShifted();
+        }
         ++ShipCount;
     }
 

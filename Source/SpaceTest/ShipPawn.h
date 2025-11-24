@@ -56,6 +56,7 @@ public:
 
 	// Синхронизировать ActorLocation <- из GlobalPos (когда захотим телепорт/ребазу)
 	void SyncWorldFromGlobal();
+	void OnFloatingOriginShifted();
 	// ...
 	// Fire input
 	void Action_FirePressed();   // <—
@@ -119,6 +120,22 @@ public:
 	float HyperRotationLagSpeed = 40.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float HyperFinalViewLerpAlpha = 0.35f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="5.0"))
+	float HyperExitBlendSeconds = 0.35f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float HyperExitSnapThreshold = 0.2f;
+	// Hard snap duration in frames immediately after hyper exit to kill lateral offsets.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0", ClampMax="30"))
+	int32 HyperExitSnapFrames = 6;
+	// Hard snap duration in seconds; dominates frames if larger.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float HyperExitHardSnapSeconds = 0.25f;
+	// Optional throttle/velocity lockout after exiting hyper to kill residual momentum.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Hyper", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float HyperExitThrottleLockSeconds = 0.35f;
+	// If true, always use hyper camera tuning (lag speeds / limits) even in normal flight.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Lag")
+	bool bCameraUseHyperProfileAlways = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Advanced", meta=(ClampMin="0.05", ClampMax="0.5"))
 	float CameraBufferSeconds = 0.25f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Advanced", meta=(ClampMin="16", ClampMax="512"))
@@ -138,7 +155,10 @@ private:
 	void ApplyFlightProfile(bool bHyper);
 	void StopAfterHyperDrive();
 	void ResetCameraBufferImmediate();
+	void RequestCameraResync();
 	bool bHyperDrivePrev = false;
+	bool bCameraResyncPending = false;
+	int32 CameraResyncFrames = 0;
 	FLongitudinalTuning CruiseLongi;
 	FTransAssist        CruiseFA;
 	FLongitudinalTuning HyperLongi;
@@ -157,6 +177,11 @@ private:
 	bool     bHaveLastView = false;
 	FVector  LastViewLoc = FVector::ZeroVector;
 	FRotator LastViewRot = FRotator::ZeroRotator;
+
+	float HyperExitBlendTime = 0.f;
+	int32 HyperExitSnapCounter = 0;
+	float HyperExitHardSnapTime = 0.f;
+	float HyperExitThrottleLockTime = 0.f;
 
 	// Input → Flight (+ зеркалим в Net)
 	void Axis_ThrustForward(float V);

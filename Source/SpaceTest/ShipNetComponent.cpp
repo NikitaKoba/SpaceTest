@@ -122,6 +122,30 @@ void UShipNetComponent::AddMouseDelta(float Dx, float Dy)
 	MouseY_Accum += Dy;
 }
 
+void UShipNetComponent::OnHyperDriveExited()
+{
+	if (!ShipMesh)
+	{
+		return;
+	}
+
+	ShipMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false);
+	ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
+
+	NetBuffer.Reset();
+
+	FInterpNode N;
+	N.Time   = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+	N.Loc    = ShipMesh->GetComponentLocation();
+	N.Rot    = ShipMesh->GetComponentQuat();
+	N.Vel    = FVector::ZeroVector;
+	N.AngVel = FVector::ZeroVector;
+	NetBuffer.Add(N);
+
+	PendingInputs.Reset();
+	bHaveOwnerRecon = false;
+}
+
 void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);

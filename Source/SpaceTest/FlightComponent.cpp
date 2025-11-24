@@ -116,6 +116,22 @@ void UFlightComponent::ResetInputFilters()
 	// AI override не трогаем – его управляет пилот
 }
 
+void UFlightComponent::ResetDynamicsState()
+{
+	// Zero input targets and smoothed values so thrust re-starts cleanly.
+	ThrustForward_Target = ThrustRight_Target = ThrustUp_Target = 0.f;
+	RollAxis_Target = 0.f;
+	ResetInputFilters();
+
+	// Clear derivative/jerk history to avoid huge PD spikes from prior hyper velocity.
+	bPrevVxValid = bPrevVrValid = bPrevVuValid = false;
+	PrevVx_Phys = PrevVr_Phys = PrevVu_Phys = 0.f;
+	Jerk.ResetPerFrame();
+
+	// Reset desired velocities/rates for the next tick.
+	InputSnap = FInputSnapshot();
+}
+
 void UFlightComponent::SetAngularRateOverride(
 	bool  bEnable,
 	float PitchRateDegPerSec,

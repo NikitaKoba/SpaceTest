@@ -147,6 +147,8 @@ public:
 	// --- API из твоего кода ---
 	void SetLocalAxes(float F, float R, float U, float Roll);
 	void AddMouseDelta(float Dx, float Dy);
+	// Reset interpolation state when exiting hyperdrive to prevent long trailing.
+	void OnHyperDriveExited();
 	FVector3d PrevOriginGlobal = FVector3d::ZeroVector;
 	bool bHavePrevOrigin = false;
 	void HandleFloatingOriginShift();

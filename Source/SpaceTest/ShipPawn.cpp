@@ -132,6 +132,18 @@ void AShipPawn::BeginPlay()
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
 
+	// Clamp residual linear speed in cruise mode to avoid reusing hyper-scale velocity when W is held after exit.
+	if (!bHyperDriveActive && ShipMesh && ShipMesh->IsSimulatingPhysics())
+	{
+		const float MaxMps  = (Flight ? Flight->Longi.VxMax_Mps : CruiseLongi.VxMax_Mps);
+		const float MaxUUps = FMath::Max(100.f, MaxMps * 100.f);
+		const FVector Vel   = ShipMesh->GetPhysicsLinearVelocity();
+		if (Vel.SizeSquared() > FMath::Square(MaxUUps))
+		{
+			ShipMesh->SetPhysicsLinearVelocity(Vel.GetClampedToMaxSize(MaxUUps), false);
+		}
+	}
+
 	if (Camera)
 	{
 		Camera->SetFieldOfView(CameraFOV);
@@ -140,6 +152,8 @@ void AShipPawn::BeginPlay()
 	// Apply default cruise profile on start
 	ApplyFlightProfile(false);
 	bHyperDrivePrev = bHyperDriveActive;
+	RequestCameraResync();
+	CameraResyncFrames = 3;
 }
 
 void AShipPawn::Destroyed()
@@ -188,7 +202,52 @@ void AShipPawn::Tick(float DeltaSeconds)
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
 
-	// === ГЛОБАЛЬНЫЕ КООРДИНАТЫ ===
+	
+
+	// After hyper exit, kill residual velocity and ignore thrust for a short cooldown.
+	if (HyperExitThrottleLockTime > 0.f)
+	{
+		HyperExitThrottleLockTime = FMath::Max(0.f, HyperExitThrottleLockTime - DeltaSeconds);
+
+		if (ShipMesh)
+		{
+			ShipMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false);
+			ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
+
+			if (FBodyInstance* BI = ShipMesh->GetBodyInstance())
+			{
+				BI->ClearForces();
+				BI->ClearTorques();
+			}
+		}
+
+		if (Flight)
+		{
+			Flight->ResetDynamicsState();
+			Flight->SetThrustForward(0.f);
+			Flight->SetStrafeRight(0.f);
+			Flight->SetThrustUp(0.f);
+			Flight->SetRollAxis(0.f);
+		}
+
+		if (Net)
+		{
+			Net->SetLocalAxes(0.f, 0.f, 0.f, 0.f);
+		}
+	}
+
+	// Clamp residual linear speed in cruise mode to avoid reusing hyper-scale velocity when W is held after exit.
+	if (!bHyperDriveActive && ShipMesh)
+	{
+		const float MaxMps  = (Flight ? Flight->Longi.VxMax_Mps : CruiseLongi.VxMax_Mps);
+		const float MaxUUps = FMath::Max(100.f, MaxMps * 100.f);
+		const FVector Vel   = ShipMesh->GetPhysicsLinearVelocity();
+		if (Vel.SizeSquared() > FMath::Square(MaxUUps))
+		{
+			ShipMesh->SetPhysicsLinearVelocity(Vel.GetClampedToMaxSize(MaxUUps), false);
+		}
+	}
+// === ГЛОБАЛЬНЫЕ КООРДИНАТЫ ===
 	//
 	// ВАЖНО:
 	//  - Никакого инкрементального "прибавления дельт".
@@ -303,10 +362,38 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 		return;
 	}
 
-	const double Now = FApp::GetCurrentTime();
-	double DelayFrames = CameraDelayFrames;
-	if (bHyperDriveActive)
+	// Absolute snap window after hyper exit: no history, no lag, lock to current transform.
+	if (!bCameraUseHyperProfileAlways && HyperExitHardSnapTime > 0.f)
 	{
+		// Tick down snap timer even while short-circuiting the rest of the camera logic.
+		HyperExitHardSnapTime = FMath::Max(0.f, HyperExitHardSnapTime - DeltaTime);
+
+		const FTransform X = ShipMesh->GetComponentTransform();
+		const FVector CamLoc = X.TransformPosition(CameraLocalOffset);
+		const FVector LookPos = X.TransformPosition(LookAtLocalOffset);
+		const FVector Fwd = (LookPos - CamLoc).GetSafeNormal();
+		const FVector Up = X.GetUnitAxis(EAxis::Z);
+
+		OutResult.Location = CamLoc;
+		OutResult.Rotation = FRotationMatrix::MakeFromXZ(Fwd, Up).Rotator();
+		OutResult.FOV      = CameraFOV;
+
+		// Keep state aligned so next frame continues smoothly.
+		PivotLoc_Sm = X.GetLocation();
+		PivotRot_Sm = X.GetRotation();
+		bPivotInit = true;
+		LastViewLoc = OutResult.Location;
+		LastViewRot = OutResult.Rotation;
+		bHaveLastView = true;
+		return;
+	}
+
+const double Now = FApp::GetCurrentTime();
+double DelayFrames = CameraDelayFrames;
+const bool bExitBlendActive = (!bCameraUseHyperProfileAlways && !bHyperDriveActive && HyperExitBlendTime > 0.f);
+const bool bExitSnapActive  = (!bCameraUseHyperProfileAlways && !bHyperDriveActive && HyperExitSnapCounter > 0);
+if (bHyperDriveActive || bExitBlendActive || bExitSnapActive)
+{
 		// В гипере не используем исторический лаг по кадрам
 		DelayFrames = 0.0;
 	}
@@ -315,7 +402,7 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 
 	// 1) Ð·Ð°Ð´ÐµÑ€Ð¶Ð°Ð½Ð½Ñ‹Ð¹ Ñ‚Ñ€Ð°Ð½ÑÑ„Ð¾Ñ€Ð¼ ÐºÐ¾Ñ€Ð°Ð±Ð»Ñ
 	FCamSample ShipT;
-	const bool bUseHistory = !bHyperDriveActive;
+	const bool bUseHistory = (!bHyperDriveActive && !bExitBlendActive && !bExitSnapActive && CameraResyncFrames == 0);
 	if (bUseHistory && SampleAtTime(Tq, ShipT))
 	{
 		// ok
@@ -335,19 +422,55 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 		TargetPivot = ArmRel * ShipTM;
 	}
 
+	// Pending resync when switching hyper <-> normal: align camera state to target to avoid pops.
+	if (bCameraResyncPending)
+	{
+		ResetCameraBufferImmediate();
+		PivotLoc_Sm = TargetPivot.GetLocation();
+		PivotRot_Sm = TargetPivot.GetRotation();
+		bPivotInit = true;
+		bHaveLastView = false;
+		bCameraResyncPending = false;
+	}
+
 	// 3) lag
-	const bool bHyperCam = bHyperDriveActive;
-	const bool bForceNoLag = (bHyperCam && HyperMaxPositionLagDistance <= KINDA_SMALL_NUMBER);
+	const bool bHyperCam = bHyperDriveActive || bExitBlendActive || bExitSnapActive;
+	float ExitBlendAlpha = 1.f;
+	if (bExitBlendActive && HyperExitBlendSeconds > KINDA_SMALL_NUMBER)
+	{
+		const float Ratio = FMath::Clamp(HyperExitBlendTime / HyperExitBlendSeconds, 0.f, 1.f);
+		ExitBlendAlpha = 1.f - Ratio; // 0=hyper, 1=normal
+	}
+	const bool bExitGlue = (bExitSnapActive) || (bExitBlendActive && (ExitBlendAlpha <= HyperExitSnapThreshold));
+	const bool bForceNoLag = (bHyperCam && HyperMaxPositionLagDistance <= KINDA_SMALL_NUMBER) || bExitGlue;
+	const bool bFreezeResync = (CameraResyncFrames > 0);
 	float PosLagSpeed    = PositionLagSpeed;
 	float MaxPosLag      = MaxPositionLagDistance;
 	float RotLagSpeed    = RotationLagSpeed;
 	float ViewLerpAlpha  = FinalViewLerpAlpha;
-	if (bHyperCam)
+
+	const bool bForceHyperProfile = bCameraUseHyperProfileAlways;
+
+	if (bHyperDriveActive || bForceHyperProfile)
 	{
 		PosLagSpeed   = HyperPositionLagSpeed;
 		MaxPosLag     = HyperMaxPositionLagDistance;
 		RotLagSpeed   = HyperRotationLagSpeed;
 		ViewLerpAlpha = HyperFinalViewLerpAlpha;
+	}
+	else if (bExitBlendActive || bExitSnapActive)
+	{
+		PosLagSpeed   = FMath::Lerp(HyperPositionLagSpeed, PositionLagSpeed, ExitBlendAlpha);
+		MaxPosLag     = FMath::Lerp(HyperMaxPositionLagDistance, MaxPositionLagDistance, ExitBlendAlpha);
+		RotLagSpeed   = FMath::Lerp(HyperRotationLagSpeed, RotationLagSpeed, ExitBlendAlpha);
+		ViewLerpAlpha = FMath::Lerp(HyperFinalViewLerpAlpha, FinalViewLerpAlpha, ExitBlendAlpha);
+	}
+	if (bExitGlue)
+	{
+		PosLagSpeed = 0.f;
+		MaxPosLag   = 0.f;
+		RotLagSpeed = 0.f;
+		ViewLerpAlpha = 0.f;
 	}
 
 	if (!bPivotInit)
@@ -358,7 +481,7 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	}
 	else
 	{
-		if (bForceNoLag)
+		if (bForceNoLag || bFreezeResync)
 		{
 			PivotLoc_Sm = TargetPivot.GetLocation();
 			PivotRot_Sm = TargetPivot.GetRotation();
@@ -399,6 +522,35 @@ void AShipPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	}
 
 	const FTransform PivotSm(PivotRot_Sm, PivotLoc_Sm);
+
+	// decrement freeze counter (keeps camera glued for a few frames after hyper switch)
+	if (CameraResyncFrames > 0)
+	{
+		--CameraResyncFrames;
+	}
+
+	if (bExitBlendActive && !bHyperDriveActive)
+	{
+		HyperExitBlendTime = FMath::Max(0.f, HyperExitBlendTime - DeltaTime);
+	}
+	else if (bHyperDriveActive)
+	{
+		HyperExitBlendTime = 0.f;
+	}
+
+	if (bExitSnapActive && !bHyperDriveActive)
+	{
+		--HyperExitSnapCounter;
+	}
+
+	if (!bHyperDriveActive && HyperExitHardSnapTime > 0.f)
+	{
+		HyperExitHardSnapTime = FMath::Max(0.f, HyperExitHardSnapTime - DeltaTime);
+	}
+	else if (bHyperDriveActive)
+	{
+		HyperExitHardSnapTime = 0.f;
+	}
 
 	// 4) ÐºÐ°Ð¼ÐµÑ€Ð°
 	const FVector CamLoc = PivotSm.TransformPosition(CameraLocalOffset);
@@ -661,11 +813,37 @@ void AShipPawn::OnHyperDriveChanged()
 	}
 
 	ApplyFlightProfile(bHyperDriveActive);
+	RequestCameraResync();
+	CameraResyncFrames = 3;
 
 	// If exiting hyper, stop instantly to avoid long decel and camera trailing.
 	if (!bHyperDriveActive && bWasHyper)
 	{
 		StopAfterHyperDrive();
+		if (Net)
+		{
+			Net->OnHyperDriveExited();
+		}
+		HyperExitThrottleLockTime = HyperExitThrottleLockSeconds;
+		if (!bCameraUseHyperProfileAlways)
+		{
+			HyperExitBlendTime = HyperExitBlendSeconds;
+			HyperExitSnapCounter = HyperExitSnapFrames;
+			HyperExitHardSnapTime = HyperExitHardSnapSeconds;
+		}
+		else
+		{
+			HyperExitBlendTime = 0.f;
+			HyperExitSnapCounter = 0;
+			HyperExitHardSnapTime = 0.f;
+		}
+	}
+	else if (bHyperDriveActive)
+	{
+		HyperExitBlendTime = 0.f;
+		HyperExitSnapCounter = 0;
+		HyperExitHardSnapTime = 0.f;
+		HyperExitThrottleLockTime = 0.f;
 	}
 }
 
@@ -706,20 +884,32 @@ void AShipPawn::StopAfterHyperDrive()
 {
 	if (ShipMesh)
 	{
+		// Force-stop instead of additive zero so we don't keep hyper velocity after exit.
 		ShipMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false);
 		ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector, false);
 	}
 
 	if (Flight)
 	{
-		Flight->ResetInputFilters();
-		Flight->SetThrustForward(0.f);
-		Flight->SetStrafeRight(0.f);
-		Flight->SetThrustUp(0.f);
-		Flight->SetRollAxis(0.f);
+		Flight->ResetDynamicsState();
+		// Ensure cruise tuning is active even if a deferred switch left hyper settings around.
+		ApplyFlightProfile(false);
+	}
+
+	if (Net)
+	{
+		Net->SetLocalAxes(0.f, 0.f, 0.f, 0.f);
 	}
 
 	ResetCameraBufferImmediate();
+}
+
+void AShipPawn::OnFloatingOriginShifted()
+{
+	// Clear stale camera samples after an origin rebasing to keep the view glued to the ship.
+	ResetCameraBufferImmediate();
+	RequestCameraResync();
+	CameraResyncFrames = 2;
 }
 
 void AShipPawn::ResetCameraBufferImmediate()
@@ -735,4 +925,19 @@ void AShipPawn::ResetCameraBufferImmediate()
 	PushCamSample(S);
 	bHaveLastView = false;
 	bPivotInit = false;
+	bCameraResyncPending = false;
 }
+
+void AShipPawn::RequestCameraResync()
+{
+	bCameraResyncPending = true;
+	CameraResyncFrames = 5;
+}
+
+
+
+
+
+
+
+

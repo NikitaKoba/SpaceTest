@@ -149,6 +149,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Flight|Input") void AddMousePitch  (float MouseY_Delta);
 	UFUNCTION(BlueprintCallable, Category="Flight|Input") void AddMouseYaw    (float MouseX_Delta);
 	UFUNCTION(BlueprintCallable, Category="Flight|Input") void ResetInputFilters();
+	// Hard reset of cached inputs/derivatives (used on hyper-exit snap).
+	void ResetDynamicsState();
 
 	UFUNCTION(BlueprintCallable, Category="Flight|Assist") void SetFlightAssistEnabled(bool bEnable);
 	UFUNCTION(BlueprintCallable, Category="Flight|Assist") void ToggleFlightAssist();
