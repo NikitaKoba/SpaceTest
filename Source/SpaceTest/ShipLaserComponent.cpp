@@ -1,5 +1,6 @@
 #include "ShipLaserComponent.h"
 #include "LaserBolt.h"
+#include "LaserBeam.h"
 #include "ShipPawn.h"
 #include "ShipCursorPilotComponent.h"
 #include "SpaceFloatingOriginSubsystem.h"
@@ -58,6 +59,7 @@ UShipLaserComponent::UShipLaserComponent()
 
 	MuzzleSockets = { FName("Muzzle_L"), FName("Muzzle_R") };
 	BoltClass     = ALaserBolt::StaticClass();
+	BeamClass     = ALaserBeam::StaticClass();
 }
 
 void UShipLaserComponent::BeginPlay()
@@ -268,19 +270,23 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 {
 	if (MuzzleSockets.Num() == 0) return;
 
+	const bool bSpawnBolt = (VisualMode == ELaserVisualMode::Bolts || VisualMode == ELaserVisualMode::BoltsAndBeam);
+	const bool bSpawnBeam = (VisualMode == ELaserVisualMode::ContinuousBeam || VisualMode == ELaserVisualMode::BoltsAndBeam);
+
 	auto FireFrom = [&](const FName& Sock)
 	{
 		FTransform TM; GetMuzzleTransform(Sock, TM);
 		const FVector MuzzleLoc = TM.GetLocation();
 		const FVector Dir = Jitter(DirFromMuzzle(MuzzleLoc, AimPoint), AimJitterDeg);
 		TM.SetRotation(RotFromDir(Dir).Quaternion());
+		float BeamLengthUU = FMath::Clamp((AimPoint - MuzzleLoc).Size(), 10.f, MaxAimRangeUU);
 
 		// ИСПРАВЛЕНО: Используем FGlobalPos для надежной передачи координат
 		if (UWorld* W = GetWorld())
 		{
+			FHitResult Hit;
 			if (GetOwner() && GetOwner()->HasAuthority())
 			{
-				FHitResult Hit;
 				FCollisionQueryParams Q(SCENE_QUERY_STAT(LaserDamage), true, GetOwner());
 				Q.AddIgnoredActor(GetOwner());
 
@@ -304,20 +310,43 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 						}
 					}
 				}
+				if (Hit.bBlockingHit)
+				{
+					BeamLengthUU = FMath::Clamp(Hit.Distance, 10.f, MaxAimRangeUU);
+				}
+			}
+
+			if (!Hit.bBlockingHit)
+			{
+				BeamLengthUU = FMath::Clamp((AimPoint - MuzzleLoc).Size(), 10.f, MaxAimRangeUU);
 			}
 
 			if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
 			{
 				FGlobalPos GlobalPos;
 				FO->WorldToGlobal(TM.GetLocation(), GlobalPos);
-				Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+				if (bSpawnBolt)
+				{
+					Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+				}
+				if (bSpawnBeam)
+				{
+					Multicast_SpawnBeam(GlobalPos, TM.GetRotation().Rotator(), BeamLengthUU);
+				}
 			}
 			else
 			{
 				// Fallback без FloatingOrigin
 				FGlobalPos GlobalPos;
 				SpaceGlobal::FromWorldLocationUU(TM.GetLocation(), GlobalPos);
-				Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+				if (bSpawnBolt)
+				{
+					Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+				}
+				if (bSpawnBeam)
+				{
+					Multicast_SpawnBeam(GlobalPos, TM.GetRotation().Rotator(), BeamLengthUU);
+				}
 			}
 		}
 	};
@@ -385,6 +414,48 @@ void UShipLaserComponent::Multicast_SpawnBolt_Implementation(
 		*GetNameSafe(GetOwner()));
 }
 
+void UShipLaserComponent::Multicast_SpawnBeam_Implementation(
+	const FGlobalPos& GlobalPos,
+	const FRotator& Rot,
+	float BeamLengthUU)
+{
+	if (!GetOwner() || !BeamClass) return;
+
+	FActorSpawnParameters Params;
+	Params.Owner = GetOwner();
+	Params.Instigator = Cast<APawn>(GetOwner());
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	FTransform SpawnTM;
+	SpawnTM.SetRotation(Rot.Quaternion());
+
+	if (UWorld* W = GetWorld())
+	{
+		if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
+		{
+			SpawnTM.SetLocation(FO->GlobalToWorld(GlobalPos));
+		}
+		else
+		{
+			SpawnTM.SetLocation(SpaceGlobal::ToWorldLocationUU(GlobalPos));
+		}
+	}
+
+	ALaserBeam* Beam = GetWorld()->SpawnActor<ALaserBeam>(BeamClass, SpawnTM, Params);
+	if (!Beam) return;
+
+	Beam->ConfigureBeam(BeamLengthUU, BeamDurationSec);
+
+	UE_LOG(LogTemp, Verbose,
+		TEXT("[BEAM SPAWN] %s | GlobalPos=Sector(%d,%d,%d) Offset(%s) | WorldLoc=%s | Owner=%s | Length=%.1f"),
+		*GetNameSafe(Beam),
+		GlobalPos.Sector.X, GlobalPos.Sector.Y, GlobalPos.Sector.Z,
+		*GlobalPos.Offset.ToString(),
+		*SpawnTM.GetLocation().ToString(),
+		*GetNameSafe(GetOwner()),
+		BeamLengthUU);
+}
+
 // === Старый режим (серверный таймер) — оставлен для совместимости ===
 void UShipLaserComponent::ServerStartFire_Implementation()
 {
@@ -410,35 +481,51 @@ void UShipLaserComponent::ServerStopFire_Implementation()
 // === ИСПРАВЛЕНО: Старый режим (серверный таймер) ===
 void UShipLaserComponent::Server_SpawnOnce()
 {
-	// ИСПОЛЬЗУЕТ ПОСЛЕДНИЙ ПРИСЛАННЫЙ ЛУЧ (не моментальный).
+	const bool bSpawnBolt = (VisualMode == ELaserVisualMode::Bolts || VisualMode == ELaserVisualMode::BoltsAndBeam);
+	const bool bSpawnBeam = (VisualMode == ELaserVisualMode::ContinuousBeam || VisualMode == ELaserVisualMode::BoltsAndBeam);
+	// Legacy fire path when server doesn't have an aim ray (kept for safety).
 	if (!bUseReticleAim || !bHaveServerAim)
 	{
-		// просто по forward каждого сокета
+		// Fire straight forward from every muzzle
 		for (const FName& S : MuzzleSockets)
 		{
 			FTransform TM; GetMuzzleTransform(S, TM);
-            
-			// ИСПРАВЛЕНО: Через FGlobalPos
+			const float BeamLengthUU = MaxAimRangeUU;
+			// Multicast uses FGlobalPos
 			if (UWorld* W = GetWorld())
 			{
 				if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
 				{
 					FGlobalPos GlobalPos;
 					FO->WorldToGlobal(TM.GetLocation(), GlobalPos);
-					Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+					if (bSpawnBolt)
+					{
+						Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+					}
+					if (bSpawnBeam)
+					{
+						Multicast_SpawnBeam(GlobalPos, TM.GetRotation().Rotator(), BeamLengthUU);
+					}
 				}
 				else
 				{
 					FGlobalPos GlobalPos;
 					SpaceGlobal::FromWorldLocationUU(TM.GetLocation(), GlobalPos);
-					Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+					if (bSpawnBolt)
+					{
+						Multicast_SpawnBolt(GlobalPos, TM.GetRotation().Rotator());
+					}
+					if (bSpawnBeam)
+					{
+						Multicast_SpawnBeam(GlobalPos, TM.GetRotation().Rotator(), BeamLengthUU);
+					}
 				}
 			}
 		}
 		return;
 	}
 
-	// иначе вычислим AimPoint по ServerAimOrigin/Dir (устаревшая схема)
+	// Rebuild AimPoint from ServerAimOrigin/Dir (legacy path)
 	FVector AimPoint = ServerAimOrigin + ServerAimDir * MaxAimRangeUU;
 
 	if (bServerTraceAim)
@@ -451,6 +538,7 @@ void UShipLaserComponent::Server_SpawnOnce()
 
 	ServerSpawn_FromAimPoint(AimPoint);
 }
+
 bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir)
 {
 	const APawn* P = Cast<APawn>(GetOwner());

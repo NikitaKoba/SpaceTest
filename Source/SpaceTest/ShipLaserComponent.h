@@ -6,6 +6,7 @@
 #include "ShipLaserComponent.generated.h"
 
 class ALaserBolt;
+class ALaserBeam;
 class UPrimitiveComponent;
 
 UENUM(BlueprintType)
@@ -13,6 +14,14 @@ enum class ELaserFirePattern : uint8
 {
 	AllAtOnce,      // все сокеты одновременно
 	Alternating     // стволы по очереди
+};
+
+UENUM(BlueprintType)
+enum class ELaserVisualMode : uint8
+{
+	Bolts,
+	ContinuousBeam,
+	BoltsAndBeam
 };
 
 /**
@@ -47,6 +56,8 @@ public:
 	// === Weapon ===
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
 	TSubclassOf<ALaserBolt> BoltClass;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
+	TSubclassOf<ALaserBeam> BeamClass;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
 	TArray<FName> MuzzleSockets;
@@ -63,6 +74,11 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
 	ELaserFirePattern FirePattern = ELaserFirePattern::Alternating;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
+	ELaserVisualMode VisualMode = ELaserVisualMode::Bolts;
+	/** Lifetime of spawned beams (seconds). Small value gives a continuous look when firing quickly. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon", meta=(ClampMin="0.01"))
+	float BeamDurationSec = 0.15f;
 
 	// === Схема шутинга ===
 	/** Клиент сам отсчитывает каденс и шлёт ServerFireShot(O,D) на каждый шот. */
@@ -99,6 +115,12 @@ protected:
 	void Multicast_SpawnBolt(
 		const FGlobalPos& GlobalPos,  // Вместо FVector3d
 		const FRotator& Rot);
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_SpawnBeam(
+		const FGlobalPos& GlobalPos,
+		const FRotator& Rot,
+		float BeamLengthUU);
 
 	// Старый режим (серверный таймер) — оставлен на всякий случай
 	UFUNCTION(Server, Reliable) void ServerStartFire();
