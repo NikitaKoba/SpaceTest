@@ -157,6 +157,7 @@ public:
 	UFUNCTION(BlueprintPure,   Category="Flight|Assist") bool  IsFlightAssistEnabled() const { return FA_Trans.bEnable; }
 
 	UPrimitiveComponent* GetBodyComponent() const { return Body; }
+	float GetCachedMassKg() const { return CachedMassKg; }
 
 	// Тюнинг
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Tuning")  FLongitudinalTuning Longi;

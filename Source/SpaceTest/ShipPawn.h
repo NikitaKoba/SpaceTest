@@ -10,6 +10,13 @@
 #include "Camera/CameraTypes.h"
 #include "ShipPawn.generated.h"
 
+UENUM(BlueprintType)
+enum class EShipRole : uint8
+{
+	Fighter  UMETA(DisplayName="Fighter"),
+	Corvette UMETA(DisplayName="Corvette")
+};
+
 class UStaticMeshComponent;
 class USpringArmComponent;
 class UCameraComponent;
@@ -86,6 +93,41 @@ public:
 	UFUNCTION() void OnRep_HyperDrive();
 	UFUNCTION(Server, Reliable) void ServerSetHyperDrive(bool bNewActive);
 	void OnHyperDriveChanged();
+	// Ship role (for tuning multipliers and AI tagging)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ship|Class")
+	EShipRole ShipRole = EShipRole::Fighter;
+	// Per-role multipliers (used when ShipRole == Corvette)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ship|Class", meta=(ClampMin="0.1"))
+	float CorvetteSpeedMultiplier = 8.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ship|Class", meta=(ClampMin="0.1"))
+	float CorvetteTurnMultiplier  = 1.75f;
+	// Mass compensation so huge meshes keep similar accel/turn feel
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="1000.0"))
+	float MassReferenceKg = 120000.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="0.01", ClampMax="10.0"))
+	float MinMassCompScale = 0.5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="1.0", ClampMax="100.0"))
+	float MaxMassCompScale = 20.0f;
+	// Clamp final scaling so user multipliers + mass compensation не разлетаются
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="0.01", ClampMax="10.0"))
+	float MinSpeedScale = 0.05f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="0.1", ClampMax="100.0"))
+	float MaxSpeedScale = 10.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="0.01", ClampMax="10.0"))
+	float MinTurnScale = 0.1f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="0.5", ClampMax="50.0"))
+	float MaxTurnScale = 4.0f;
+	// Health
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ship|Health", meta=(ClampMin="1.0"))
+	float MaxHealth = 100.f;
+	UPROPERTY(ReplicatedUsing=OnRep_Health, VisibleAnywhere, BlueprintReadOnly, Category="Ship|Health")
+	float Health = 100.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ship|Shield", meta=(ClampMin="0.0"))
+	float MaxShield = 100.f;
+	UPROPERTY(ReplicatedUsing=OnRep_Shield, VisibleAnywhere, BlueprintReadOnly, Category="Ship|Shield")
+	float Shield = 100.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing=OnRep_Team, Category="Ship|Team")
+	int32 TeamId = 0;
 public:
 	UFUNCTION(BlueprintCallable, Category="Flight|Hyper")
 	void SetHyperDriveActive(bool bActive);
@@ -93,6 +135,14 @@ public:
 	void ToggleHyperDrive();
 	UFUNCTION(BlueprintPure, Category="Flight|Hyper")
 	bool IsHyperDriveActive() const { return bHyperDriveActive; }
+	UFUNCTION(BlueprintCallable, Category="Ship|Health")
+	void ApplyDamage(float Amount, AActor* DamageCauser);
+	UFUNCTION(BlueprintPure, Category="Ship|Health")
+	bool IsAlive() const { return Health > 0.f; }
+	UFUNCTION(BlueprintCallable, Category="Ship|Shield")
+	void ResetShield();
+	UFUNCTION(BlueprintPure, Category="Ship|Team")
+	int32 GetTeamId() const { return TeamId; }
 	// Camera config
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera") bool bUseCalcCamera = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera", meta=(ClampMin="0.0", ClampMax="2.0"))
@@ -192,4 +242,19 @@ private:
 	void Axis_MousePitch  (float V);
 	void Action_ToggleFA();
 	void Action_ToggleHyperDrive();
+	void HandleDeath(AActor* DamageCauser);
+	UFUNCTION()
+	void OnRep_Health();
+	UFUNCTION()
+	void OnRep_Shield();
+	UFUNCTION()
+	void OnRep_Team();
+	// Role-based tuning helpers
+	float GetShipSpeedMultiplier() const;
+	float GetShipTurnMultiplier() const;
+	bool bCachedBaseTurnRates = false;
+	float BaseYawRateDeg = 0.f;
+	float BaseYawAccelDeg = 0.f;
+	float BasePitchRateDeg = 0.f;
+	float BasePitchAccelDeg = 0.f;
 };

@@ -15,6 +15,10 @@
 namespace
 {
     // Target spawn locations in global coordinates (UU).
+    static const FVector3d kDefaultPlayerGlobal(
+        -60785720.000000,
+        -186213010.000000,
+        -41634450.000000);
     static const FVector3d kSecondPlayerGlobal(
         -18730498.604757,
         188194029.179006,
@@ -97,8 +101,8 @@ FVector3d ASpaceGameMode::GetTargetGlobalForSlot(int32 Slot) const
         return kSecondPlayerGlobal;
     }
 
-    // Slot 0 (first player) and any extra slots fall back to the origin.
-    return FVector3d::ZeroVector;
+    // Slot 0 (first player) and any extra slots use the primary spawn point.
+    return kDefaultPlayerGlobal;
 }
 
 void ASpaceGameMode::ApplyGlobalPosition(APawn* SpawnedPawn, const FVector3d& TargetGlobal)

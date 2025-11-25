@@ -1,5 +1,6 @@
 #include "ShipLaserComponent.h"
 #include "LaserBolt.h"
+#include "ShipPawn.h"
 #include "ShipCursorPilotComponent.h"
 #include "SpaceFloatingOriginSubsystem.h"
 
@@ -34,7 +35,8 @@ void UShipLaserComponent::FireFromAI(const FVector& AimWorldLocation)
 		return;
 
 	const double Now    = (double)W->GetTimeSeconds();
-	const double Period = 1.0 / FMath::Max(1.0f, FireRateHz);
+	const float  EffectiveHz = FireRateHz * FMath::Max(0.05f, AIFireRateScale);
+	const double Period = 1.0 / FMath::Max(1.0f, EffectiveHz);
 
 	// Уважение каденса, как и в ServerFireShot_Implementation
 	if ((Now - ServerLastShotTimeS) + 1e-6 < Period - (double)CadenceToleranceSec)
@@ -269,12 +271,41 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 	auto FireFrom = [&](const FName& Sock)
 	{
 		FTransform TM; GetMuzzleTransform(Sock, TM);
-		const FVector Dir = Jitter(DirFromMuzzle(TM.GetLocation(), AimPoint), AimJitterDeg);
+		const FVector MuzzleLoc = TM.GetLocation();
+		const FVector Dir = Jitter(DirFromMuzzle(MuzzleLoc, AimPoint), AimJitterDeg);
 		TM.SetRotation(RotFromDir(Dir).Quaternion());
 
 		// ИСПРАВЛЕНО: Используем FGlobalPos для надежной передачи координат
 		if (UWorld* W = GetWorld())
 		{
+			if (GetOwner() && GetOwner()->HasAuthority())
+			{
+				FHitResult Hit;
+				FCollisionQueryParams Q(SCENE_QUERY_STAT(LaserDamage), true, GetOwner());
+				Q.AddIgnoredActor(GetOwner());
+
+				const FVector TraceEnd = MuzzleLoc + Dir * MaxAimRangeUU;
+				if (W->LineTraceSingleByChannel(Hit, MuzzleLoc, TraceEnd, ECC_Pawn, Q))
+				{
+					if (AShipPawn* Ship = Cast<AShipPawn>(Hit.GetActor()))
+					{
+						const AShipPawn* OwnerShip = Cast<AShipPawn>(GetOwner());
+						const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+						const bool bOwnerIsPlayer = OwnerPawn && OwnerPawn->GetController() && OwnerPawn->GetController()->IsPlayerController();
+						const int32 OwnerTeam = OwnerShip ? OwnerShip->GetTeamId() : INDEX_NONE;
+						if (OwnerTeam != INDEX_NONE && Ship->GetTeamId() == OwnerTeam)
+						{
+							// Friendly, ignore.
+						}
+						else
+						{
+							const float DamageToApply = DamagePerShot * (bOwnerIsPlayer ? 1.f : FMath::Clamp(AIDamageScale, 0.05f, 1.0f));
+							Ship->ApplyDamage(DamageToApply, GetOwner());
+						}
+					}
+				}
+			}
+
 			if (USpaceFloatingOriginSubsystem* FO = W->GetSubsystem<USpaceFloatingOriginSubsystem>())
 			{
 				FGlobalPos GlobalPos;

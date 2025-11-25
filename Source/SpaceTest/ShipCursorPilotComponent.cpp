@@ -6,7 +6,10 @@
 #include "Engine/Canvas.h"
 #include "CanvasItem.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "Debug/DebugDrawService.h"
+#include "EngineUtils.h"
+#include "ShipPawn.h"
 
 UShipCursorPilotComponent::UShipCursorPilotComponent()
 {
@@ -232,6 +235,67 @@ void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* 
 
         DrawBarH(TBarPos, fillY, /*bFromRight=*/true);
         DrawBarH(BBarPos, fillY, /*bFromRight=*/false);
+    }
+
+    auto DrawBar = [&](const FVector2D& Pos, const FVector2D& Size, float Fill01, const FLinearColor& Bg, const FLinearColor& FillColor)
+    {
+        const float Clamped = FMath::Clamp(Fill01, 0.f, 1.f);
+        FCanvasBoxItem bg(Pos, Size);
+        bg.SetColor(Bg.ToFColor(true));
+        Canvas->DrawItem(bg);
+
+        FCanvasBoxItem fg(Pos, FVector2D(Size.X * Clamped, Size.Y));
+        fg.SetColor(FillColor.ToFColor(true));
+        Canvas->DrawItem(fg);
+    };
+
+    auto DrawShieldAndHealth = [&](const FVector2D& BasePos, const FVector2D& Size, float Shield01, float Hp01)
+    {
+        const float Pad = 4.f;
+        const FVector2D ShieldPos = BasePos;
+        const FVector2D HpPos     = BasePos + FVector2D(0.f, Size.Y + Pad);
+
+        DrawBar(ShieldPos, Size, Shield01, FLinearColor(0.f, 0.f, 0.f, 0.6f), FLinearColor(0.2f, 0.6f, 1.f, 0.9f));
+        DrawBar(HpPos,     Size, Hp01,     FLinearColor(0.f, 0.f, 0.f, 0.6f), FLinearColor(0.1f, 0.9f, 0.1f, 0.9f));
+    };
+
+    // Player shield + health (bottom center)
+    if (const AShipPawn* Ship = Cast<AShipPawn>(Pawn))
+    {
+        const float Hp01 = (Ship->MaxHealth > 1e-3f) ? (Ship->Health / Ship->MaxHealth) : 0.f;
+        const float Sh01 = (Ship->MaxShield > 1e-3f) ? (Ship->Shield / Ship->MaxShield) : 0.f;
+        const FVector2D Size(260.f, 14.f);
+        const FVector2D Pos(LastCanvasW * 0.5f - Size.X * 0.5f, LastCanvasH - 100.f);
+        DrawShieldAndHealth(Pos, Size, Sh01, Hp01);
+
+        if (GEngine && GEngine->GetSmallFont())
+        {
+            const FString Label = FString::Printf(TEXT("SH: %.0f / %.0f   HP: %.0f / %.0f"), Ship->Shield, Ship->MaxShield, Ship->Health, Ship->MaxHealth);
+            FCanvasTextItem Txt(Pos + FVector2D(4.f, -18.f), FText::FromString(Label), GEngine->GetSmallFont(), FLinearColor::White);
+            Txt.EnableShadow(FLinearColor::Black);
+            Canvas->DrawItem(Txt);
+        }
+    }
+
+    // Bars for other ships (AI/bots) projected above them
+    if (UWorld* World = GetWorld())
+    {
+        for (TActorIterator<AShipPawn> It(World); It; ++It)
+        {
+            const AShipPawn* Other = *It;
+            if (!Other || Other == Pawn) continue;
+            if (Other->MaxHealth <= 1e-3f) continue;
+
+            FVector2D Screen;
+            if (PC->ProjectWorldLocationToScreen(Other->GetActorLocation() + FVector(0.f, 0.f, 400.f), Screen))
+            {
+                const float Hp01 = FMath::Clamp(Other->Health / Other->MaxHealth, 0.f, 1.f);
+                const float Sh01 = (Other->MaxShield > 1e-3f) ? FMath::Clamp(Other->Shield / Other->MaxShield, 0.f, 1.f) : 0.f;
+                const FVector2D Size(150.f, 10.f);
+                const FVector2D Base = Screen - FVector2D(Size.X * 0.5f, Size.Y);
+                DrawShieldAndHealth(Base, Size, Sh01, Hp01);
+            }
+        }
     }
 }
 

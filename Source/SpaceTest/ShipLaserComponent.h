@@ -54,6 +54,12 @@ public:
 	/** Каденс (Гц). Для Alternating делится между стволами. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon", meta=(ClampMin="1.0", UIMin="1.0", UIMax="30.0"))
 	float FireRateHz = 6.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon", meta=(ClampMin="0.0"))
+	float DamagePerShot = 25.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon", meta=(ClampMin="0.05", ClampMax="1.0"))
+	float AIFireRateScale = 0.4f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon", meta=(ClampMin="0.05", ClampMax="1.0"))
+	float AIDamageScale = 0.35f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Weapon")
 	ELaserFirePattern FirePattern = ELaserFirePattern::Alternating;

@@ -3,11 +3,13 @@
 #include "FlightComponent.h"
 #include "ShipNetComponent.h"
 #include "ShipCursorPilotComponent.h"
+#include "ShipAIPilotComponent.h"
 #include "SpacePlayerState.h"
 #include "SpaceFloatingOriginSubsystem.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/GameStateBase.h"
+#include "GameFramework/Controller.h"
 #include "Camera/CameraComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
@@ -87,6 +89,8 @@ AShipPawn::AShipPawn()
 	HyperFA.RetroDotThreshold   = -0.25f;
 	HyperFA.Deadzone_Mps        = 0.05f;
 
+	Health = MaxHealth;
+	Shield = MaxShield;
 }
 
 // ShipPawn.cpp
@@ -94,6 +98,11 @@ AShipPawn::AShipPawn()
 void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
+	if (HasAuthority())
+	{
+		Health = FMath::Max(1.f, MaxHealth);
+		Shield  = FMath::Max(0.f, MaxShield);
+	}
 
 	// --- 1. ÐÐ° ÑÐµÑ€Ð²ÐµÑ€Ðµ ÐžÐ”Ð˜Ð Ð ÐÐ— ÑÑ‡Ð¸Ñ‚Ð°ÐµÐ¼ GlobalPos Ð¸Ð· Ñ‚ÐµÐºÑƒÑ‰Ð¸Ñ… world-ÐºÐ¾Ð¾Ñ€Ð´Ð¸Ð½Ð°Ñ‚ ---
 	if (HasAuthority())
@@ -847,10 +856,133 @@ void AShipPawn::OnHyperDriveChanged()
 	}
 }
 
+void AShipPawn::OnRep_Health()
+{
+	if (Health <= 0.f)
+	{
+		if (Laser)
+		{
+			Laser->StopFire();
+		}
+		if (Flight)
+		{
+			Flight->SetThrustForward(0.f);
+			Flight->SetStrafeRight(0.f);
+			Flight->SetThrustUp(0.f);
+			Flight->SetRollAxis(0.f);
+		}
+	}
+}
+
+void AShipPawn::OnRep_Shield()
+{
+	Shield = FMath::Clamp(Shield, 0.f, MaxShield);
+}
+
+void AShipPawn::OnRep_Team()
+{
+}
+
+void AShipPawn::ApplyDamage(float Amount, AActor* DamageCauser)
+{
+	if (!HasAuthority() || Amount <= 0.f || !IsAlive())
+	{
+		return;
+	}
+
+	float Remaining = Amount;
+
+	if (Shield > 0.f)
+	{
+		const float Absorb = FMath::Min(Shield, Remaining);
+		Shield -= Absorb;
+		Remaining -= Absorb;
+	}
+
+	if (Remaining > 0.f)
+	{
+		Health = FMath::Clamp(Health - Remaining, 0.f, MaxHealth);
+	}
+
+	if (Health <= 0.f)
+	{
+		HandleDeath(DamageCauser);
+	}
+}
+
+void AShipPawn::HandleDeath(AActor* DamageCauser)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (IsActorBeingDestroyed())
+	{
+		return;
+	}
+
+	Health = 0.f;
+	Shield = 0.f;
+
+	if (Laser)
+	{
+		Laser->StopFire();
+	}
+	if (Flight)
+	{
+		Flight->ResetDynamicsState();
+		Flight->SetComponentTickEnabled(false);
+		Flight->SetThrustForward(0.f);
+		Flight->SetStrafeRight(0.f);
+		Flight->SetThrustUp(0.f);
+		Flight->SetRollAxis(0.f);
+	}
+	if (Net)
+	{
+		Net->SetLocalAxes(0.f, 0.f, 0.f, 0.f);
+	}
+	if (UShipAIPilotComponent* AIPilot = FindComponentByClass<UShipAIPilotComponent>())
+	{
+		AIPilot->Deactivate();
+		AIPilot->PrimaryComponentTick.SetTickFunctionEnable(false);
+	}
+
+	if (AController* Ctrl = GetController())
+	{
+		Ctrl->UnPossess();
+	}
+	DetachFromControllerPendingDestroy();
+
+	UE_LOG(LogTemp, Warning, TEXT("[ShipPawn] Destroyed by damage: %s | Causer=%s"), *GetNameSafe(this), *GetNameSafe(DamageCauser));
+	Destroy();
+}
+
+void AShipPawn::ResetShield()
+{
+	if (HasAuthority())
+	{
+		Shield = MaxShield;
+	}
+}
+
 void AShipPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AShipPawn, bHyperDriveActive);
+	DOREPLIFETIME(AShipPawn, Health);
+	DOREPLIFETIME(AShipPawn, Shield);
+	DOREPLIFETIME(AShipPawn, TeamId);
+}
+
+float AShipPawn::GetShipSpeedMultiplier() const
+{
+	return (ShipRole == EShipRole::Corvette) ? CorvetteSpeedMultiplier : 1.0f;
+}
+
+float AShipPawn::GetShipTurnMultiplier() const
+{
+	return (ShipRole == EShipRole::Corvette) ? CorvetteTurnMultiplier : 1.0f;
 }
 
 void AShipPawn::ApplyFlightProfile(bool bHyper)
@@ -860,24 +992,39 @@ void AShipPawn::ApplyFlightProfile(bool bHyper)
 		return;
 	}
 
-	if (bHyper)
+	const float SpeedMult = GetShipSpeedMultiplier();
+	const float TurnMult  = GetShipTurnMultiplier();
+	const float MassKg    = Flight->GetCachedMassKg();
+	const float MassComp  = FMath::Clamp(MassReferenceKg / FMath::Max(1.f, MassKg), MinMassCompScale, MaxMassCompScale);
+	const float SpeedScale= FMath::Clamp(SpeedMult * MassComp, MinSpeedScale, MaxSpeedScale);
+	const float TurnScale = FMath::Clamp(TurnMult  * MassComp, MinTurnScale,  MaxTurnScale);
+	const float TurnAccelScale = FMath::Sqrt(TurnScale); // softer accel to avoid loop/overshoot
+
+	FLongitudinalTuning Longi = bHyper ? HyperLongi : CruiseLongi;
+	Longi.VxMax_Mps               *= SpeedScale;
+	Longi.AxMax_Mps2              *= SpeedScale;
+	Longi.VelocityPD.OutputAbsMax *= SpeedScale;
+	Flight->Longi = Longi;
+
+	FTransAssist FA = bHyper ? HyperFA : CruiseFA;
+	FA.VelocityPD.OutputAbsMax *= SpeedScale;
+	FA.AccelMax_Mps2           *= SpeedScale;
+	Flight->FA_Trans = FA;
+
+	// Cache base turn rates once so we can scale without compounding.
+	if (!bCachedBaseTurnRates)
 	{
-		Flight->Longi = HyperLongi;
-		Flight->FA_Trans.VelocityPD      = HyperFA.VelocityPD;
-		Flight->FA_Trans.AccelMax_Mps2   = HyperFA.AccelMax_Mps2;
-		Flight->FA_Trans.RetroBoostMultiplier = HyperFA.RetroBoostMultiplier;
-		Flight->FA_Trans.RetroDotThreshold   = HyperFA.RetroDotThreshold;
-		Flight->FA_Trans.Deadzone_Mps        = HyperFA.Deadzone_Mps;
+		BaseYawRateDeg   = Flight->Yaw.YawRateMax_Deg;
+		BaseYawAccelDeg  = Flight->Yaw.YawAccelMax_Deg;
+		BasePitchRateDeg = Flight->Pitch.PitchRateMax_Deg;
+		BasePitchAccelDeg= Flight->Pitch.PitchAccelMax_Deg;
+		bCachedBaseTurnRates = true;
 	}
-	else
-	{
-		Flight->Longi = CruiseLongi;
-		Flight->FA_Trans.VelocityPD      = CruiseFA.VelocityPD;
-		Flight->FA_Trans.AccelMax_Mps2   = CruiseFA.AccelMax_Mps2;
-		Flight->FA_Trans.RetroBoostMultiplier = CruiseFA.RetroBoostMultiplier;
-		Flight->FA_Trans.RetroDotThreshold   = CruiseFA.RetroDotThreshold;
-		Flight->FA_Trans.Deadzone_Mps        = CruiseFA.Deadzone_Mps;
-	}
+
+	Flight->Yaw.YawRateMax_Deg     = BaseYawRateDeg    * TurnScale;
+	Flight->Yaw.YawAccelMax_Deg    = BaseYawAccelDeg   * TurnAccelScale;
+	Flight->Pitch.PitchRateMax_Deg = BasePitchRateDeg  * TurnScale;
+	Flight->Pitch.PitchAccelMax_Deg= BasePitchAccelDeg * TurnAccelScale;
 }
 
 void AShipPawn::StopAfterHyperDrive()
