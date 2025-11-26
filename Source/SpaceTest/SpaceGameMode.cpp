@@ -20,9 +20,9 @@ namespace
         -186213010.000000,
         -41634450.000000);
     static const FVector3d kSecondPlayerGlobal(
-        -18730498.604757,
-        188194029.179006,
-        461093454.266461);
+        -60807790.000000,
+        -86060550.000000,
+        -41634450.000000);
 }
 
 ASpaceGameMode::ASpaceGameMode()
