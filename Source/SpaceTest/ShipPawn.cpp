@@ -30,6 +30,8 @@ AShipPawn::AShipPawn()
 	SetReplicateMovement(false);
 	bAlwaysRelevant = false;
 	bOnlyRelevantToOwner = false;
+	// Do not pre-spawn on clients from map load; let the server replicate existing ships (fixes late-join ghosts).
+	bNetLoadOnClient = false;
 	SetNetUpdateFrequency(120.f);
 	SetMinNetUpdateFrequency(60.f);
 	CursorPilot = CreateDefaultSubobject<UShipCursorPilotComponent>(TEXT("CursorPilot"));

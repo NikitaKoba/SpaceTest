@@ -73,6 +73,9 @@ public:
 	FDelegateHandle ActorDestroyedHandle;
 
 	// ========== Custom API ==========
+	UFUNCTION()
+	void OnActorDestroyed(AActor* Actor);
+
 	void HandlePawnPossessed(APawn* Pawn);
 
 	// World shift (FloatingOrigin): перестроить spatial-хеш

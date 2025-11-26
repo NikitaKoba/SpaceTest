@@ -462,18 +462,16 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 
 	const float CellMeters = FMath::Max(1.f, CVar_SpaceRepGraph_CellMeters.GetValueOnAnyThread());
 	const float CellUU = CellMeters * 100.f;
-	// CRITICAL FIX: OnActorDestroyed delegate causes race condition!
-	// Base UReplicationGraph handles removal properly through RouteRemoveNetworkActorToNodes.
-	// Safe nodes filter BeingDestroyed actors as defense-in-depth.
-// 	if (UWorld* World = GetWorld())
-// 	{
-// 		if (!ActorDestroyedHandle.IsValid())
-// 		{
-// 			ActorDestroyedHandle = World->AddOnActorDestroyedHandler(
-// 				FOnActorDestroyed::FDelegate::CreateUObject(
-// 					this, &USpaceReplicationGraph::OnActorDestroyed));
-// 		}
-// 	}
+	// Subscribe to destroy to purge custom caches (TrackedShips/Spatial3D/PerConn lists) ASAP.
+	if (UWorld* World = GetWorld())
+	{
+		if (!ActorDestroyedHandle.IsValid())
+		{
+			ActorDestroyedHandle = World->AddOnActorDestroyedHandler(
+				FOnActorDestroyed::FDelegate::CreateUObject(
+					this, &USpaceReplicationGraph::OnActorDestroyed));
+		}
+	}
 	// 2D Grid
 	GridNode = CreateNewNode<USRG_GridSpatialization2D_Safe>();
 	GridNode->CellSize = CellUU;
@@ -840,6 +838,55 @@ void USpaceReplicationGraph::BeginDestroy()
 	}
 
 	Super::BeginDestroy();
+}
+
+// Purge custom tracking structures as soon as an actor is destroyed to avoid stale pointers.
+void USpaceReplicationGraph::OnActorDestroyed(AActor* Actor)
+{
+	if (!Actor)
+	{
+		return;
+	}
+
+	FNewReplicatedActorInfo ActorInfo(Actor);
+
+	// Remove from spatial/grid tracking
+	if (GridNode)
+	{
+		const UPrimitiveComponent* RootPrim = Cast<UPrimitiveComponent>(Actor->GetRootComponent());
+		const bool bMovable = RootPrim && RootPrim->Mobility == EComponentMobility::Movable;
+		if (bMovable) GridNode->RemoveActor_Dynamic(ActorInfo);
+		else          GridNode->RemoveActor_Static(ActorInfo);
+	}
+
+	if (AlwaysRelevantNode && IsAlwaysRelevantByClass(Actor))
+	{
+		AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
+	}
+
+	for (auto& KV : PerConnAlwaysMap)
+	{
+		if (UReplicationGraphNode_AlwaysRelevant_ForConnection* Node = KV.Value.Get())
+		{
+			Node->NotifyRemoveNetworkActor(ActorInfo);
+		}
+	}
+
+	// Purge per-connection caches
+	for (auto& CKV : ConnStates)
+	{
+		FConnState& CS = CKV.Value;
+		CS.Visible.Remove(Actor);
+		CS.Selected.Remove(Actor);
+		CS.ActorStats.Remove(Actor);
+	}
+
+	// Ship-specific tracking
+	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
+	{
+		TrackedShips.Remove(Ship);
+		if (Spatial3D) Spatial3D->Remove(Ship);
+	}
 }
 
 
