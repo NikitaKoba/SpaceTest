@@ -18,6 +18,43 @@ class USRG_SpatialHash3D;
  * - Адаптивный размер ячеек spatial hash
  * - Улучшенная диагностика для отладки
  */
+
+UCLASS()
+class SPACETEST_API USRG_GridSpatialization2D_Safe 
+	: public UReplicationGraphNode_GridSpatialization2D
+{
+	GENERATED_BODY()
+
+protected:
+	// Тут мы будем вычищать дохлых акторов перед отдачей их движку
+	virtual void GatherActorListsForConnection(
+		const FConnectionGatherActorListParameters& Params
+	) override;
+};
+
+// Safe variant of plain ActorList that prunes invalid actors before gathering.
+UCLASS()
+class SPACETEST_API USRG_ActorList_Safe
+	: public UReplicationGraphNode_ActorList
+{
+	GENERATED_BODY()
+public:
+	virtual void GatherActorListsForConnection(
+		const FConnectionGatherActorListParameters& Params) override;
+	void RemoveInvalidActors();
+};
+
+UCLASS()
+class SPACETEST_API USRG_AlwaysRelevant_ForConnection_Safe 
+	: public UReplicationGraphNode_AlwaysRelevant_ForConnection
+{
+	GENERATED_BODY()
+
+public:
+	virtual void GatherActorListsForConnection(
+		const FConnectionGatherActorListParameters& Params) override;
+};
+
 UCLASS()
 class SPACETEST_API USpaceReplicationGraph : public UReplicationGraph
 {
@@ -34,7 +71,12 @@ public:
 	virtual void RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo, FGlobalActorReplicationInfo& GlobalInfo) override;
 	virtual void RouteRemoveNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo) override;
 	virtual void BeginDestroy() override;
+	
+	FDelegateHandle ActorDestroyedHandle;
 
+
+	UFUNCTION()
+	void OnActorDestroyed(AActor* Actor);
 	// ========== Custom API ==========
 	void HandlePawnPossessed(APawn* Pawn);
 
@@ -137,7 +179,7 @@ public:
 	float GetActorRadiusUU(AActor* A, FActorEMA& Cache);
 	FVector GetViewerForward(const APawn* ViewerPawn) const;
 	int32 MakeGroupKey(const FVector& ViewLoc, const FVector& ActorLoc, float CellUU) const;
-
+	
 	// ========== Budget ==========
 	void UpdateAdaptiveBudget(UNetReplicationGraphConnection* ConnMgr, FConnState& CS, float UsedBytesThisTick, float TickDt);
 	void LogPerConnTick(UNetReplicationGraphConnection* ConnMgr, const FConnState& CS, int32 NumTracked, int32 NumCand, int32 NumChosen, float UsedBytes, float TickDt);

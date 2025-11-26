@@ -10,7 +10,10 @@
 #include "DrawDebugHelpers.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/ActorComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/WorldSettings.h"
@@ -20,11 +23,15 @@
 #include "Kismet/KismetMathLibrary.h"
 #include "ReplicationGraph.h"
 #include "LaserBolt.h"
+#include "ShipAIPilotComponent.h"
+#include "ShipNetComponent.h"
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_AlwaysIncludeMeters(
 	TEXT("space.RepGraph.AlwaysIncludeMeters"),
 	300.f,
 	TEXT("Radius (meters) around viewer where ships are always selected"));
+
+static FORCEINLINE bool SRG_ShouldLog();
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_PlayerShipPriority(
 	TEXT("space.RepGraph.PlayerShipPriority"),
@@ -42,15 +49,126 @@ static TAutoConsoleVariable<float> CVar_SpaceRepGraph_NPCCullMeters(
 	TEXT("Optional hard cap for NPC ship visibility (meters, 0 = use ShipCullMeters)"));
 
 DEFINE_LOG_CATEGORY_STATIC(LogSpaceRepGraph, Log, All);
+struct FShipTypeCounts
+{
+	int32 Total   = 0;
+	int32 Players = 0;
+	int32 NPCs    = 0;
+};
+static bool Star_InitClassInfo(UClass* Class, FClassReplicationInfo& Info)
+{
+	if (!Class)
+	{
+		return false;
+	}
+
+	// Любые ActorComponent (включая StaticMeshComponent, SceneComponent, etc)
+	if (Class->IsChildOf(UActorComponent::StaticClass()))
+	{
+		Info.ReplicationPeriodFrame           = 1;
+		Info.FastPath_ReplicationPeriodFrame  = 1;
+		Info.SetCullDistanceSquared(0.f); // без дистанционного кулла для сабобъектов
+		return true; // мы инициализировали
+	}
+
+	// Для акторов пусть остаётся дефолтный путь
+	return false;
+}
+static bool Star_IsSafeForReplication(const AActor* A)
+{
+	if (!A) return false;
+	if (!IsValid(A)) return false;
+
+	// "Мёртвый" / в процессе уничтожения
+	if (A->IsActorBeingDestroyed() || A->IsPendingKillPending())
+	{
+		return false;
+	}
+	
+	// Нельзя реплицировать то, что не помечено как replicated
+	if (!A->GetIsReplicated())
+	{
+		return false;
+	}
+
+	return true;
+}
+
+// Scrubs gathered actor lists to remove invalid/destroyed/non-replicated actors right before routing.
+static void SRG_ScrubGatheredLists(const TCHAR* Tag, FGatheredReplicationActorLists& Lists)
+{
+	constexpr uint32 MaxLists = (uint32)EActorRepListTypeFlags::Max;
+	TArray<TArray<FActorRepListType>> Filtered;
+	Filtered.SetNum(MaxLists);
+
+	bool bRemoved = false;
+
+	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
+	{
+		const EActorRepListTypeFlags Flag = (EActorRepListTypeFlags)ListIdx;
+		TArrayView<const FActorRepListType> View = Lists.ViewActors(Flag);
+		if (View.Num() == 0)
+		{
+			continue;
+		}
+
+		TArray<FActorRepListType>& Out = Filtered[ListIdx];
+		Out.Reserve(View.Num());
+
+		for (int32 Idx = 0; Idx < View.Num(); ++Idx)
+		{
+			AActor* A = View[Idx];
+
+			const bool bNull  = (A == nullptr);
+			const bool bValid = A && ::IsValid(A);
+			const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+			const bool bRep   = A && A->GetIsReplicated();
+
+			if (bNull || !bValid || bDead || !bRep)
+			{
+				bRemoved = true;
+				if (SRG_ShouldLog())
+				{
+					UE_LOG(LogSpaceRepGraph, Warning,
+						TEXT("[SCRUB] %s Remove invalid actor: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
+						Tag ? Tag : TEXT(""), *GetNameSafe(A),
+						bNull ? 1 : 0, bValid ? 1 : 0, bDead ? 1 : 0, bRep ? 1 : 0);
+				}
+				continue;
+			}
+
+			Out.Add(A);
+		}
+	}
+
+	if (!bRemoved)
+	{
+		return;
+	}
+
+	Lists.Reset();
+
+	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
+	{
+		const TArray<FActorRepListType>& Src = Filtered[ListIdx];
+		if (Src.Num() == 0)
+		{
+			continue;
+		}
+
+		FActorRepListRefView NewView;
+		NewView.Reserve(Src.Num());
+		for (const FActorRepListType& Item : Src)
+		{
+			NewView.Add(Item);
+		}
+
+		Lists.AddReplicationActorList(NewView, (EActorRepListTypeFlags)ListIdx);
+	}
+}
 
 namespace
 {
-	struct FShipTypeCounts
-	{
-		int32 Total   = 0;
-		int32 Players = 0;
-		int32 NPCs    = 0;
-	};
 	
 	static bool IsPlayerControlledShip(const AShipPawn* Ship)
 	{
@@ -218,21 +336,48 @@ void USpaceReplicationGraph::LogChannelState(UNetReplicationGraphConnection* Con
 
 // ============= Graph Init =============
 
+
 USpaceReplicationGraph::USpaceReplicationGraph()
 {
 	if (SRG_ShouldLog())
+	{
 		UE_LOG(LogSpaceRepGraph, Log, TEXT("CTOR: USpaceReplicationGraph this=%p"), this);
-}
+	}
 
+	// НОВОЕ: сразу регистрируем безопасный ClassInfo для компонент,
+	// чтобы ReplicationGraph НИКОГДА не падал с "No ClassInfo found for StaticMeshComponent"
+	{
+		FClassReplicationInfo CompInfo;
+		CompInfo.ReplicationPeriodFrame = 1;
+		CompInfo.SetCullDistanceSquared(0.f); // без дистанционного кулла
+
+		// Базовый класс для любых реплицируемых компонент
+		GlobalActorReplicationInfoMap.SetClassInfo(UActorComponent::StaticClass(), CompInfo);
+
+		// Конкретно StaticMeshComponent, от которого у тебя куча сабобъектов
+		GlobalActorReplicationInfoMap.SetClassInfo(UStaticMeshComponent::StaticClass(), CompInfo);
+	}
+}
 void USpaceReplicationGraph::InitGlobalGraphNodes()
 {
 	Super::InitGlobalGraphNodes();
 
 	const float CellMeters = FMath::Max(1.f, CVar_SpaceRepGraph_CellMeters.GetValueOnAnyThread());
 	const float CellUU = CellMeters * 100.f;
-
+	// CRITICAL FIX: OnActorDestroyed delegate causes race condition!
+	// Base UReplicationGraph handles removal properly through RouteRemoveNetworkActorToNodes.
+	// Safe nodes filter BeingDestroyed actors as defense-in-depth.
+// 	if (UWorld* World = GetWorld())
+// 	{
+// 		if (!ActorDestroyedHandle.IsValid())
+// 		{
+// 			ActorDestroyedHandle = World->AddOnActorDestroyedHandler(
+// 				FOnActorDestroyed::FDelegate::CreateUObject(
+// 					this, &USpaceReplicationGraph::OnActorDestroyed));
+// 		}
+// 	}
 	// 2D Grid
-	GridNode = CreateNewNode<UReplicationGraphNode_GridSpatialization2D>();
+	GridNode = CreateNewNode<USRG_GridSpatialization2D_Safe>();
 	GridNode->CellSize = CellUU;
 	GridNode->SpatialBias = FVector2D::ZeroVector;
 	AddGlobalGraphNode(GridNode);
@@ -245,7 +390,7 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 	}
 
 	// AlwaysRelevant
-	AlwaysRelevantNode = CreateNewNode<UReplicationGraphNode_ActorList>();
+	AlwaysRelevantNode = CreateNewNode<USRG_ActorList_Safe>();
 	AddGlobalGraphNode(AlwaysRelevantNode);
 
 	// LiveLog ticker
@@ -274,39 +419,79 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 
 void USpaceReplicationGraph::InitGlobalActorClassSettings()
 {
-	Super::InitGlobalActorClassSettings();
+    Super::InitGlobalActorClassSettings();
+	GlobalActorReplicationInfoMap.SetInitClassInfoFunc(Star_InitClassInfo);
+    const float DefaultCullUU = FMath::Square(FMath::Max(1.f, CVar_SpaceRepGraph_DefaultCullMeters.GetValueOnAnyThread()) * 100.f);
+    const float ShipCullUU    = FMath::Square(FMath::Max(1.f, CVar_SpaceRepGraph_ShipCullMeters.GetValueOnAnyThread()) * 100.f);
 
-	const float DefaultCullUU = FMath::Square(FMath::Max(1.f, CVar_SpaceRepGraph_DefaultCullMeters.GetValueOnAnyThread()) * 100.f);
-	const float ShipCullUU    = FMath::Square(FMath::Max(1.f, CVar_SpaceRepGraph_ShipCullMeters.GetValueOnAnyThread()) * 100.f);
+    {
+        FClassReplicationInfo& Any = GlobalActorReplicationInfoMap.GetClassInfo(AActor::StaticClass());
+        Any.SetCullDistanceSquared(DefaultCullUU);
+        if (SRG_ShouldLog())
+        {
+            UE_LOG(LogSpaceRepGraph, Log, TEXT("ClassSettings: AActor Cull=%.0f m"),
+                FMath::Sqrt(DefaultCullUU) / 100.f);
+        }
+    }
 
-	{
-		FClassReplicationInfo& Any = GlobalActorReplicationInfoMap.GetClassInfo(AActor::StaticClass());
-		Any.SetCullDistanceSquared(DefaultCullUU);
-		if (SRG_ShouldLog())
-			UE_LOG(LogSpaceRepGraph, Log, TEXT("ClassSettings: AActor Cull=%.0f m"),
-				FMath::Sqrt(DefaultCullUU)/100.f);
-	}
+    {
+        FClassReplicationInfo& Ship = GlobalActorReplicationInfoMap.GetClassInfo(AShipPawn::StaticClass());
+        Ship.ReplicationPeriodFrame = 1;
+        Ship.SetCullDistanceSquared(ShipCullUU);
+        if (SRG_ShouldLog())
+        {
+            UE_LOG(LogSpaceRepGraph, Log, TEXT("ClassSettings: AShipPawn Period=%d Cull=%.0f m"),
+                Ship.ReplicationPeriodFrame, FMath::Sqrt(ShipCullUU) / 100.f);
+        }
+    }
 
-	{
-		FClassReplicationInfo& Ship = GlobalActorReplicationInfoMap.GetClassInfo(AShipPawn::StaticClass());
-		Ship.ReplicationPeriodFrame = 1;
-		Ship.SetCullDistanceSquared(ShipCullUU);
-		if (SRG_ShouldLog())
-			UE_LOG(LogSpaceRepGraph, Log, TEXT("ClassSettings: AShipPawn Period=%d Cull=%.0f m"),
-				Ship.ReplicationPeriodFrame, FMath::Sqrt(ShipCullUU)/100.f);
-	}
+    {
+        FClassReplicationInfo& GS = GlobalActorReplicationInfoMap.GetClassInfo(AGameStateBase::StaticClass());
+        GS.SetCullDistanceSquared(0.f);
+    }
 
-	{
-		FClassReplicationInfo& GS = GlobalActorReplicationInfoMap.GetClassInfo(AGameStateBase::StaticClass());
-		GS.SetCullDistanceSquared(0.f);
-	}
+    {
+        FClassReplicationInfo& Bolt = GlobalActorReplicationInfoMap.GetClassInfo(ALaserBolt::StaticClass());
+        Bolt.ReplicationPeriodFrame = 1;
+        Bolt.SetCullDistanceSquared(0.f); // no distance cull for projectiles
+    }
 
-	{
-		FClassReplicationInfo& Bolt = GlobalActorReplicationInfoMap.GetClassInfo(ALaserBolt::StaticClass());
-		Bolt.ReplicationPeriodFrame = 1;
-		Bolt.SetCullDistanceSquared(0.f); // всегда реплицируем (проекты маложивущие)
-	}
+    // 🔽 НОВЫЙ БЛОК: безопасный ClassInfo для сабобъектов/компонент
+    {
+        auto InitComponentClass = [this](UClass* InClass)
+        {
+            if (!InClass)
+                return;
+
+            FClassReplicationInfo CompInfo;
+            CompInfo.ReplicationPeriodFrame = 1;
+            CompInfo.SetCullDistanceSquared(0.f); // не куллим по дистанции, это сабобъекты
+
+            GlobalActorReplicationInfoMap.SetClassInfo(InClass, CompInfo);
+
+            if (SRG_ShouldLog())
+            {
+                UE_LOG(LogSpaceRepGraph, Log,
+                    TEXT("ClassSettings: SubObject %s RepFrame=%d (no cull)"),
+                    *GetNameSafe(InClass),
+                    CompInfo.ReplicationPeriodFrame);
+            }
+        };
+
+        // Базовые классы компонент
+        InitComponentClass(UActorComponent::StaticClass());
+        InitComponentClass(USceneComponent::StaticClass());
+        InitComponentClass(UPrimitiveComponent::StaticClass());
+        InitComponentClass(UStaticMeshComponent::StaticClass()); // <<< важно, именно это ругалось в assert
+
+        // Твои кастомные реплицируемые компоненты / сабобъекты
+        InitComponentClass(UShipNetComponent::StaticClass());
+        InitComponentClass(UShipLaserComponent::StaticClass());
+        InitComponentClass(UShipCursorPilotComponent::StaticClass());
+        InitComponentClass(UShipAIPilotComponent::StaticClass());
+    }
 }
+
 
 void USpaceReplicationGraph::InitConnectionGraphNodes(UNetReplicationGraphConnection* ConnMgr)
 {
@@ -314,10 +499,9 @@ void USpaceReplicationGraph::InitConnectionGraphNodes(UNetReplicationGraphConnec
 	if (!ConnMgr) return;
 
 	UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways =
-		CreateNewNode<UReplicationGraphNode_AlwaysRelevant_ForConnection>();
+		CreateNewNode<USRG_AlwaysRelevant_ForConnection_Safe>();
 	AddConnectionGraphNode(PerConnAlways, ConnMgr);
 	PerConnAlwaysMap.Add(ConnMgr, PerConnAlways);
-
 	LiveLog_OnConnAdded(ConnMgr);
 
 	if (SRG_ShouldLog())
@@ -364,7 +548,23 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(
 	AActor* Actor = ActorInfo.Actor;
 	if (!Actor) return;
 
-	if (Actor->IsA<APlayerController>()) return;
+	if (!Star_IsSafeForReplication(Actor))
+	{
+		if (SRG_ShouldLog())
+		{
+			UE_LOG(LogSpaceRepGraph, Warning,
+				TEXT("RouteAdd: skip invalid actor %s (Replicated=%d Destroyed=%d PendingKill=%d)"),
+				*GetNameSafe(Actor),
+				Actor ? Actor->GetIsReplicated()        : 0,
+				Actor ? Actor->IsActorBeingDestroyed()  : 0,
+				Actor ? Actor->IsPendingKillPending()   : 0);
+		}
+		return;
+	}
+	if (Actor->IsA<APlayerController>())
+	{
+		return;
+	}
 
 	if (Actor->IsA<ALaserBolt>())
 	{
@@ -376,7 +576,7 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(
 				UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways = PerConnAlwaysMap.FindRef(ConnMgr).Get();
 				if (!PerConnAlways)
 				{
-					PerConnAlways = CreateNewNode<UReplicationGraphNode_AlwaysRelevant_ForConnection>();
+					PerConnAlways = CreateNewNode<USRG_AlwaysRelevant_ForConnection_Safe>();
 					AddConnectionGraphNode(PerConnAlways, ConnMgr);
 					PerConnAlwaysMap.Add(ConnMgr, PerConnAlways);
 				}
@@ -461,7 +661,17 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 
 	if (Actor->IsA<ALaserBolt>())
 	{
-		if (AlwaysRelevantNode)
+		if (UNetConnection* OwnerConn = FindOwnerConnection(Actor))
+		{
+			if (UNetReplicationGraphConnection* ConnMgr = FindConnectionManager(OwnerConn))
+			{
+				if (UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways = PerConnAlwaysMap.FindRef(ConnMgr).Get())
+				{
+					PerConnAlways->NotifyRemoveNetworkActor(ActorInfo);
+				}
+			}
+		}
+		else if (AlwaysRelevantNode)
 		{
 			AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
 		}
@@ -513,6 +723,7 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 	}
 }
 
+
 void USpaceReplicationGraph::BeginDestroy()
 {
 	if (LiveLogTickerHandle.IsValid())
@@ -520,15 +731,69 @@ void USpaceReplicationGraph::BeginDestroy()
 		FTSTicker::GetCoreTicker().RemoveTicker(LiveLogTickerHandle);
 		LiveLogTickerHandle.Reset();
 	}
+
+	if (UWorld* World = GetWorld())
+	{
+		if (ActorDestroyedHandle.IsValid())
+		{
+			World->RemoveOnActorDestroyedHandler(ActorDestroyedHandle);
+			ActorDestroyedHandle.Reset();
+		}
+	}
+
 	Super::BeginDestroy();
 }
+void USpaceReplicationGraph::OnActorDestroyed(AActor* Actor)
+{
+	if (!Actor)
+		return;
+
+	if (SRG_ShouldLog())
+	{
+		UE_LOG(LogSpaceRepGraph, Log,
+			TEXT("[OnActorDestroyed] %s Replicated=%d BeingDestroyed=%d PendingKill=%d"),
+			*GetNameSafe(Actor),
+			Actor->GetIsReplicated() ? 1 : 0,
+			Actor->IsActorBeingDestroyed() ? 1 : 0,
+			Actor->IsPendingKillPending() ? 1 : 0);
+	}
+
+	// ===== CRITICAL FIX FOR RACE CONDITION =====
+	// The ensure "Actor not valid for replication" happens because the actor is still
+	// in RepGraph's internal structures when GatherActorListsForConnection runs.
+	//
+	// Solution: Call RouteRemoveNetworkActorToNodes to ensure complete cleanup through
+	// the normal removal path, then force grid rebuild, then RemoveNetworkActor for final cleanup.
+
+	const FNewReplicatedActorInfo ActorInfo(Actor);
+
+	// Step 1: Route through the proper removal path to clean all nodes
+	// This ensures the same cleanup logic as normal actor removal
+	RouteRemoveNetworkActorToNodes(ActorInfo);
+
+	// Step 2: Force immediate rebuild of grid buckets to prevent deferred removal
+	if (GridNode)
+	{
+		GridNode->NotifyResetAllNetworkActors();
+	}
+
+	// Step 3: Call base class RemoveNetworkActor for final cleanup
+	// This removes from GlobalActorReplicationInfoMap and any remaining structures
+	RemoveNetworkActor(Actor);
+	
+}
+
+
+
+
 
 // ============= HandlePawnPossessed =============
 
 void USpaceReplicationGraph::HandlePawnPossessed(APawn* Pawn)
 {
 	if (!Pawn) return;
-
+	if (!Star_IsSafeForReplication(Pawn))
+		return;
 	AController* Ctrl = Pawn->GetController();
 	if (!Ctrl || !Ctrl->IsPlayerController())
 	{
@@ -553,7 +818,7 @@ void USpaceReplicationGraph::HandlePawnPossessed(APawn* Pawn)
 
 	if (!PerConnAlways)
 	{
-		PerConnAlways = CreateNewNode<UReplicationGraphNode_AlwaysRelevant_ForConnection>();
+		PerConnAlways = CreateNewNode<USRG_AlwaysRelevant_ForConnection_Safe>();
 		AddConnectionGraphNode(PerConnAlways, ConnMgr);
 		PerConnAlwaysMap.Add(ConnMgr, PerConnAlways);
 	}
@@ -686,20 +951,35 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 	// Keep spatial hash in sync with fast-moving ships
 	if (Spatial3D)
 	{
-		bool bHadInvalid = false;
-		for (TWeakObjectPtr<AShipPawn> ShipPtr : TrackedShips)
+		for (auto It = TrackedShips.CreateIterator(); It; ++It)
 		{
-			AShipPawn* Ship = ShipPtr.Get();
-			if (!Ship)
+			AShipPawn* Ship = It->Get();
+
+			if (!Star_IsSafeForReplication(Ship))
 			{
-				bHadInvalid = true;
+				if (Ship)
+				{
+					Spatial3D->Remove(Ship);
+				}
+				It.RemoveCurrent();
 				continue;
 			}
+
 			Spatial3D->UpdateActor(Ship);
 		}
-		if (bHadInvalid)
+
+		Spatial3D->RemoveInvalids();
+	}
+	else
+	{
+		// Даже если Spatial3D выключен — всё равно чистим TrackedShips
+		for (auto It = TrackedShips.CreateIterator(); It; ++It)
 		{
-			Spatial3D->RemoveInvalids();
+			AShipPawn* Ship = It->Get();
+			if (!Star_IsSafeForReplication(Ship))
+			{
+				It.RemoveCurrent();
+			}
 		}
 	}
 
@@ -842,6 +1122,21 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		UReplicationGraphNode_AlwaysRelevant_ForConnection* ARNode = PerConnAlwaysMap.FindRef(ConnMgr).Get();
 		if (!ARNode) continue;
 
+		// Purge any stale actors from per-connection caches (extra safety if OnActorDestroyed missed).
+		auto RemoveInvalidFromSet = [](TSet<TWeakObjectPtr<AActor>>& Set)
+		{
+			for (auto It = Set.CreateIterator(); It; ++It)
+			{
+				AActor* A = It->Get();
+				if (!Star_IsSafeForReplication(A))
+				{
+					It.RemoveCurrent();
+				}
+			}
+		};
+		RemoveInvalidFromSet(CS.Selected);
+		RemoveInvalidFromSet(CS.Visible);
+
 		const AShipPawn* ViewerShip = Cast<AShipPawn>(ViewerPawn);
 		bool bViewerHyper = IsHyperShip(ViewerShip);
 		if (!bViewerHyper)
@@ -952,7 +1247,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			{
 				AShipPawn* Ship = Cast<AShipPawn>(A);
 				if (!Ship || Ship == ViewerPawn) continue;
-				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
+				if (!Star_IsSafeForReplication(Ship)) continue;
 				if (IsOwnedByConnection(ConnMgr, Ship, this)) continue; // skip own ship even if viewer not set yet
 
 				const bool  bIsPlayerShip = IsPlayerControlledShip(Ship);
@@ -987,7 +1282,7 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			{
 				AShipPawn* Ship = ShipPtr.Get();
 				if (!Ship || Ship == ViewerPawn) continue;
-				if (!IsValid(Ship) || !Ship->GetIsReplicated()) continue;
+				if (!Star_IsSafeForReplication(Ship)) continue;
 				if (IsOwnedByConnection(ConnMgr, Ship, this)) continue; // skip own ship even if viewer not set yet
 
 				const bool  bIsPlayerShip = IsPlayerControlledShip(Ship);
@@ -1106,7 +1401,11 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			for (TWeakObjectPtr<AActor> APtr : NowSelected)
 			{
 				AActor* A = APtr.Get();
-				if (!A) continue;
+				if (!Star_IsSafeForReplication(A))
+				{
+					continue;
+				}
+
 				if (!CS.Selected.Contains(APtr))
 				{
 					if (A->NetDormancy != DORM_Awake)
@@ -1119,33 +1418,40 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				}
 			}
 
-			for (TWeakObjectPtr<AActor> Prev : CS.Selected)
+			for (auto It = CS.Selected.CreateIterator(); It; ++It)
 			{
-				if (!Prev.IsValid())
+				TWeakObjectPtr<AActor>& Prev = *It;
+				AActor* A = Prev.Get();
+
+				const bool bNull          = (A == nullptr);
+				const bool bValid         = A && ::IsValid(A);
+				const bool bBeingDestroyed= A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+				const bool bStillSelected = NowSelected.Contains(Prev);
+
+				const bool bJustDroppedByScheduler = (!bStillSelected) && bValid && !bBeingDestroyed;
+
+				if (bJustDroppedByScheduler)
 				{
+					// Нормальный кейс: актор живой, просто перестал быть "важным" для этого коннекта.
+					if (!IsOwnedByConnection(ConnMgr, A, this))
+					{
+						if (A->NetDormancy != DORM_DormantAll)
+							A->SetNetDormancy(DORM_DormantAll);
+
+						ARNode->NotifyRemoveNetworkActor(FNewReplicatedActorInfo(A));
+						LogChannelState(ConnMgr, A, TEXT("-REM"));
+					}
+
+					It.RemoveCurrent();
 					continue;
 				}
 
-				AActor* A = Prev.Get();
-				const bool bBeingDestroyed = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
-
-				if (!NowSelected.Contains(Prev) || bBeingDestroyed)
+				// Всё остальное: либо уничтожается, либо уже невалиден.
+				if (!bStillSelected || !bValid || bBeingDestroyed)
 				{
-					if (!A || bBeingDestroyed)
-					{
-						continue;
-					}
-
-					if (IsOwnedByConnection(ConnMgr, A, this))
-					{
-						continue;
-					}
-
-					if (A->NetDormancy != DORM_DormantAll)
-						A->SetNetDormancy(DORM_DormantAll);
-
-					ARNode->NotifyRemoveNetworkActor(FNewReplicatedActorInfo(A));
-					LogChannelState(ConnMgr, A, TEXT("-REM"));
+					// Тут ТОЛЬКО чистим наши структуры.
+					It.RemoveCurrent();
+					continue;
 				}
 			}
 
@@ -1461,6 +1767,160 @@ void USpaceReplicationGraph::HandleWorldShift()
 	}
 }
 
+// ================= SAFE GRID NODE =================
+
+void USRG_GridSpatialization2D_Safe::GatherActorListsForConnection(
+	const FConnectionGatherActorListParameters& Params)
+{
+	// Run base gather first
+	Super::GatherActorListsForConnection(Params);
+
+	// UE5.6 API: OutGatheredReplicationLists has no mutable GetList; filter and rebuild manually.
+	FGatheredReplicationActorLists& Lists = Params.OutGatheredReplicationLists;
+
+	constexpr uint32 MaxLists = (uint32)EActorRepListTypeFlags::Max;
+	TArray<TArray<FActorRepListType>> Filtered;
+	Filtered.SetNum(MaxLists);
+
+	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
+	{
+		const EActorRepListTypeFlags Flag = (EActorRepListTypeFlags)ListIdx;
+		TArrayView<const FActorRepListType> View = Lists.ViewActors(Flag);
+		if (View.Num() == 0)
+		{
+			continue;
+		}
+
+		TArray<FActorRepListType>& OutList = Filtered[ListIdx];
+		OutList.Reserve(View.Num());
+
+		for (int32 Idx = 0; Idx < View.Num(); ++Idx)
+		{
+			AActor* A = View[Idx];
+
+			const bool bNull  = (A == nullptr);
+			const bool bValid = A && ::IsValid(A);
+			const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+			const bool bRep   = A && A->GetIsReplicated();
+
+			if (bNull || !bValid || bDead || !bRep)
+			{
+				if (SRG_ShouldLog())
+				{
+					UE_LOG(LogSpaceRepGraph, Warning,
+						TEXT("[SAFE-GRID] Remove invalid actor: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
+						*GetNameSafe(A),
+						bNull ? 1 : 0,
+						bValid ? 1 : 0,
+						bDead ? 1 : 0,
+						bRep  ? 1 : 0);
+				}
+				continue;
+			}
+
+			OutList.Add(A);
+		}
+	}
+
+	Lists.Reset();
+
+	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
+	{
+		const TArray<FActorRepListType>& Src = Filtered[ListIdx];
+		if (Src.Num() == 0)
+		{
+			continue;
+		}
+
+		FActorRepListRefView NewView;
+		NewView.Reserve(Src.Num());
+		for (const FActorRepListType& Item : Src)
+		{
+			NewView.Add(Item);
+		}
+
+		Lists.AddReplicationActorList(NewView, (EActorRepListTypeFlags)ListIdx);
+	}
+
+	// Final scrub in case anything slipped through (defensive).
+	SRG_ScrubGatheredLists(TEXT("Grid"), Lists);
+}
+
+// ================= SAFE GLOBAL ACTOR LIST =================
+void USRG_ActorList_Safe::RemoveInvalidActors()
+{
+	for (int32 Idx = ReplicationActorList.Num() - 1; Idx >= 0; --Idx)
+	{
+		AActor* A = ReplicationActorList[Idx];
+
+		const bool bNull  = (A == nullptr);
+		const bool bValid = A && ::IsValid(A);
+		const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+		const bool bRep   = A && A->GetIsReplicated();
+
+		if (bNull || !bValid || bDead || !bRep)
+		{
+			if (SRG_ShouldLog())
+			{
+				UE_LOG(LogSpaceRepGraph, Warning,
+					TEXT("[SAFE-AR-GLOBAL] Remove invalid actor: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
+					*GetNameSafe(A),
+					bNull ? 1 : 0,
+					bValid ? 1 : 0,
+					bDead ? 1 : 0,
+					bRep  ? 1 : 0);
+			}
+
+			ReplicationActorList.RemoveAtSwap(Idx);
+		}
+	}
+}
+
+void USRG_ActorList_Safe::GatherActorListsForConnection(
+	const FConnectionGatherActorListParameters& Params)
+{
+	RemoveInvalidActors();
+	Super::GatherActorListsForConnection(Params);
+	SRG_ScrubGatheredLists(TEXT("AlwaysRelevantGlobal"), Params.OutGatheredReplicationLists);
+}
 
 
+void USRG_AlwaysRelevant_ForConnection_Safe::GatherActorListsForConnection(
+	const FConnectionGatherActorListParameters& Params)
+{
+	// 1) Сначала чистим наш внутренний список от мёртвых/невалидных акторов.
+	//    ReplicationActorList — это FActorRepListRefView из базового UReplicationGraphNode_ActorList.
+	FActorRepListRefView& View = ReplicationActorList;
 
+	for (int32 Idx = View.Num() - 1; Idx >= 0; --Idx)
+	{
+		AActor* A = View[Idx];
+
+		const bool bNull  = (A == nullptr);
+		const bool bValid = A && ::IsValid(A);
+		const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+		const bool bRep   = A && A->GetIsReplicated();
+
+		if (bNull || !bValid || bDead || !bRep)
+		{
+			if (SRG_ShouldLog())
+			{
+				UE_LOG(LogSpaceRepGraph, Warning,
+					TEXT("[SAFE-AR] Remove invalid actor from per-connection list: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
+					*GetNameSafe(A),
+					bNull ? 1 : 0,
+					bValid ? 1 : 0,
+					bDead ? 1 : 0,
+					bRep  ? 1 : 0);
+			}
+
+			// FActorRepListRefView умеет RemoveAtSwap — мы просто выкидываем запись.
+			View.RemoveAtSwap(Idx);
+		}
+	}
+
+	// 2) Теперь даём базовому классу добавить уже очищенный ReplicationActorList
+	//    в Params.OutGatheredReplicationLists.
+	Super::GatherActorListsForConnection(Params);
+	SRG_ScrubGatheredLists(TEXT("PerConnAlways"), Params.OutGatheredReplicationLists);
+}
