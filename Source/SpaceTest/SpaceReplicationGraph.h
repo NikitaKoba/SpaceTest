@@ -25,11 +25,9 @@ class SPACETEST_API USRG_GridSpatialization2D_Safe
 {
 	GENERATED_BODY()
 
-protected:
-	// Тут мы будем вычищать дохлых акторов перед отдачей их движку
+public:
 	virtual void GatherActorListsForConnection(
-		const FConnectionGatherActorListParameters& Params
-	) override;
+		const FConnectionGatherActorListParameters& Params) override;
 };
 
 // Safe variant of plain ActorList that prunes invalid actors before gathering.
@@ -74,9 +72,6 @@ public:
 	
 	FDelegateHandle ActorDestroyedHandle;
 
-
-	UFUNCTION()
-	void OnActorDestroyed(AActor* Actor);
 	// ========== Custom API ==========
 	void HandlePawnPossessed(APawn* Pawn);
 

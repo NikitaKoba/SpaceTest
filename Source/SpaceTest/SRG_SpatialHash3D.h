@@ -53,10 +53,18 @@ public:
 	void Add(AActor* A)
 	{
 		if (!IsValid(A)) return;
+
+		// если уже есть — просто обновить позицию
+		if (ActorToCell.Contains(A))
+		{
+			UpdateActor(A);
+			return;
+		}
+
 		const FIntVector C = WorldToCell(A->GetActorLocation());
 		FBucket& B = Buckets.FindOrAdd(C);
 		B.Actors.Add(A);
-		ActorToCell.Add(A, C); // TWeakObjectPtr как ключ — ок
+		ActorToCell.Add(A, C);
 	}
 
 	/** Удалить актёра из структуры */
@@ -334,9 +342,19 @@ private:
 	void Relink(AActor* A, const FIntVector& NewC)
 	{
 		if (!IsValid(A)) return;
+
 		FBucket& NB = Buckets.FindOrAdd(NewC);
 		NB.Actors.Add(A);
-		ActorToCell.Add(A, NewC); // перезапишет старое значение
+
+		if (FIntVector* CellPtr = ActorToCell.Find(A))
+		{
+			*CellPtr = NewC;
+		}
+		else
+		{
+			ActorToCell.Add(A, NewC);
+		}
 	}
+
 };
 

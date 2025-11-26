@@ -1,6 +1,9 @@
 ﻿// SpaceReplicationGraph.cpp - ИСПРАВЛЕННАЯ ВЕРСИЯ для больших координат
 
 #include "SpaceReplicationGraph.h"
+
+#include <excpt.h>
+
 #include "ShipPawn.h"
 #include "Engine/World.h"
 #include "Engine/NetConnection.h"
@@ -94,15 +97,86 @@ static bool Star_IsSafeForReplication(const AActor* A)
 	return true;
 }
 
+// Fast pointer sanity check to avoid dereferencing obviously bogus addresses (e.g. 0xFFFFFFFFFFFFFFFF).
+static FORCEINLINE bool SRG_IsProbablyValidPtr(const AActor* A)
+{
+	if (!A) return false;
+	const uintptr_t Ptr = reinterpret_cast<uintptr_t>(A);
+	// Filter out null/low addresses and poison values. UObject addresses are usually well above 64 KB.
+	if (Ptr < 0x10000u) return false;
+	if (Ptr == UINTPTR_MAX) return false;
+	return true;
+}
+
+// Tries to read minimal validity flags without crashing on bogus pointers.
+static bool SRG_SafeActorValidity(AActor* A, bool& bOutValid, bool& bOutDead, bool& bOutRep)
+{
+	bOutValid = false;
+	bOutDead  = false;
+	bOutRep   = false;
+
+	if (!SRG_IsProbablyValidPtr(A))
+	{
+		return false;
+	}
+
+#if PLATFORM_WINDOWS
+	__try
+	{
+		const bool bLow   = A->IsValidLowLevelFast(false);
+		const bool bValid = bLow && ::IsValid(A);
+		const bool bDead  = bValid && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+		const bool bRep   = bValid && A->GetIsReplicated();
+
+		bOutValid = bValid;
+		bOutDead  = bDead;
+		bOutRep   = bRep;
+		return bValid && !bDead && bRep;
+	}
+	__except(EXCEPTION_EXECUTE_HANDLER)
+	{
+		return false;
+	}
+#else
+	const bool bLow   = A->IsValidLowLevelFast(false);
+	const bool bValid = bLow && ::IsValid(A);
+	const bool bDead  = bValid && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
+	const bool bRep   = bValid && A->GetIsReplicated();
+
+	bOutValid = bValid;
+	bOutDead  = bDead;
+	bOutRep   = bRep;
+	return bValid && !bDead && bRep;
+#endif
+}
+
 // Scrubs gathered actor lists to remove invalid/destroyed/non-replicated actors right before routing.
 static void SRG_ScrubGatheredLists(const TCHAR* Tag, FGatheredReplicationActorLists& Lists)
 {
 	constexpr uint32 MaxLists = (uint32)EActorRepListTypeFlags::Max;
-	TArray<TArray<FActorRepListType>> Filtered;
-	Filtered.SetNum(MaxLists);
 
-	bool bRemoved = false;
+	// Persistent storage ?? ??? ????? ?????, ?? ?????? ????
+	// ????? ?? ?????? ???.
+	thread_local TMap<FGatheredReplicationActorLists*, TArray<TArray<FActorRepListType>>> GStorage;
+	TArray<TArray<FActorRepListType>>& Storage = GStorage.FindOrAdd(&Lists);
 
+	if (Storage.Num() != MaxLists)
+	{
+		Storage.SetNum(MaxLists);
+	}
+
+	// Reset storage; not reused when we early out.
+	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
+	{
+		Storage[ListIdx].Reset();
+	}
+
+	bool bAnyDropped = false;
+	const bool bDoLog = SRG_ShouldLog();
+	int32 NumDropped = 0;
+	int32 NumDetailLogs = 0;
+
+	// ??????? ??? ??, ?????
 	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
 	{
 		const EActorRepListTypeFlags Flag = (EActorRepListTypeFlags)ListIdx;
@@ -112,45 +186,59 @@ static void SRG_ScrubGatheredLists(const TCHAR* Tag, FGatheredReplicationActorLi
 			continue;
 		}
 
-		TArray<FActorRepListType>& Out = Filtered[ListIdx];
-		Out.Reserve(View.Num());
+		TArray<FActorRepListType>& OutList = Storage[ListIdx];
+		OutList.Reserve(View.Num());
 
 		for (int32 Idx = 0; Idx < View.Num(); ++Idx)
 		{
 			AActor* A = View[Idx];
 
 			const bool bNull  = (A == nullptr);
-			const bool bValid = A && ::IsValid(A);
-			const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
-			const bool bRep   = A && A->GetIsReplicated();
 
-			if (bNull || !bValid || bDead || !bRep)
+			bool bValid = false, bDead = false, bRep = false;
+			if (bNull || !SRG_SafeActorValidity(A, bValid, bDead, bRep))
 			{
-				bRemoved = true;
-				if (SRG_ShouldLog())
+				bAnyDropped = true;
+				++NumDropped;
+				continue;
+			}
+
+			if (!bValid || bDead || !bRep)
+			{
+				bAnyDropped = true;
+				++NumDropped;
+
+				if (bDoLog && NumDetailLogs < 2)
 				{
+					const FString Name = bValid ? GetNameSafe(A) : FString(TEXT("None"));
 					UE_LOG(LogSpaceRepGraph, Warning,
-						TEXT("[SCRUB] %s Remove invalid actor: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
-						Tag ? Tag : TEXT(""), *GetNameSafe(A),
-						bNull ? 1 : 0, bValid ? 1 : 0, bDead ? 1 : 0, bRep ? 1 : 0);
+						TEXT("[SCRUB:%s] Drop invalid actor from gathered lists: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
+						Tag,
+						*Name,
+						bNull ? 1 : 0,
+						bValid ? 1 : 0,
+						bDead ? 1 : 0,
+						bRep  ? 1 : 0);
+					++NumDetailLogs;
 				}
 				continue;
 			}
 
-			Out.Add(A);
+			OutList.Add(A);
 		}
 	}
 
-	if (!bRemoved)
+	if (!bAnyDropped)
 	{
 		return;
 	}
 
+	// ??????? Lists ?? ??????? Storage
 	Lists.Reset();
 
 	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
 	{
-		const TArray<FActorRepListType>& Src = Filtered[ListIdx];
+		const TArray<FActorRepListType>& Src = Storage[ListIdx];
 		if (Src.Num() == 0)
 		{
 			continue;
@@ -165,7 +253,17 @@ static void SRG_ScrubGatheredLists(const TCHAR* Tag, FGatheredReplicationActorLi
 
 		Lists.AddReplicationActorList(NewView, (EActorRepListTypeFlags)ListIdx);
 	}
+
+	if (bDoLog && NumDropped > NumDetailLogs)
+	{
+		UE_LOG(LogSpaceRepGraph, Warning,
+			TEXT("[SCRUB:%s] Dropped %d additional invalid actors (details suppressed)"),
+			Tag,
+			NumDropped - NumDetailLogs);
+	}
 }
+
+
 
 namespace
 {
@@ -743,45 +841,8 @@ void USpaceReplicationGraph::BeginDestroy()
 
 	Super::BeginDestroy();
 }
-void USpaceReplicationGraph::OnActorDestroyed(AActor* Actor)
-{
-	if (!Actor)
-		return;
 
-	if (SRG_ShouldLog())
-	{
-		UE_LOG(LogSpaceRepGraph, Log,
-			TEXT("[OnActorDestroyed] %s Replicated=%d BeingDestroyed=%d PendingKill=%d"),
-			*GetNameSafe(Actor),
-			Actor->GetIsReplicated() ? 1 : 0,
-			Actor->IsActorBeingDestroyed() ? 1 : 0,
-			Actor->IsPendingKillPending() ? 1 : 0);
-	}
 
-	// ===== CRITICAL FIX FOR RACE CONDITION =====
-	// The ensure "Actor not valid for replication" happens because the actor is still
-	// in RepGraph's internal structures when GatherActorListsForConnection runs.
-	//
-	// Solution: Call RouteRemoveNetworkActorToNodes to ensure complete cleanup through
-	// the normal removal path, then force grid rebuild, then RemoveNetworkActor for final cleanup.
-
-	const FNewReplicatedActorInfo ActorInfo(Actor);
-
-	// Step 1: Route through the proper removal path to clean all nodes
-	// This ensures the same cleanup logic as normal actor removal
-	RouteRemoveNetworkActorToNodes(ActorInfo);
-
-	// Step 2: Force immediate rebuild of grid buckets to prevent deferred removal
-	if (GridNode)
-	{
-		GridNode->NotifyResetAllNetworkActors();
-	}
-
-	// Step 3: Call base class RemoveNetworkActor for final cleanup
-	// This removes from GlobalActorReplicationInfoMap and any remaining structures
-	RemoveNetworkActor(Actor);
-	
-}
 
 
 
@@ -1772,78 +1833,8 @@ void USpaceReplicationGraph::HandleWorldShift()
 void USRG_GridSpatialization2D_Safe::GatherActorListsForConnection(
 	const FConnectionGatherActorListParameters& Params)
 {
-	// Run base gather first
 	Super::GatherActorListsForConnection(Params);
-
-	// UE5.6 API: OutGatheredReplicationLists has no mutable GetList; filter and rebuild manually.
-	FGatheredReplicationActorLists& Lists = Params.OutGatheredReplicationLists;
-
-	constexpr uint32 MaxLists = (uint32)EActorRepListTypeFlags::Max;
-	TArray<TArray<FActorRepListType>> Filtered;
-	Filtered.SetNum(MaxLists);
-
-	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
-	{
-		const EActorRepListTypeFlags Flag = (EActorRepListTypeFlags)ListIdx;
-		TArrayView<const FActorRepListType> View = Lists.ViewActors(Flag);
-		if (View.Num() == 0)
-		{
-			continue;
-		}
-
-		TArray<FActorRepListType>& OutList = Filtered[ListIdx];
-		OutList.Reserve(View.Num());
-
-		for (int32 Idx = 0; Idx < View.Num(); ++Idx)
-		{
-			AActor* A = View[Idx];
-
-			const bool bNull  = (A == nullptr);
-			const bool bValid = A && ::IsValid(A);
-			const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
-			const bool bRep   = A && A->GetIsReplicated();
-
-			if (bNull || !bValid || bDead || !bRep)
-			{
-				if (SRG_ShouldLog())
-				{
-					UE_LOG(LogSpaceRepGraph, Warning,
-						TEXT("[SAFE-GRID] Remove invalid actor: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
-						*GetNameSafe(A),
-						bNull ? 1 : 0,
-						bValid ? 1 : 0,
-						bDead ? 1 : 0,
-						bRep  ? 1 : 0);
-				}
-				continue;
-			}
-
-			OutList.Add(A);
-		}
-	}
-
-	Lists.Reset();
-
-	for (uint32 ListIdx = 0; ListIdx < MaxLists; ++ListIdx)
-	{
-		const TArray<FActorRepListType>& Src = Filtered[ListIdx];
-		if (Src.Num() == 0)
-		{
-			continue;
-		}
-
-		FActorRepListRefView NewView;
-		NewView.Reserve(Src.Num());
-		for (const FActorRepListType& Item : Src)
-		{
-			NewView.Add(Item);
-		}
-
-		Lists.AddReplicationActorList(NewView, (EActorRepListTypeFlags)ListIdx);
-	}
-
-	// Final scrub in case anything slipped through (defensive).
-	SRG_ScrubGatheredLists(TEXT("Grid"), Lists);
+	SRG_ScrubGatheredLists(TEXT("Grid"), Params.OutGatheredReplicationLists);
 }
 
 // ================= SAFE GLOBAL ACTOR LIST =================
@@ -1853,28 +1844,31 @@ void USRG_ActorList_Safe::RemoveInvalidActors()
 	{
 		AActor* A = ReplicationActorList[Idx];
 
-		const bool bNull  = (A == nullptr);
-		const bool bValid = A && ::IsValid(A);
-		const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
-		const bool bRep   = A && A->GetIsReplicated();
+		bool bValid = false, bDead = false, bRep = false;
+		if (!SRG_SafeActorValidity(A, bValid, bDead, bRep))
+		{
+			ReplicationActorList.RemoveAtSwap(Idx);
+			continue;
+		}
 
-		if (bNull || !bValid || bDead || !bRep)
+		if (!bValid || bDead || !bRep)
 		{
 			if (SRG_ShouldLog())
 			{
+				const FString Name = bValid ? GetNameSafe(A) : FString(TEXT("None"));
 				UE_LOG(LogSpaceRepGraph, Warning,
-					TEXT("[SAFE-AR-GLOBAL] Remove invalid actor: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
-					*GetNameSafe(A),
-					bNull ? 1 : 0,
+					TEXT("[SAFE-AR-GLOBAL] Remove invalid actor: %s (Valid=%d Dead=%d Rep=%d)"),
+					*Name,
 					bValid ? 1 : 0,
-					bDead ? 1 : 0,
-					bRep  ? 1 : 0);
+					bDead  ? 1 : 0,
+					bRep   ? 1 : 0);
 			}
 
 			ReplicationActorList.RemoveAtSwap(Idx);
 		}
 	}
 }
+
 
 void USRG_ActorList_Safe::GatherActorListsForConnection(
 	const FConnectionGatherActorListParameters& Params)
@@ -1884,43 +1878,41 @@ void USRG_ActorList_Safe::GatherActorListsForConnection(
 	SRG_ScrubGatheredLists(TEXT("AlwaysRelevantGlobal"), Params.OutGatheredReplicationLists);
 }
 
-
 void USRG_AlwaysRelevant_ForConnection_Safe::GatherActorListsForConnection(
 	const FConnectionGatherActorListParameters& Params)
 {
-	// 1) Сначала чистим наш внутренний список от мёртвых/невалидных акторов.
-	//    ReplicationActorList — это FActorRepListRefView из базового UReplicationGraphNode_ActorList.
 	FActorRepListRefView& View = ReplicationActorList;
 
 	for (int32 Idx = View.Num() - 1; Idx >= 0; --Idx)
 	{
 		AActor* A = View[Idx];
 
-		const bool bNull  = (A == nullptr);
-		const bool bValid = A && ::IsValid(A);
-		const bool bDead  = A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
-		const bool bRep   = A && A->GetIsReplicated();
+		bool bValid = false, bDead = false, bRep = false;
+		if (!SRG_SafeActorValidity(A, bValid, bDead, bRep))
+		{
+			View.RemoveAtSwap(Idx);
+			continue;
+		}
 
-		if (bNull || !bValid || bDead || !bRep)
+		if (!bValid || bDead || !bRep)
 		{
 			if (SRG_ShouldLog())
 			{
+				const FString Name = bValid ? GetNameSafe(A) : FString(TEXT("None"));
 				UE_LOG(LogSpaceRepGraph, Warning,
-					TEXT("[SAFE-AR] Remove invalid actor from per-connection list: %s (Null=%d Valid=%d Dead=%d Rep=%d)"),
-					*GetNameSafe(A),
-					bNull ? 1 : 0,
+					TEXT("[SAFE-AR] Remove invalid actor from per-connection list: %s (Valid=%d Dead=%d Rep=%d)"),
+					*Name,
 					bValid ? 1 : 0,
-					bDead ? 1 : 0,
-					bRep  ? 1 : 0);
+					bDead  ? 1 : 0,
+					bRep   ? 1 : 0);
 			}
 
-			// FActorRepListRefView умеет RemoveAtSwap — мы просто выкидываем запись.
 			View.RemoveAtSwap(Idx);
 		}
 	}
 
-	// 2) Теперь даём базовому классу добавить уже очищенный ReplicationActorList
-	//    в Params.OutGatheredReplicationLists.
+	// ВАЖНО: только это. Без SRG_ScrubGatheredLists здесь.
 	Super::GatherActorListsForConnection(Params);
-	SRG_ScrubGatheredLists(TEXT("PerConnAlways"), Params.OutGatheredReplicationLists);
+	SRG_ScrubGatheredLists(TEXT("PerConnAlways"), Params.OutGatheredReplicationLists); // <- ????
 }
+
