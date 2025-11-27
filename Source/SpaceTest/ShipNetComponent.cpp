@@ -580,9 +580,9 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	// --- РїРѕСЂРѕРіРё Р¶С‘СЃС‚РєРѕР№ СЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё ---
 		const bool bHyper = (Ship && Ship->IsHyperDriveActive());
 
-	float PosSnap_Soft = 8000.f;   // 80 m (cm)
-	float VelSnap_Soft = 30000.f;  // 300 m/s (cm/s)
-	float AngSnap_Soft = 4.0f;     // ~230 deg/s
+	float PosSnap_Soft = 15000.f;   // 80 m (cm)
+	float VelSnap_Soft = 50000.f;  // 300 m/s (cm/s)
+	float AngSnap_Soft = 6.0;     // ~230 deg/s
 
 	const float HyperScale = bHyper ? 8.0f : 1.0f;
 	PosSnap_Soft *= HyperScale;

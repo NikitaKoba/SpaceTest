@@ -51,6 +51,7 @@ class SPACETEST_API USRG_AlwaysRelevant_ForConnection_Safe
 public:
 	virtual void GatherActorListsForConnection(
 		const FConnectionGatherActorListParameters& Params) override;
+	int32 PurgeInvalidActors();
 };
 
 UCLASS()
@@ -116,6 +117,7 @@ public:
 		FVector PrevVel         = FVector::ZeroVector;
 		FVector PrevAccel       = FVector::ZeroVector;
 		double  PrevStamp       = 0.0;
+		double  LastSelectedWall= 0.0;   // wall-clock when we last kept this actor selected
 	};
 
 	struct FViewerEMA
@@ -137,10 +139,12 @@ public:
 		float U     = 0.f;
 		float Score = 0.f;
 		int32 GroupKey = 0;
+		float DistSq = 0.f;
 	};
 
 	struct FConnState
 	{
+		double JoinWall = 0.0;
 		FViewerEMA Viewer;
 		TSet<TWeakObjectPtr<AActor>> Selected;
 		TSet<TWeakObjectPtr<AActor>> Visible;
@@ -149,6 +153,7 @@ public:
 	};
 
 	TMap<TWeakObjectPtr<UNetReplicationGraphConnection>, FConnState> ConnStates;
+	bool bDidInitialRescan = false;
 
 	// ========== LiveLog / AutoRebias ==========
 	FTSTicker::FDelegateHandle LiveLogTickerHandle;
@@ -180,12 +185,22 @@ public:
 	
 	// ========== Budget ==========
 	void UpdateAdaptiveBudget(UNetReplicationGraphConnection* ConnMgr, FConnState& CS, float UsedBytesThisTick, float TickDt);
-	void LogPerConnTick(UNetReplicationGraphConnection* ConnMgr, const FConnState& CS, int32 NumTracked, int32 NumCand, int32 NumChosen, float UsedBytes, float TickDt);
+	void LogPerConnTick(
+		UNetReplicationGraphConnection* ConnMgr,
+		const FConnState& CS,
+		int32 NumTracked,
+		int32 NumCand,
+		int32 NumChosen,
+		float UsedBytes,
+		float TickDt,
+		int32 NumPinned,
+		float PinnedOverflowBytes);
 
 	// ========== Helpers ==========
 	static bool IsAlwaysRelevantByClass(const AActor* Actor);
 	static UNetConnection* FindOwnerConnection(AActor* Actor);
 	static void LogChannelState(UNetReplicationGraphConnection* ConnMgr, AActor* A, const TCHAR* Reason);
+	void RescanShipsIfNeeded();
 
 	FORCEINLINE static float EMA(float Old, float New, float Alpha)
 	{
