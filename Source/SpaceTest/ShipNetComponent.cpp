@@ -6,11 +6,37 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
+#include "HAL/IConsoleManager.h"
 #include "Engine/World.h"
 #include "Misc/ScopeExit.h"
 #include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY(LogShipNet);
+
+static TAutoConsoleVariable<int32> CVar_ShipNet_Debug(
+	TEXT("ship.Net.Debug"), 0,
+	TEXT("Verbose ShipNet logging (OnRep deltas/jumps, interp decisions)"));
+
+static TAutoConsoleVariable<int32> CVar_ShipNet_UseInterp(
+	TEXT("ship.Net.UseInterp"), 1,
+	TEXT("Use interpolation for simulated proxies (0 = teleport to latest snap)"));
+
+static TAutoConsoleVariable<float> CVar_ShipNet_InterpAheadMax(
+	TEXT("ship.Net.InterpAheadMax"), 0.4,
+	TEXT("Clamp extrapolation when past latest snap (seconds)"));
+
+static TAutoConsoleVariable<float> CVar_ShipNet_InterpDelayOverride(
+	TEXT("ship.Net.InterpDelayOverride"), 0.12f,
+	TEXT("Override NetInterpDelay (seconds). Negative = use component value/EMA"));
+
+static TAutoConsoleVariable<float> CVar_ShipNet_InterpLeadSeconds(
+	TEXT("ship.Net.InterpLeadSeconds"), 0.02f,
+	TEXT("Optional forward lead (seconds) to reduce visible trailing vs server"));
+
+static FORCEINLINE bool ShipNet_ShouldLog()
+{
+	return CVar_ShipNet_Debug.GetValueOnAnyThread() != 0;
+}
 // --- Quant helpers (Р±РµР· Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№) ---
 static FORCEINLINE float QuantStep(float v, float step)
 {
@@ -342,7 +368,11 @@ void UShipNetComponent::OnRep_ServerSnap()
     if (OwPawn && OwPawn->GetLocalRole() == ROLE_SimulatedProxy)
     {
         const double ClientTime = (double)ServerSnap.ServerTime + ServerTimeToClientTime;
-        const float TeleportCutoffUU = 100000.f;  // 1 км
+        const double DeltaClient = (LastSnapClientTime > 0.0) ? (ClientTime - LastSnapClientTime) : 0.0;
+        const double DeltaServer = (LastSnapServerTime > 0.0) ? ((double)ServerSnap.ServerTime - LastSnapServerTime) : 0.0;
+        LastSnapClientTime = ClientTime;
+        LastSnapServerTime = (double)ServerSnap.ServerTime;
+        const float TeleportCutoffUU = 100000.f;  // 1 km
         bool bDidTeleport = false;
 
         if (NetBuffer.Num() > 0 && Ship)
@@ -353,6 +383,16 @@ void UShipNetComponent::OnRep_ServerSnap()
             const FVector3d SnapGlobal = SnapOrigin + (FVector3d(ServerSnap.Loc) - SnapWorldOrig);
 
             const double JumpGlobal = FVector3d::Distance(SnapGlobal, LastGlobal);
+
+            if (ShipNet_ShouldLog())
+            {
+                UE_LOG(LogShipNet, Verbose,
+                    TEXT("[SNAP] %s | dClient=%.3f s dServer=%.3f s Jump=%.1f m"),
+                    *GetNameSafe(Ship),
+                    DeltaClient,
+                    DeltaServer,
+                    JumpGlobal / 100.0);
+            }
 
             if (JumpGlobal > (double)TeleportCutoffUU)
             {
@@ -475,7 +515,16 @@ void UShipNetComponent::DriveSimulatedProxy()
 	if (!Ship || !ShipMesh || NetBuffer.Num()==0 || !bHaveTimeSync || !GetWorld()) return;
 
 	const double Now = GetWorld()->GetTimeSeconds();
-	const double Tq  = Now - (double)NetInterpDelay;
+	const float DelayOverride = CVar_ShipNet_InterpDelayOverride.GetValueOnAnyThread();
+	const double EffectiveDelay = (DelayOverride >= 0.f) ? (double)DelayOverride : (double)NetInterpDelay;
+	const double Tq  = Now - EffectiveDelay;
+
+	if (CVar_ShipNet_UseInterp.GetValueOnAnyThread() == 0)
+	{
+		const FInterpNode& Latest = NetBuffer.Last();
+		Ship->SetActorLocationAndRotation(Latest.Loc, Latest.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+		return;
+	}
 
 	// РіСЂР°РЅРёС‡РЅС‹Рµ СЃР»СѓС‡Р°Рё
 	if (NetBuffer.Num()==1 || Tq <= NetBuffer[0].Time)
@@ -488,7 +537,8 @@ void UShipNetComponent::DriveSimulatedProxy()
 	{
 		// РєРѕСЂРѕС‚РєР°СЏ СЌРєСЃС‚СЂР°РїРѕР»СЏС†РёСЏ в‰¤ ~100 РјСЃ РЅР° РѕСЃРЅРѕРІРµ СЃРєРѕСЂРѕСЃС‚РµР№
 		const auto& L = NetBuffer.Last();
-		const double Ahead = FMath::Min(0.1, Tq - L.Time);
+		const double AheadMax = (double)FMath::Max(0.f, CVar_ShipNet_InterpAheadMax.GetValueOnAnyThread());
+		const double Ahead = FMath::Clamp(Tq - L.Time, 0.0, AheadMax);
 		const FVector P = L.Loc + L.Vel * (float)Ahead;
 		const FQuat   Q = IntegrateQuat(L.Rot, L.AngVel, (float)Ahead);
 		Ship->SetActorLocationAndRotation(P, Q.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);

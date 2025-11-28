@@ -154,9 +154,11 @@ public:
 	void HandleFloatingOriginShift();
 	// === Настройки ===
 	// Задержка для сим-прокси, будет адаптивно настраиваться
-	UPROPERTY(EditAnywhere) float NetInterpDelay = 0.1f;      // старт
+	UPROPERTY(EditAnywhere) float NetInterpDelay = 0.05f;      // старт
 	UPROPERTY(EditAnywhere) float NetInterpDelayMin = 0.01f;
 	UPROPERTY(EditAnywhere) float NetInterpDelayMax = 0.1f;
+	UPROPERTY() double LastSnapClientTime = 0.0;
+	UPROPERTY() double LastSnapServerTime = 0.0;
 
 	// Владельческая мягкая реконсиляция
 	UPROPERTY(EditAnywhere) float OwnerReconTau       = 0.12f;

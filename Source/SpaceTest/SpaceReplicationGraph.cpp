@@ -31,7 +31,7 @@
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_AlwaysIncludeMeters(
 	TEXT("space.RepGraph.AlwaysIncludeMeters"),
-	2000.f,
+	6000.f, // ещё шире пузырь гарантированной видимости рядом с игроком (важно при огромных координатах)
 	TEXT("Radius (meters) around viewer where ships are always selected"));
 
 static FORCEINLINE bool SRG_ShouldLog();
@@ -54,12 +54,12 @@ static TAutoConsoleVariable<float> CVar_SpaceRepGraph_NPCCullMeters(
 // Sticky selection + pinning to avoid thrashing/dormancy snaps when many NPCs fight in one area.
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_PinNearest(
 	TEXT("space.RepGraph.PinNearest"),
-	16,
+	200,
 	TEXT("Always keep N nearest ships selected (bypasses budget checks); helps prevent snapping up close"));
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_MinHoldSeconds(
 	TEXT("space.RepGraph.MinHoldSeconds"),
-	1.0f,
+	2.0f, // чуть дольше держим выбранных, чтобы убрать редкие дропы вблизи
 	TEXT("Minimum time to keep an actor selected after it was chosen (prevents rapid drop/re-add dormancy thrash"));
 
 // Fallback: also keep ships in the grid so they get baseline replication even when not selected by the scheduler.
@@ -85,7 +85,7 @@ static bool Star_InitClassInfo(UClass* Class, FClassReplicationInfo& Info)
 	// Любые ActorComponent (включая StaticMeshComponent, SceneComponent, etc)
 	if (Class->IsChildOf(UActorComponent::StaticClass()))
 	{
-		Info.ReplicationPeriodFrame           = 1;
+		Info.ReplicationPeriodFrame           = 2;
 		Info.FastPath_ReplicationPeriodFrame  = 1;
 		Info.SetCullDistanceSquared(0.f); // без дистанционного кулла для сабобъектов
 		return true; // мы инициализировали
@@ -326,7 +326,7 @@ static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_UseSpatial3D(
 	TEXT("space.RepGraph.UseSpatial3D"), 1, TEXT("Use SRG_SpatialHash3D (0/1)"));
 
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_UseKNearest(
-	TEXT("space.RepGraph.UseKNearest"), 0, TEXT("If >0, limit candidates to K nearest"));
+	TEXT("space.RepGraph.UseKNearest"), 300, TEXT("If >0, limit candidates to K nearest"));
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_MaxQueryRadiusMeters(
 	TEXT("space.RepGraph.MaxQueryRadiusMeters"), 0.f, TEXT("Optional hard cap on query radius"));
@@ -351,7 +351,7 @@ static TAutoConsoleVariable<float> CVar_SpaceRepGraph_DefaultCullMeters(
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ShipCullMeters(
 	TEXT("space.RepGraph.ShipCullMeters"), 
-	18000.f,  // keep ships streamed but avoid over-broadcasting everything
+	9000.f,  // keep ships streamed but avoid over-broadcasting everything
 	TEXT("Ship coarse cull (meters)"));
 
 // НОВОЕ: 3D rebias вместо только XY
@@ -387,17 +387,23 @@ static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ScoreEnter(
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ScoreExit(
 	TEXT("space.RepGraph.ScoreExit"), 0.010f, TEXT("Hysteresis exit score"));
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_BudgetKBs(
-	TEXT("space.RepGraph.BudgetKBs"), 120.f, TEXT("Base per-connection budget (kB/s)"));
+	TEXT("space.RepGraph.BudgetKBs"), 10000.f, TEXT("Base per-connection budget (kB/s)"));
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_MinBudgetKBs(
-	TEXT("space.RepGraph.BudgetKBsMin"), 60.f, TEXT("Minimum per-connection budget (kB/s) after AIMD clamp"));
+	TEXT("space.RepGraph.BudgetKBsMin"), 150.f, TEXT("Minimum per-connection budget (kB/s) after AIMD clamp"));
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_TickHz(
-	TEXT("space.RepGraph.TickHz"), 8, TEXT("Live scheduler tick frequency"));
+	TEXT("space.RepGraph.TickHz"), 20, TEXT("Live scheduler tick frequency"));
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ShipNearNetHz(
+	TEXT("space.RepGraph.ShipNearNetHz"), 25.f, TEXT("NetUpdateFrequency for ships inside AlwaysInclude or pinned"));
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_ShipFarNetHz(
+	TEXT("space.RepGraph.ShipFarNetHz"), 8.f, TEXT("NetUpdateFrequency for ships outside AlwaysInclude and not pinned"));
+static TAutoConsoleVariable<float> CVar_SpaceRepGraph_DropGuardMeters(
+	TEXT("space.RepGraph.DropGuardMeters"), 1000000.f, TEXT("Force-keep ships within this radius even if score/budget would drop them (0=off)"));
 
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_JoinWarmupSeconds(
-	TEXT("space.RepGraph.JoinWarmupSeconds"), 6.0f, TEXT("Seconds after join when we ignore budget/hysteresis to get initial state"));
+	TEXT("space.RepGraph.JoinWarmupSeconds"), 1.0f, TEXT("Seconds after join when we ignore budget/hysteresis to get initial state"));
 
 static TAutoConsoleVariable<int32> CVar_SpaceRepGraph_WarmupMinShips(
-	TEXT("space.RepGraph.WarmupMinShips"), 64, TEXT("Minimum ships to stream during warmup (distance-based)"));
+	TEXT("space.RepGraph.WarmupMinShips"), 24, TEXT("Minimum ships to stream during warmup (distance-based)"));
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_Safety(
 	TEXT("space.RepGraph.Safety"), 0.9f, TEXT("Safety factor for bandwidth"));
 static TAutoConsoleVariable<float> CVar_SpaceRepGraph_AIMD_Alpha(
@@ -716,37 +722,9 @@ void USpaceReplicationGraph::RouteAddNetworkActorToNodes(
 		return;
 	}
 
-	if (Actor->IsA<ALaserBolt>())
-	{
-		if (UNetConnection* OwnerConn = FindOwnerConnection(Actor))
-		{
-			UNetReplicationGraphConnection* ConnMgr = FindOrAddConnectionManager(OwnerConn);
-			if (ConnMgr)
-			{
-				UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways = PerConnAlwaysMap.FindRef(ConnMgr).Get();
-				if (!PerConnAlways)
-				{
-					PerConnAlways = CreateNewNode<USRG_AlwaysRelevant_ForConnection_Safe>();
-					AddConnectionGraphNode(PerConnAlways, ConnMgr);
-					PerConnAlwaysMap.Add(ConnMgr, PerConnAlways);
-				}
-				PerConnAlways->NotifyAddNetworkActor(ActorInfo);
-			}
-		}
-		else if (AlwaysRelevantNode)
-		{
-			AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
-		}
-
-		if (SRG_ShouldLog())
-		{
-			UE_LOG(LogSpaceRepGraph, Verbose,
-				TEXT("RouteAdd: %s -> AlwaysRelevant (LaserBolt) OwnerConn=%s"),
-				*Actor->GetName(),
-				*GetNameSafe(FindOwnerConnection(Actor)));
-		}
-		return;
-	}
+	// СТАЛО: (заменить на комментарий)
+	// УБРАНО: LaserBolt больше НЕ реплицируется (bReplicates=false)
+	// Спавнится через Multicast локально на каждом клиенте
 	// ИСПРАВЛЕНО: Добавляем ВСЕ ShipPawn в tracking независимо от контроллера
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{
@@ -825,24 +803,10 @@ void USpaceReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicated
 	AActor* Actor = ActorInfo.Actor;
 	if (!Actor) return;
 
-	if (Actor->IsA<ALaserBolt>())
-	{
-		if (UNetConnection* OwnerConn = FindOwnerConnection(Actor))
-		{
-			if (UNetReplicationGraphConnection* ConnMgr = FindConnectionManager(OwnerConn))
-			{
-				if (UReplicationGraphNode_AlwaysRelevant_ForConnection* PerConnAlways = PerConnAlwaysMap.FindRef(ConnMgr).Get())
-				{
-					PerConnAlways->NotifyRemoveNetworkActor(ActorInfo);
-				}
-			}
-		}
-		else if (AlwaysRelevantNode)
-		{
-			AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
-		}
-		return;
-	}
+	// СТАЛО: (заменить на комментарий)
+	// УБРАНО: LaserBolt больше НЕ реплицируется (bReplicates=false)
+	// ReplicationGraph не видит их, не нужно удалять
+	// Это было источником ошибок "Attempted to remove but it was not found"
 
 	if (AShipPawn* Ship = Cast<AShipPawn>(Actor))
 	{
@@ -914,6 +878,13 @@ void USpaceReplicationGraph::BeginDestroy()
 void USpaceReplicationGraph::OnActorDestroyed(AActor* Actor)
 {
 	if (!Actor)
+	{
+		return;
+	}
+
+	// Cosmetic-only actors (e.g. non-replicated laser bolts) never enter the graph,
+	// so skip removal to avoid "Attempted to remove ... but it was not found" spam.
+	if (!Actor->GetIsReplicated() && !Actor->IsA<AShipPawn>())
 	{
 		return;
 	}
@@ -1189,6 +1160,8 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 
 	const float AlwaysInclM    = FMath::Max(0.f, CVar_SpaceRepGraph_AlwaysIncludeMeters.GetValueOnAnyThread());
 	const float AlwaysInclSqUU = (AlwaysInclM > 0.f) ? FMath::Square(AlwaysInclM * 100.f) : 0.f;
+	const float DropGuardM     = FMath::Max(0.f, CVar_SpaceRepGraph_DropGuardMeters.GetValueOnAnyThread());
+	const float DropGuardSqUU  = (DropGuardM > 0.f) ? FMath::Square(DropGuardM * 100.f) : 0.f;
 
 	// ============= ИСПРАВЛЕНО: 3D Auto-Rebias =============
 	if (GridNode && CVar_SpaceRepGraph_AutoRebias.GetValueOnAnyThread() != 0)
@@ -1383,7 +1356,9 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		const int32 PinNearest   = FMath::Max(0, CVar_SpaceRepGraph_PinNearest.GetValueOnAnyThread());
 		const float WarmupSeconds= FMath::Max(0.f, CVar_SpaceRepGraph_JoinWarmupSeconds.GetValueOnAnyThread());
 		const int32 WarmupMinShips = FMath::Max(0, CVar_SpaceRepGraph_WarmupMinShips.GetValueOnAnyThread());
-		const bool bWarmup = (CS.JoinWall > 0.0) && ((NowWall - CS.JoinWall) < WarmupSeconds);
+		const bool bWarmup = (CS.JoinWall > 0.0)
+			&& ((NowWall - CS.JoinWall) < WarmupSeconds)
+			&& (NumTrackedShipsWorld < WarmupMinShips);
 
 		const FVector ViewLoc = ViewerPawn->GetActorLocation();
 
@@ -1630,6 +1605,8 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 		const float S_exit  = CVar_SpaceRepGraph_ScoreExit.GetValueOnAnyThread();
 		const float S_enter_eff = bWarmup ? 0.f : S_enter;
 		const float S_exit_eff  = bWarmup ? 0.f : S_exit;
+		const float NearNetHz   = FMath::Max(0.f, CVar_SpaceRepGraph_ShipNearNetHz.GetValueOnAnyThread());
+		const float FarNetHz    = FMath::Max(0.f, CVar_SpaceRepGraph_ShipFarNetHz.GetValueOnAnyThread());
 
 		for (FCandidate& C : Candidates)
 		{
@@ -1646,9 +1623,10 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 
 			const float DistSq = FVector::DistSquared(ViewLoc, TargetLoc);
 			const bool bInAlwaysZone = (AlwaysInclSqUU > 0.f) && (DistSq <= AlwaysInclSqUU);
+			const bool bInDropGuard  = (DropGuardSqUU  > 0.f) && (DistSq <= DropGuardSqUU);
 
 			bool bPassHyst = false;
-			if (bWarmup || bInAlwaysZone || PinnedActors.Contains(C.Actor))
+			if (bWarmup || bInAlwaysZone || bInDropGuard || PinnedActors.Contains(C.Actor))
 			{
 				bPassHyst = (C.Score > 0.f);
 			}
@@ -1661,8 +1639,8 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				continue;
 
 			const bool bBudgetWouldOverflow = (UsedBytes + CostWithHeader > BudgetBytes);
-			const bool bPinned = PinnedActors.Contains(C.Actor);
-			const bool bForceNear = bInAlwaysZone; // force include within AlwaysInclude bubble
+			const bool bPinned = PinnedActors.Contains(C.Actor) || bInDropGuard;
+			const bool bForceNear = bInAlwaysZone || bInDropGuard; // force include within drop guard/always bubble
 
 			if (bBudgetWouldOverflow && !(bPinned || bForceNear))
 				continue;
@@ -1678,6 +1656,31 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 			if (bPinned)
 			{
 				++NumPinnedSelected;
+			}
+
+			// Boost NetUpdateFrequency for nearby/pinned ships; downgrade for others to smooth close combat.
+			if (AShipPawn* Ship = Cast<AShipPawn>(C.Actor.Get()))
+			{
+				const float DesiredHz = (bPinned || bForceNear) ? NearNetHz : FarNetHz;
+				if (DesiredHz > 0.f)
+				{
+					// Never drop below the actor's defaults; aggressive downscale made some ships starve and stutter.
+					const AShipPawn* Defaults   = Ship->GetClass()->GetDefaultObject<AShipPawn>();
+					const float BaseHz          = Defaults ? Defaults->NetUpdateFrequency    : Ship->NetUpdateFrequency;
+					const float BaseMinHz       = Defaults ? Defaults->MinNetUpdateFrequency : Ship->MinNetUpdateFrequency;
+					const float TargetHz        = FMath::Max(DesiredHz, BaseHz);
+					const float TargetMinHz     = FMath::Max(DesiredHz, BaseMinHz);
+
+					const bool bNeedsUpdate =
+						!FMath::IsNearlyEqual(Ship->NetUpdateFrequency,    TargetHz,    0.1f) ||
+						!FMath::IsNearlyEqual(Ship->MinNetUpdateFrequency, TargetMinHz, 0.1f);
+
+					if (bNeedsUpdate)
+					{
+						Ship->NetUpdateFrequency    = TargetHz;
+						Ship->MinNetUpdateFrequency = TargetMinHz;
+					}
+				}
 			}
 
 			if (FActorEMA* Stat = CS.ActorStats.Find(C.Actor.Get()))
@@ -1729,13 +1732,16 @@ bool USpaceReplicationGraph::LiveLog_Tick(float DeltaTime)
 				const bool bBeingDestroyed= A && (A->IsActorBeingDestroyed() || A->IsPendingKillPending());
 				const bool bStillSelected = NowSelected.Contains(Prev);
 				const bool bPinned        = PinnedActors.Contains(Prev);
+				const bool bInDropGuard   = (!bNull && DropGuardSqUU > 0.f)
+					? (FVector::DistSquared(ViewLoc, A->GetActorLocation()) <= DropGuardSqUU)
+					: false;
 				FActorEMA* AStat          = CS.ActorStats.Find(A);
 				const bool bHoldActive    = (!bStillSelected && HoldSeconds > 0.f && bValid && AStat)
 					? ((NowWall - AStat->LastSelectedWall) < HoldSeconds)
 					: false;
 
 				// Keep pinned/held actors alive even if budget rejected them this tick.
-				if (!bStillSelected && (bPinned || bHoldActive) && bValid && !bBeingDestroyed)
+				if (!bStillSelected && (bPinned || bHoldActive || bInDropGuard) && bValid && !bBeingDestroyed)
 				{
 					NowSelected.Add(Prev);
 					continue;

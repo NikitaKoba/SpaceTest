@@ -6,9 +6,9 @@
 ALaserBolt::ALaserBolt()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	bReplicates        = true;
+	bReplicates        = false;
 	bAlwaysRelevant    = true;  // РєСЂРѕС€РµС‡РЅС‹Р№ РІРёР·СѓР°Р», Р»СѓС‡С€Рµ СЃСЂР°Р·Сѓ РІСЃРµРј
-	SetReplicateMovement(true);
+	SetReplicateMovement(false);
 	bNetUseOwnerRelevancy = false;
 	NetUpdateFrequency = 120.f;
 	MinNetUpdateFrequency = 60.f;
