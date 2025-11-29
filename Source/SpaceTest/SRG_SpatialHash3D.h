@@ -179,13 +179,15 @@ public:
 		QuerySphere(Center, MaxRadiusUU, Out);
 		if (Out.Num() <= K || K <= 0) return;
 
-		Out.Sort([&](const AActor& L, const AActor& R)
+		Out.Sort([&Center](const AActor& L, const AActor& R)
 		{
 			return FVector::DistSquared(L.GetActorLocation(), Center) <
-			       FVector::DistSquared(R.GetActorLocation(), Center);
+				   FVector::DistSquared(R.GetActorLocation(), Center);
 		});
-		Out.SetNum(K, /*bAllowShrinking=*/false);
+
+		Out.SetNum(K, EAllowShrinking::No);
 	}
+
 
 	/** Убрать все невалидные ссылки (полезно после массовых удалений) */
 	void RemoveInvalids()
@@ -357,4 +359,3 @@ private:
 	}
 
 };
-
