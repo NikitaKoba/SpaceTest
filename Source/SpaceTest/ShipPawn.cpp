@@ -18,6 +18,7 @@
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/App.h"
+#include "SpaceSquadSubsystem.h"
 
 static FORCEINLINE float Clamp01(float v){ return FMath::Clamp(v, 0.f, 1.f); }
 
@@ -163,6 +164,23 @@ void AShipPawn::BeginPlay()
 		Shield  = FMath::Max(0.f, MaxShield);
 	}
 
+	// Register AI ships into squad subsystem on the server.
+	if (HasAuthority() && !IsPlayerControlled())
+	{
+		if (FindComponentByClass<UShipAIPilotComponent>())
+		{
+			if (UWorld* World = GetWorld())
+			{
+				if (USpaceSquadSubsystem* Squad = World->GetSubsystem<USpaceSquadSubsystem>())
+				{
+					SquadId = Squad->RegisterShip(this);
+					AShipPawn* Leader = Squad->GetSquadLeader(this);
+					bIsSquadLeader = (Leader == this);
+				}
+			}
+		}
+	}
+
 	// --- 1. ÐÐ° ÑÐµÑ€Ð²ÐµÑ€Ðµ ÐžÐ”Ð˜Ð Ð ÐÐ— ÑÑ‡Ð¸Ñ‚Ð°ÐµÐ¼ GlobalPos Ð¸Ð· Ñ‚ÐµÐºÑƒÑ‰Ð¸Ñ… world-ÐºÐ¾Ð¾Ñ€Ð´Ð¸Ð½Ð°Ñ‚ ---
 	if (HasAuthority())
 	{
@@ -222,6 +240,22 @@ void AShipPawn::BeginPlay()
 	bHyperDrivePrev = bHyperDriveActive;
 	RequestCameraResync();
 	CameraResyncFrames = 3;
+}
+
+void AShipPawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (HasAuthority())
+	{
+		if (UWorld* World = GetWorld())
+		{
+			if (USpaceSquadSubsystem* Squad = World->GetSubsystem<USpaceSquadSubsystem>())
+			{
+				Squad->UnregisterShip(this);
+			}
+		}
+	}
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void AShipPawn::PossessedBy(AController* NewController)
@@ -955,11 +989,53 @@ void AShipPawn::OnRep_Team()
 {
 }
 
+AActor* AShipPawn::GetRecentHitFrom(float MaxAgeSeconds) const
+{
+	if (!LastHitFrom.IsValid() || MaxAgeSeconds <= 0.f)
+	{
+		return nullptr;
+	}
+
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	const float Age = World->GetTimeSeconds() - LastHitTime;
+	return (Age <= MaxAgeSeconds) ? LastHitFrom.Get() : nullptr;
+}
+
+void AShipPawn::MarkHitFrom(AActor* DamageCauser)
+{
+	if (!DamageCauser)
+	{
+		return;
+	}
+
+	LastHitFrom = DamageCauser;
+	if (UWorld* World = GetWorld())
+	{
+		LastHitTime = World->GetTimeSeconds();
+	}
+}
+
 void AShipPawn::ApplyDamage(float Amount, AActor* DamageCauser)
 {
 	if (!HasAuthority() || Amount <= 0.f || !IsAlive())
 	{
 		return;
+	}
+
+	if (DamageCauser)
+	{
+		if (AShipPawn* AttackerShip = Cast<AShipPawn>(DamageCauser))
+		{
+			if (AttackerShip != this && AttackerShip->GetTeamId() != TeamId)
+			{
+				MarkHitFrom(DamageCauser);
+			}
+		}
 	}
 
 	float Remaining = Amount;

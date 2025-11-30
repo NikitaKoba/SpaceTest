@@ -293,6 +293,8 @@ public:
 	/** Сколько секунд держим tail-chase, даже если геометрия слегка ломается (гистерезис). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="0.0", ClampMax="5.0"))
 	float TailLockStickyTime = 1.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Squad", meta=(ClampMin="0.1", ClampMax="5.0"))
+	float RecentHitMemorySeconds = 1.5f;
 	
 protected:
 	TWeakObjectPtr<UFlightComponent>   Flight;
@@ -306,6 +308,7 @@ protected:
 	float          CloseRangeStall       = 0.f;
 	float          ExtendStateTimeLeft   = 0.f;
 	FVector        ExtendDirWorld        = FVector::ZeroVector;
+	TWeakObjectPtr<AActor> TailSlotTarget;
 
 	void TryBindComponents();
 	void UpdateAI(float Dt);

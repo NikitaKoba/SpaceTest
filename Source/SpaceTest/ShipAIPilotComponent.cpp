@@ -5,6 +5,7 @@
 #include "ShipPawn.h"
 #include "ShipPawn.h"
 #include "ShipLaserComponent.h"
+#include "SpaceSquadSubsystem.h"
 #include "Components/PrimitiveComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Controller.h"
@@ -108,14 +109,32 @@ void UShipAIPilotComponent::TickComponent(
 void UShipAIPilotComponent::UpdateAI_Follow(float Dt, AActor* Target)
 {
     bWantsToFireLaser     = false;
-    LaserAimWorldLocation = FVector::ZeroVector;
+	LaserAimWorldLocation = FVector::ZeroVector;
 
-    AActor* Ow = GetOwner();
-    if (!Ow || !Target || !Flight.IsValid() || !Body.IsValid())
-    {
-        ApplyIdleInput();
-        return;
-    }
+	AActor* Ow = GetOwner();
+	if (!Ow || !Target || !Flight.IsValid() || !Body.IsValid())
+	{
+		if (TailSlotTarget.IsValid())
+		{
+			if (USpaceSquadSubsystem* Squad = (Ow && Ow->HasAuthority() && Ow->GetWorld())
+				? Ow->GetWorld()->GetSubsystem<USpaceSquadSubsystem>()
+				: nullptr)
+			{
+				if (AShipPawn* ShipPawn = Cast<AShipPawn>(Ow))
+				{
+					Squad->ReleaseTailSlot(ShipPawn, TailSlotTarget.Get());
+				}
+			}
+			TailSlotTarget.Reset();
+		}
+		ApplyIdleInput();
+		return;
+	}
+
+	USpaceSquadSubsystem* SquadSubsystem = (Ow->HasAuthority() && Ow->GetWorld())
+		? Ow->GetWorld()->GetSubsystem<USpaceSquadSubsystem>()
+		: nullptr;
+	AShipPawn* SelfShip = Cast<AShipPawn>(Ow);
     TickDogfightStyle(Dt);
 
     const FTransform TM   = Body->GetComponentTransform();
@@ -129,9 +148,9 @@ void UShipAIPilotComponent::UpdateAI_Follow(float Dt, AActor* Target)
     const FVector TgtRightW = Target->GetActorRightVector();
 
     bool bIsHeavyShip = false;
-    if (AShipPawn* Ship = Cast<AShipPawn>(Ow))
+    if (SelfShip)
     {
-        bIsHeavyShip = (Ship->ShipRole == EShipRole::Corvette);
+        bIsHeavyShip = (SelfShip->ShipRole == EShipRole::Corvette);
     }
 
     // Desired anchor relative to the target (understands above/below/side).
@@ -142,6 +161,38 @@ void UShipAIPilotComponent::UpdateAI_Follow(float Dt, AActor* Target)
     {
         AnchorPos += TgtRightW * HeavyLateralOffsetCm;
     }
+	// Squad-level lateral spread so wingmen do not stack on the same anchor.
+	if (SquadSubsystem && SelfShip)
+	{
+		const int32 SquadId = SquadSubsystem->GetSquadIdForShip(SelfShip);
+		if (SquadId != INDEX_NONE)
+		{
+			const TArray<TWeakObjectPtr<AShipPawn>>* Members = SquadSubsystem->GetSquadMembers(SquadId);
+			if (Members)
+			{
+				TArray<AShipPawn*> ValidMembers;
+				ValidMembers.Reserve(Members->Num());
+				for (const TWeakObjectPtr<AShipPawn>& Ptr : *Members)
+				{
+					AShipPawn* MemberShip = Ptr.Get();
+					if (MemberShip && MemberShip->IsAlive())
+					{
+						ValidMembers.Add(MemberShip);
+					}
+				}
+
+				const int32 ActiveCount = ValidMembers.Num();
+				const int32 SquadIndex = ValidMembers.IndexOfByKey(SelfShip);
+
+				if (ActiveCount > 1 && SquadIndex != INDEX_NONE && SquadIndex < ActiveCount)
+				{
+					const float FormationSpacing = 1800.f; // cm
+					const float Offset = (SquadIndex - (ActiveCount - 1) * 0.5f) * FormationSpacing;
+					AnchorPos += TgtRightW * Offset;
+				}
+			}
+		}
+	}
 
     FVector ToAnchorW = AnchorPos - SelfPos;
     const float DistToAnchor = ToAnchorW.Size();
@@ -335,15 +386,34 @@ void UShipAIPilotComponent::UpdateAI_Follow(float Dt, AActor* Target)
 
 void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 {
-    bWantsToFireLaser     = false;
-    LaserAimWorldLocation = FVector::ZeroVector;
+	bWantsToFireLaser     = false;
+	LaserAimWorldLocation = FVector::ZeroVector;
 
-    AActor* Ow = GetOwner();
-    if (!Ow || !Target || !Flight.IsValid() || !Body.IsValid())
-    {
-        ApplyIdleInput();
-        return;
-    }
+	AActor* Ow = GetOwner();
+	if (!Ow || !Target || !Flight.IsValid() || !Body.IsValid())
+	{
+		if (TailSlotTarget.IsValid())
+		{
+			if (USpaceSquadSubsystem* Squad = (Ow && Ow->HasAuthority() && Ow->GetWorld())
+				? Ow->GetWorld()->GetSubsystem<USpaceSquadSubsystem>()
+				: nullptr)
+			{
+				if (AShipPawn* ShipPawn = Cast<AShipPawn>(Ow))
+				{
+					Squad->ReleaseTailSlot(ShipPawn, TailSlotTarget.Get());
+				}
+			}
+			TailSlotTarget.Reset();
+		}
+		ApplyIdleInput();
+		return;
+	}
+
+	USpaceSquadSubsystem* SquadSubsystem = (Ow->HasAuthority() && Ow->GetWorld())
+		? Ow->GetWorld()->GetSubsystem<USpaceSquadSubsystem>()
+		: nullptr;
+
+	AShipPawn* SelfShip = Cast<AShipPawn>(Ow);
 
     // Обновляем стиль боя (но будем сильно резать его, когда сядем на хвост)
     TickDogfightStyle(Dt);
@@ -355,13 +425,18 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     const FVector   UpW     = TM.GetUnitAxis(EAxis::Z);
 
     const FVector TgtPos    = Target->GetActorLocation();
-    FVector       ToTargetW = TgtPos - SelfPos;
-    const float   Dist      = ToTargetW.Size();
-    if (Dist < KINDA_SMALL_NUMBER)
-    {
-        ApplyIdleInput();
-        return;
-    }
+	FVector       ToTargetW = TgtPos - SelfPos;
+	const float   Dist      = ToTargetW.Size();
+	if (Dist < KINDA_SMALL_NUMBER)
+	{
+		if (SquadSubsystem && TailSlotTarget.IsValid() && SelfShip)
+		{
+			SquadSubsystem->ReleaseTailSlot(SelfShip, TailSlotTarget.Get());
+			TailSlotTarget.Reset();
+		}
+		ApplyIdleInput();
+		return;
+	}
 
     const FVector DirToTargetW = ToTargetW / Dist;
     const FVector TgtFwdW      = Target->GetActorForwardVector();
@@ -372,13 +447,18 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         bAimDirInit  = true;
     }
 
-    const AShipPawn* SelfShip = Cast<AShipPawn>(Ow);
     const int32 SelfTeam = SelfShip ? SelfShip->GetTeamId() : INDEX_NONE;
 
     bool bIsHeavyShip = false;
     if (SelfShip)
     {
         bIsHeavyShip = (SelfShip->ShipRole == EShipRole::Corvette);
+    }
+
+    if (SquadSubsystem && TailSlotTarget.IsValid() && TailSlotTarget.Get() != Target)
+    {
+        SquadSubsystem->ReleaseTailSlot(SelfShip, TailSlotTarget.Get());
+        TailSlotTarget.Reset();
     }
 
     // --- Дистанции в метрах ---
@@ -614,6 +694,34 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     if (TailLockStickyTimer > 0.f && !bHeadOnDanger)
     {
         Mode = EAttackMode::TailChase;
+    }
+
+    const bool bWantsTailChase = (Mode == EAttackMode::TailChase);
+    if (SquadSubsystem && SelfShip)
+    {
+        if (bWantsTailChase)
+        {
+            if (!TailSlotTarget.IsValid())
+            {
+                if (!SquadSubsystem->TryAcquireTailSlot(SelfShip, Target))
+                {
+                    Mode = EAttackMode::AggressivePursuit; // fallback if tail slots are saturated
+                }
+                else
+                {
+                    TailSlotTarget = Target;
+                }
+            }
+        }
+        else if (TailSlotTarget.IsValid())
+        {
+            SquadSubsystem->ReleaseTailSlot(SelfShip, TailSlotTarget.Get());
+            TailSlotTarget.Reset();
+        }
+    }
+    else if (!SquadSubsystem && TailSlotTarget.IsValid())
+    {
+        TailSlotTarget.Reset();
     }
 
     // --- Управляющие величины ---
@@ -937,45 +1045,53 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     AxisUp     += styleUpBias;
     AxisF      += styleForwardBias;
 
-    // --- Simple flock separation so bots do not pile up in one spot ---
+    // --- Squad-local separation so wingmen avoid clumping ---
     {
         const float SepRadius = 8000.f;           // 80 m
         const float SepRadiusSq = SepRadius * SepRadius;
-        const float SepScale = 0.35f;
+        const float SepScale = 0.4f;
 
-        UWorld* World = Ow ? Ow->GetWorld() : nullptr;
-        if (World)
+        if (SquadSubsystem && SelfShip)
         {
-            FVector Push = FVector::ZeroVector;
-            for (TActorIterator<AShipPawn> It(World); It; ++It)
+            const int32 SquadId = SquadSubsystem->GetSquadIdForShip(SelfShip);
+            const TArray<TWeakObjectPtr<AShipPawn>>* Members = SquadSubsystem->GetSquadMembers(SquadId);
+            if (Members)
             {
-                AShipPawn* Other = *It;
-                if (!Other || Other == Ow) continue;
-
-                // Only separate from same-team ships; collisions with enemies are fine.
-                if (SelfTeam != INDEX_NONE && Other->GetTeamId() != SelfTeam)
+                TArray<AShipPawn*> ValidMembers;
+                ValidMembers.Reserve(Members->Num());
+                for (const TWeakObjectPtr<AShipPawn>& Ptr : *Members)
                 {
-                    continue;
+                    AShipPawn* Other = Ptr.Get();
+                    if (Other && Other->IsAlive())
+                    {
+                        ValidMembers.Add(Other);
+                    }
                 }
 
-                const FVector Diff = SelfPos - Other->GetActorLocation();
-                const float DistSq = Diff.SizeSquared();
-                if (DistSq < KINDA_SMALL_NUMBER || DistSq > SepRadiusSq)
+                FVector Push = FVector::ZeroVector;
+                for (AShipPawn* Other : ValidMembers)
                 {
-                    continue;
+                    if (!Other || Other == Ow) continue;
+
+                    const FVector Diff = SelfPos - Other->GetActorLocation();
+                    const float DistSq = Diff.SizeSquared();
+                    if (DistSq < KINDA_SMALL_NUMBER || DistSq > SepRadiusSq)
+                    {
+                        continue;
+                    }
+
+                    // Stronger push when very close.
+                    Push += Diff.GetSafeNormal() * (SepRadiusSq - DistSq) / SepRadiusSq;
                 }
 
-                // Stronger push when very close.
-                Push += Diff.GetSafeNormal() * (SepRadiusSq - DistSq) / SepRadiusSq;
+                const float PushRight = FVector::DotProduct(Push, RightW);
+                const float PushUp    = FVector::DotProduct(Push, UpW);
+                const float PushFwd   = FVector::DotProduct(Push, FwdW);
+
+                AxisStrafe += FMath::Clamp(PushRight * SepScale, -MaxStrafe, MaxStrafe);
+                AxisUp     += FMath::Clamp(PushUp    * SepScale, -MaxUp,     MaxUp);
+                AxisF      += FMath::Clamp(PushFwd   * SepScale * 0.35f, -0.6f, 0.0f);
             }
-
-            const float PushRight = FVector::DotProduct(Push, RightW);
-            const float PushUp    = FVector::DotProduct(Push, UpW);
-            const float PushFwd   = FVector::DotProduct(Push, FwdW);
-
-            AxisStrafe += FMath::Clamp(PushRight * SepScale, -MaxStrafe, MaxStrafe);
-            AxisUp     += FMath::Clamp(PushUp    * SepScale, -MaxUp,     MaxUp);
-            AxisF      += FMath::Clamp(PushFwd   * SepScale * 0.25f, -0.5f, 0.0f); // back off a bit if we are inside a blob
         }
     }
 
@@ -1221,17 +1337,85 @@ void UShipAIPilotComponent::TryBindComponents()
 
 AActor* UShipAIPilotComponent::ResolveTarget()
 {
-	if (TargetActor.IsValid())
+	AActor* Ow = GetOwner();
+	UWorld* World = GetWorld();
+	AShipPawn* Ship = Cast<AShipPawn>(Ow);
+	USpaceSquadSubsystem* Squad = (Ow && Ow->HasAuthority() && World)
+		? World->GetSubsystem<USpaceSquadSubsystem>()
+		: nullptr;
+
+	AActor* SquadTarget = nullptr;
+	AActor* RecentThreat = nullptr;
+
+	if (Ship && RecentHitMemorySeconds > 0.f)
 	{
-		return TargetActor.Get();
+		RecentThreat = Ship->GetRecentHitFrom(RecentHitMemorySeconds);
 	}
 
-	if (bAutoAcquireEnemies || bAutoAcquirePlayer)
+	if (Squad && Ship)
 	{
-		TargetActor = FindBestEnemyShip();
+		const int32 SquadId = Squad->GetSquadIdForShip(Ship);
+		if (SquadId != INDEX_NONE)
+		{
+			AShipPawn* LeaderShip = Squad->GetSquadLeader(Ship);
+			Ship->bIsSquadLeader = (LeaderShip == Ship);
+			Ship->SquadId = SquadId;
+
+			if (Ship->bIsSquadLeader)
+			{
+				SquadTarget = Squad->GetSquadTarget(SquadId);
+				if (!SquadTarget || (RecentThreat && RecentThreat != SquadTarget))
+				{
+					AActor* NewTarget = RecentThreat ? RecentThreat : FindBestEnemyShip();
+					if (NewTarget)
+					{
+						Squad->SetSquadTarget(SquadId, NewTarget);
+						SquadTarget = NewTarget;
+					}
+				}
+			}
+			else
+			{
+				SquadTarget = Squad->GetSquadTarget(SquadId);
+				if (RecentThreat && RecentThreat != SquadTarget)
+				{
+					SquadTarget = RecentThreat;
+				}
+			}
+		}
+	}
+	else if (Ship)
+	{
+		Ship->SquadId = INDEX_NONE;
+		Ship->bIsSquadLeader = false;
 	}
 
-	return TargetActor.Get();
+	AActor* FinalTarget = nullptr;
+
+	if (SquadTarget)
+	{
+		FinalTarget = SquadTarget;
+	}
+	else if (RecentThreat)
+	{
+		FinalTarget = RecentThreat;
+	}
+	else if (TargetActor.IsValid())
+	{
+		FinalTarget = TargetActor.Get();
+	}
+	else if (bAutoAcquireEnemies || bAutoAcquirePlayer)
+	{
+		FinalTarget = FindBestEnemyShip();
+	}
+
+	if (FinalTarget && FinalTarget->IsActorBeingDestroyed())
+	{
+		FinalTarget = nullptr;
+	}
+
+	TargetActor = FinalTarget;
+	return FinalTarget;
 }
 
 AActor* UShipAIPilotComponent::FindBestEnemyShip()
@@ -1320,6 +1504,23 @@ void UShipAIPilotComponent::UpdateAI(float Dt)
 	// Только выбираем, какую директиву вызвать.
 
 	AActor* Target = ResolveTarget();
+
+	if (!bAttackMode && TailSlotTarget.IsValid())
+	{
+		if (AActor* Ow = GetOwner())
+		{
+			if (USpaceSquadSubsystem* Squad = (Ow->HasAuthority() && Ow->GetWorld())
+				? Ow->GetWorld()->GetSubsystem<USpaceSquadSubsystem>()
+				: nullptr)
+			{
+				if (AShipPawn* ShipPawn = Cast<AShipPawn>(Ow))
+				{
+					Squad->ReleaseTailSlot(ShipPawn, TailSlotTarget.Get());
+				}
+			}
+		}
+		TailSlotTarget.Reset();
+	}
 
 	if (bAttackMode)
 	{

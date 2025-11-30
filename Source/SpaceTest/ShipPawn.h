@@ -128,6 +128,14 @@ public:
 	float Shield = 100.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing=OnRep_Team, Category="Ship|Team")
 	int32 TeamId = 0;
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Ship|Squad")
+	int32 SquadId = INDEX_NONE;
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Ship|Squad")
+	bool bIsSquadLeader = false;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship|Combat")
+	TWeakObjectPtr<AActor> LastHitFrom;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship|Combat")
+	float LastHitTime = -1000.f;
 public:
 	UFUNCTION(BlueprintCallable, Category="Flight|Hyper")
 	void SetHyperDriveActive(bool bActive);
@@ -139,6 +147,8 @@ public:
 	void ApplyDamage(float Amount, AActor* DamageCauser);
 	UFUNCTION(BlueprintPure, Category="Ship|Health")
 	bool IsAlive() const { return Health > 0.f; }
+	AActor* GetRecentHitFrom(float MaxAgeSeconds) const;
+	void    MarkHitFrom(AActor* DamageCauser);
 	UFUNCTION(BlueprintCallable, Category="Ship|Shield")
 	void ResetShield();
 	UFUNCTION(BlueprintPure, Category="Ship|Team")
@@ -195,6 +205,7 @@ public:
 
 	// APawn
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 	void UpdateGlobalPosIncremental(float DeltaSeconds);
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
