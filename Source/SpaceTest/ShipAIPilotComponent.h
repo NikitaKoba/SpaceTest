@@ -15,6 +15,15 @@ enum class EDogfightStyle : uint8
 	BoomAndZoom UMETA(DisplayName="Boom & Zoom")
 };
 UENUM()
+enum class ECombatFlavor : uint8
+{
+	Hunter,       // �?�?�?�?�?�� ���?��?�>��?�?�?���'��>�?
+	LineBreaker,  // �?�?�?�?�? �?�?�?�?�?�?�? �?�?�?�?�?�? ���?�?�?
+	Flanker,      // �?�?����?�?��>�?��� �?�?�?�?���?�?
+	Anchor,       // ��������>�?�? �?�?�?�?� �?�?�?�?�?
+	Skirmisher    // �?�?�?�?�?�?�? �?�?�?�?� �?��?�?��?�?�?�?
+};
+UENUM()
 enum class ESquadBehavior : uint8
 {
 	None,           // не участвуем в эскадрильях
@@ -187,6 +196,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Strategy", meta=(ClampMin="1.0", ClampMax="20.0"))
 	float StrategyMaxHoldTime = 7.f;
 
+	/** �?�?�?�?�?�?�? ���?�?�?�? �?�?�?�?� �?�?�?��?�?�? (��������>�?�?) �?�? �?�?�?�?�?�?�?�? */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Strategy", meta=(ClampMin="0.5", ClampMax="4.0"))
+	float SniperDistanceFactor = 1.8f;
+
+	/** Clamp forward thrust while in sniper/anchor hold so the ship can almost hover. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Strategy", meta=(ClampMin="0.05", ClampMax="1.0"))
+	float SniperMaxForwardClamp = 0.35f;
+
+	/** ��������?�� �?�?�?�?���?�?�?�?� �?�?' OrbitBreak, ��?�?�?�?�����< �?�?�?�?�?�?�?�? */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Strategy", meta=(ClampMin="0.1", ClampMax="8.0"))
+	float OrbitSplitReplanTime = 2.2f;
+
+	/** ���?�?�?�?�? �?�?�?�?�?�?�?�? �?��?�?��?�?�?�? �?�?��?�?�?���?�? (�?�?�?) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Strategy", meta=(ClampMin="0.5", ClampMax="4.0"))
+	float FlankHookDistanceFactor = 1.4f;
+
 	/** Lateral offset used while dodging head-on merges (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Strategy", meta=(ClampMin="100.0", ClampMax="6000.0"))
 	float MergeDodgeLateralCm = 2600.f;
@@ -317,7 +342,7 @@ public:
 	void OnSquadCleared();
 	UPROPERTY()
 	bool bUseSquadStyle = false;
-
+	double LastTargetResolveTime = -1.0;
 	UPROPERTY()
 	EDogfightStyle SquadStyle = EDogfightStyle::Pursuit;
 	void SetupSquadTactics(EDogfightStyle InStyle, bool bInAnchorShooter);
@@ -342,6 +367,9 @@ protected:
 	bool           bAimDirInit          = false;
 	float          TailLockStickyTimer  = 0.f;
 	EDogfightStyle CurrentDogfightStyle = EDogfightStyle::Pursuit;
+	UPROPERTY(VisibleInstanceOnly, Category="AI|Strategy")
+	ECombatFlavor  PersonalFlavor       = ECombatFlavor::Hunter;
+	bool           bFlavorInitialized   = false;
 	float          DogfightStyleTimeLeft = 0.f;
 	float          CurrentOrbitSign      = 1.f;
 	float          CloseRangeStall       = 0.f;
@@ -352,6 +380,7 @@ protected:
 	void UpdateAI(float Dt);
 	void TickDogfightStyle(float Dt);
 	void SelectNewDogfightStyle();
+	void InitCombatFlavor();
 
 	AActor* ResolveTarget();
 	AActor* FindBestEnemyShip();

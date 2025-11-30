@@ -303,10 +303,80 @@ void UShipAISquadronSubsystem::SetSquadTargetForLeader(AShipPawn* Leader, AActor
     const float Now = World->GetTimeSeconds();
     if (Now - Sq.LastRetargetTime < RetargetCooldown && Sq.CurrentTarget.IsValid())
     {
-        // не дёргаем цель слишком часто
+        // ???????? ???? ??? ?????????
         return;
     }
 
-    Sq.CurrentTarget  = Target;
+    TSet<AActor*> ClaimedTargets;
+    TArray<FVector> ClaimedLocations;
+    for (const FSquadron& Other : Squadrons)
+    {
+        if (&Other == &Sq) continue;
+        if (AActor* OtherTgt = Other.CurrentTarget.Get())
+        {
+            ClaimedTargets.Add(OtherTgt);
+            ClaimedLocations.Add(OtherTgt->GetActorLocation());
+        }
+    }
+
+    const float SpacingSq = SquadTargetSpacing * SquadTargetSpacing;
+    const FVector LeaderLoc = Leader->GetActorLocation();
+
+    struct FTargetCandidate
+    {
+        AShipPawn* Ship = nullptr;
+        float DistSq = 0.f;
+    };
+
+    TArray<FTargetCandidate> Candidates;
+    for (TActorIterator<AShipPawn> It(World); It; ++It)
+    {
+        AShipPawn* Ship = *It;
+        if (!Ship || Ship->GetTeamId() == Leader->GetTeamId()) continue;
+        FTargetCandidate C;
+        C.Ship   = Ship;
+        C.DistSq = FVector::DistSquared(LeaderLoc, Ship->GetActorLocation());
+        Candidates.Add(C);
+    }
+
+    Candidates.Sort([](const FTargetCandidate& A, const FTargetCandidate& B)
+    {
+        return A.DistSq < B.DistSq;
+    });
+
+    auto IsSpacedFromOthers = [&](const FVector& Loc) -> bool
+    {
+        for (const FVector& OtherLoc : ClaimedLocations)
+        {
+            if (FVector::DistSquared(Loc, OtherLoc) < SpacingSq)
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    AActor* Chosen = Target;
+
+    for (const FTargetCandidate& C : Candidates)
+    {
+        if (!C.Ship) continue;
+        if (ClaimedTargets.Contains(C.Ship))
+        {
+            continue;
+        }
+
+        const FVector Loc = C.Ship->GetActorLocation();
+        if (!IsSpacedFromOthers(Loc))
+        {
+            continue;
+        }
+
+        Chosen = C.Ship;
+        break;
+    }
+
+    Sq.CurrentTarget   = Chosen;
     Sq.LastRetargetTime = Now;
 }
+
