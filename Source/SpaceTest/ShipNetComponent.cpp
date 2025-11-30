@@ -29,7 +29,7 @@ static TAutoConsoleVariable<float> CVar_ShipNet_InterpAheadMax(
 	TEXT("Clamp extrapolation when past latest snap (seconds)"));
 
 static TAutoConsoleVariable<float> CVar_ShipNet_InterpDelayOverride(
-	TEXT("ship.Net.InterpDelayOverride"), 0.12f,
+	TEXT("ship.Net.InterpDelayOverride"), 0.06f,
 	TEXT("Override NetInterpDelay (seconds). Negative = use component value/EMA"));
 
 static TAutoConsoleVariable<float> CVar_ShipNet_InterpLeadSeconds(
@@ -609,72 +609,104 @@ FQuat UShipNetComponent::IntegrateQuat(const FQuat& Q0, const FVector& Wrad, flo
 
 void UShipNetComponent::DriveSimulatedProxy()
 {
-	if (!Ship || !ShipMesh || NetBuffer.Num()==0 || !bHaveTimeSync || !GetWorld()) return;
+	if (!Ship || !ShipMesh || NetBuffer.Num() == 0 || !bHaveTimeSync || !GetWorld())
+		return;
 
 	const double Now = GetWorld()->GetTimeSeconds();
-	const float DelayOverride = CVar_ShipNet_InterpDelayOverride.GetValueOnAnyThread();
-	const double EffectiveDelay = (DelayOverride >= 0.f) ? (double)DelayOverride : (double)NetInterpDelay;
-	const double Tq  = Now - EffectiveDelay;
+
+	// 1) Базовая задержка интерполяции (override или адаптивная)
+	const float  DelayOverride   = CVar_ShipNet_InterpDelayOverride.GetValueOnAnyThread();
+	const double EffectiveDelay  = (DelayOverride >= 0.f)
+		? (double)DelayOverride
+		: (double)NetInterpDelay;
+
+	// 2) Наш небольшой "lead" вперёд, чтобы меньше визуально отставать от сервера
+	const float  LeadSecondsRaw  = CVar_ShipNet_InterpLeadSeconds.GetValueOnAnyThread();
+	const float  LeadSeconds     = FMath::Max(0.f, LeadSecondsRaw); // на всякий пожарный, без отрицательных
+	const double Tq              = Now - EffectiveDelay + (double)LeadSeconds;
 
 	if (CVar_ShipNet_UseInterp.GetValueOnAnyThread() == 0)
 	{
 		const FInterpNode& Latest = NetBuffer.Last();
-		Ship->SetActorLocationAndRotation(Latest.Loc, Latest.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+		Ship->SetActorLocationAndRotation(
+			Latest.Loc,
+			Latest.Rot.Rotator(),
+			false, nullptr, ETeleportType::TeleportPhysics);
 		return;
 	}
 
-	// РіСЂР°РЅРёС‡РЅС‹Рµ СЃР»СѓС‡Р°Рё
-	if (NetBuffer.Num()==1 || Tq <= NetBuffer[0].Time)
+	// граничные случаи
+	if (NetBuffer.Num() == 1 || Tq <= NetBuffer[0].Time)
 	{
 		const auto& N = NetBuffer[0];
-		Ship->SetActorLocationAndRotation(N.Loc, N.Rot.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+		Ship->SetActorLocationAndRotation(
+			N.Loc,
+			N.Rot.Rotator(),
+			false, nullptr, ETeleportType::TeleportPhysics);
 		return;
 	}
+
 	if (Tq >= NetBuffer.Last().Time)
 	{
-		// РєРѕСЂРѕС‚РєР°СЏ СЌРєСЃС‚СЂР°РїРѕР»СЏС†РёСЏ в‰¤ ~100 РјСЃ РЅР° РѕСЃРЅРѕРІРµ СЃРєРѕСЂРѕСЃС‚РµР№
+		// короткая экстраполяция вперёд
 		const auto& L = NetBuffer.Last();
 		const double AheadMax = (double)FMath::Max(0.f, CVar_ShipNet_InterpAheadMax.GetValueOnAnyThread());
-		const double Ahead = FMath::Clamp(Tq - L.Time, 0.0, AheadMax);
+		const double Ahead    = FMath::Clamp(Tq - L.Time, 0.0, AheadMax);
+
 		const FVector P = L.Loc + L.Vel * (float)Ahead;
 		const FQuat   Q = IntegrateQuat(L.Rot, L.AngVel, (float)Ahead);
-		Ship->SetActorLocationAndRotation(P, Q.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+
+		Ship->SetActorLocationAndRotation(
+			P,
+			Q.Rotator(),
+			false, nullptr, ETeleportType::TeleportPhysics);
 		return;
 	}
 
-	// Р±РёРЅР°СЂРЅС‹Р№ РїРѕРёСЃРє
-	int32 L=0, R=NetBuffer.Num()-1;
-	while (L+1<R)
+	// бинарный поиск по времени
+	int32 LIdx = 0, RIdx = NetBuffer.Num() - 1;
+	while (LIdx + 1 < RIdx)
 	{
-		const int32 M=(L+R)/2;
-		if (NetBuffer[M].Time <= Tq) L=M; else R=M;
+		const int32 M = (LIdx + RIdx) / 2;
+		if (NetBuffer[M].Time <= Tq)
+			LIdx = M;
+		else
+			RIdx = M;
 	}
-	const auto& A = NetBuffer[L];
-	const auto& B = NetBuffer[L+1];
+
+	const auto& A = NetBuffer[LIdx];
+	const auto& B = NetBuffer[LIdx + 1];
 
 	const double dt = FMath::Max(1e-6, B.Time - A.Time);
-	const float  s  = (float)FMath::Clamp((Tq - A.Time)/dt, 0.0, 1.0);
+	const float  s  = (float)FMath::Clamp((Tq - A.Time) / dt, 0.0, 1.0);
 
-	// Hermite РїРѕ Loc/Vel
-	const float s2=s*s, s3=s2*s;
+	// Hermite по Loc/Vel
+	const float s2 = s * s;
+	const float s3 = s2 * s;
+
 	const float h00 =  2*s3 - 3*s2 + 1;
 	const float h10 =    s3 - 2*s2 + s;
 	const float h01 = -2*s3 + 3*s2;
 	const float h11 =    s3 -   s2;
 
-	const FVector P =  h00*A.Loc + h10*(A.Vel*(float)dt)
-	                 + h01*B.Loc + h11*(B.Vel*(float)dt);
+	const FVector P =
+		  h00 * A.Loc              + h10 * (A.Vel * (float)dt)
+		+ h01 * B.Loc              + h11 * (B.Vel * (float)dt);
 
-	// РћСЂРёРµРЅС‚Р°С†РёСЏ: SLERP + РєРѕСЂСЂРµРєС‚РЅС‹Р№ РёРЅС‚РµРіСЂР°Р» СѓРіР». СЃРєРѕСЂРѕСЃС‚Рё РјРµР¶РґСѓ СѓР·Р»Р°РјРё
-	// (РєРІРѕР·Рё-СЃРєРѕСЂСЂРµРєС†РёСЏ: СЌРєРІРёРІР°Р»РµРЅС‚ РґРѕР±Р°РІР»РµРЅРёСЋ "twist" РѕС‚ AngVel)
+	// Ориентация: SLERP + учёт угл. скоростей
 	FQuat QA = A.Rot;
 	FQuat QB = B.Rot;
-	const FQuat QAe = IntegrateQuat(QA, A.AngVel, (float)(s*(float)dt));       // РґРѕ С‚РѕС‡РєРё РІРЅСѓС‚СЂРё РёРЅС‚РµСЂРІР°Р»Р°
-	const FQuat QBe = IntegrateQuat(QB, -B.AngVel, (float)(((1.f-s))* (float)dt)); // РѕР±СЂР°С‚РЅР°СЏ "РїРѕРґС‚СЏР¶РєР°"
+
+	const FQuat QAe = IntegrateQuat(QA, A.AngVel, (float)(s * (float)dt));
+	const FQuat QBe = IntegrateQuat(QB, -B.AngVel, (float)((1.f - s) * (float)dt));
 	const FQuat Qs  = FQuat::Slerp(QAe, QBe, s).GetNormalized();
 
-	Ship->SetActorLocationAndRotation(P, Qs.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+	Ship->SetActorLocationAndRotation(
+		P,
+		Qs.Rotator(),
+		false, nullptr, ETeleportType::TeleportPhysics);
 }
+
 static TAutoConsoleVariable<int32> CVar_ShipNet_OwnerRecon(
 	TEXT("ship.Net.OwnerRecon"), 1, TEXT("Owner reconcile enable/disable"));
 
