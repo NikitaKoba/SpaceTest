@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "ReplicationGraph.h"
+#include "Containers/Ticker.h"
 #include "SpaceReplicationGraph.generated.h"
 
 class USRG_SpatialHash3D;
@@ -37,6 +38,7 @@ public:
 	virtual void RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo, FGlobalActorReplicationInfo& GlobalInfo) override;
 	virtual void RouteRemoveNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo) override;
 	void HandleWorldShift();
+	bool StatsTick(float DeltaTime);
 
 private:
 	UPROPERTY()
@@ -50,4 +52,14 @@ private:
 	// Наш компактный 3D spatial-хэш.
 	UPROPERTY()
 	TObjectPtr<USRG_SpatialHash3D> Spatial3D;
+
+	// Simple runtime stats
+	FTSTicker::FDelegateHandle StatsTickerHandle;
+	double LastStatsLogWall = 0.0;
+	uint64 PrevInBytes = 0;
+	uint64 PrevOutBytes = 0;
+	bool bNetBytesInit = false;
+	int32 GridDynamicCount = 0;
+	int32 GridStaticCount = 0;
+	int32 AlwaysRelevantCount = 0;
 };
