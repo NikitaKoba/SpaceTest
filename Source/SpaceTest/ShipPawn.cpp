@@ -14,6 +14,7 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "EngineUtils.h"
+#include "ShipAISquadronSubsystem.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
@@ -154,7 +155,16 @@ void AShipPawn::ApplyNetSettingsForRole(bool bPlayerControlled)
 void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
-
+	if (HasAuthority())
+	{
+		if (UShipAISquadronSubsystem* SquadSys = GetWorld()->GetSubsystem<UShipAISquadronSubsystem>())
+		{
+			if (FindComponentByClass<UShipAIPilotComponent>())
+			{
+				SquadSys->RegisterShip(this);
+			}
+		}
+	}
 	ApplyNetSettingsForRole(IsPlayerControlled());
 
 	if (HasAuthority())

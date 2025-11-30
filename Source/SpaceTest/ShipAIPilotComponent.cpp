@@ -13,6 +13,7 @@
 #include "Engine/Engine.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h" // TActorIterator
+#include "ShipAISquadronSubsystem.h"
 static TAutoConsoleVariable<int32> CVar_ShipBot_DebugOrbit(
     TEXT("ship.bot.debug.orbit"),
     0,
@@ -332,6 +333,21 @@ void UShipAIPilotComponent::UpdateAI_Follow(float Dt, AActor* Target)
 
     Flight->SetAngularRateOverride(true, PitchRateCmdDeg, YawRateCmdDeg, RollRateCmdDeg);
 }
+void UShipAIPilotComponent::OnSquadAssigned(int32 InSquadId, ESquadRole InRole, AShipPawn* InLeader)
+{
+    SquadId        = InSquadId;
+    SquadRole      = InRole;
+    SquadLeader    = InLeader;
+    bIsSquadLeader = (InRole == ESquadRole::Leader);
+}
+
+void UShipAIPilotComponent::OnSquadCleared()
+{
+    SquadId        = INDEX_NONE;
+    SquadRole      = ESquadRole::Attacker;
+    SquadLeader    = nullptr;
+    bIsSquadLeader = false;
+}
 
 void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 {
@@ -443,8 +459,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     }
 
     // --- Детектор "орбитального танца" + Break State Machine ---
-    // OrbitStuckTime > 0: накапливаем детекцию орбиты
-    // OrbitStuckTime < 0: активный break маневр + cooldown
 
     const float OrbitDetectThreshold  = 0.5f + (float(Ow->GetUniqueID() % 100) * 0.01f);  // 0.5-1.5 сек с асинхронностью
     const float OrbitBreakDuration    = 2.5f + FMath::FRandRange(0.f, 1.5f);              // 2.5-4 сек break
@@ -523,11 +537,12 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         HeadOnAvoid,
         TooCloseBreak,
         OrbitBreak,
-        StrafePass,          // НОВЫЙ: пролет мимо цели с огнем
-        AggressivePursuit,   // НОВЫЙ: прямая атака без точного наведения
-        EvasiveApproach,     // НОВЫЙ: сближение со змейкой
+        StrafePass,          // пролет мимо цели с огнем
+        AggressivePursuit,   // прямая атака без точного наведения
+        EvasiveApproach,     // сближение со змейкой
         TailChase,
-        Approach
+        Approach,
+        AnchorFire           // ЯКОРНЫЙ СТРЕЛОК: держим дистанцию и конус, мало маневрируем
     };
     EAttackMode Mode = EAttackMode::Approach;
 
@@ -563,7 +578,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     else
     {
         // === ВЫБОР СТИЛЯ АТАКИ НА ОСНОВЕ DOGFIGHT STYLE ===
-        // Больше разнообразия - не все должны делать одно и то же!
 
         const bool bMediumRange = (DistM > IdealDistM * 0.8f && DistM < IdealDistM * 2.0f);
         const bool bLongRange   = (DistM >= IdealDistM * 2.0f);
@@ -616,6 +630,21 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         Mode = EAttackMode::TailChase;
     }
 
+    // --- Якорный стрелок: переопределяем режим на AnchorFire, когда условия норм ---
+    if (bUseSquadStyle && bSquadAnchorShooter && !bHeadOnDanger && !bInActiveBreak)
+    {
+        const bool bGoodDistForAnchor =
+            (DistM > IdealDistM * 0.7f) &&
+            (DistM < AttackFireMaxDistM * 0.9f);
+
+        const bool bGoodAngleForAnchor = (selfFrontDot > 0.0f); // цель roughly спереди
+
+        if (bGoodDistForAnchor && bGoodAngleForAnchor && Mode != EAttackMode::TailChase)
+        {
+            Mode = EAttackMode::AnchorFire;
+        }
+    }
+
     // --- Управляющие величины ---
     float  AxisF      = 0.f;
     float  AxisStrafe = 0.f;
@@ -641,24 +670,23 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         break;
     case EDogfightStyle::FlankLeft:
     case EDogfightStyle::FlankRight:
-        styleStrafeBias  = orbitDir * OrbitStrafeBias * 0.3f;  // НАМНОГО меньше!
+        styleStrafeBias  = orbitDir * OrbitStrafeBias * 0.3f;  // меньше орбиты
         styleForwardBias = 0.20f;  // больше вперёд
         styleUpBias      = 0.03f;
         break;
     case EDogfightStyle::BoomAndZoom:
         styleForwardBias = 0.25f;  // больше форсаж
-        styleStrafeBias  = orbitDir * OrbitStrafeBias * 0.15f;  // меньше!
+        styleStrafeBias  = orbitDir * OrbitStrafeBias * 0.15f;
         styleUpBias      = (SelfPos.Z < TgtPos.Z + BoomZoomHeightCm) ? 0.8f : -0.4f;
         break;
     default:
         break;
     }
 
-    // Близко к цели — почти не допускаем стилистических отклонений, чтобы не уходить в орбиту
-    // Расширили диапазон подавления
+    // Близко к цели — почти не допускаем стилистических отклонений
     if (DistM < IdealDistM * 1.6f)
     {
-        styleStrafeBias  *= 0.1f;  // ещё сильнее подавляем
+        styleStrafeBias  *= 0.1f;
         styleUpBias      *= 0.1f;
         styleForwardBias *= 0.2f;
     }
@@ -716,23 +744,20 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     }
     else if (Mode == EAttackMode::OrbitBreak && TailLockStickyTimer <= 0.f)
     {
-        // Используем UniqueID для генерации "стабильной" случайности для этого бота
         const uint32 seed = Ow->GetUniqueID();
         const float dodgeSign = ((seed ^ 0x7f7f) & 1) ? 1.f : -1.f;
         const float verticalSign = ((seed ^ 0xA5A5) & 1) ? 1.f : -1.f;
         const float mixFactor = float((seed >> 8) % 100) / 100.f;  // 0.0-1.0
 
-        // Вариативные веса для разнообразия
         const float forwardWeight  = 0.5f + mixFactor * 0.3f;        // 0.5-0.8
         const float lateralWeight  = 0.3f + mixFactor * 0.2f;        // 0.3-0.5
         const float verticalWeight = 0.7f + mixFactor * 0.3f;        // 0.7-1.0
 
-        // Агрессивный 3D маневр
         FVector extendDir =
-              FwdW * forwardWeight                            // Умеренно вперед
-            - DirToTargetW * 0.2f                              // Немного от цели
-            + dodgeSign * RightW * lateralWeight               // Бок
-            + verticalSign * UpW * verticalWeight;             // Сильно вверх/вниз
+              FwdW * forwardWeight
+            - DirToTargetW * 0.2f
+            + dodgeSign * RightW * lateralWeight
+            + verticalSign * UpW * verticalWeight;
 
         if (!extendDir.Normalize())
         {
@@ -752,39 +777,28 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
     else if (Mode == EAttackMode::StrafePass)
     {
-        // STRAFE PASS: пролет мимо цели на высокой скорости с огнем
-        // Летим прямо, минимум маневров, стреляем на проходе
-
         const uint32 seed = Ow->GetUniqueID();
         const float passOffset = ((seed & 1) ? 1.f : -1.f);  // лево/право
 
-        // Целимся НЕ в центр цели, а мимо - проходим сбоку
         const FVector PassPoint = TgtPos + RightW * (passOffset * 400.f * 100.f); // 400м сбоку
         AimDir = (PassPoint - SelfPos).GetSafeNormal();
 
-        // ФОРСАЖ - летим быстро
         AxisF = 1.0f;
 
-        // Минимальный страф - только для корректировки
         const float sideError = FVector::DotProduct(PassPoint - SelfPos, RightW);
         AxisStrafe = FMath::Clamp(sideError * 0.0003f, -MaxStrafe * 0.3f, MaxStrafe * 0.3f);
         AxisUp = 0.f;
     }
     else if (Mode == EAttackMode::AggressivePursuit)
     {
-        // AGGRESSIVE PURSUIT: прямая атака без идеального наведения
-        // Летим на цель, стреляем широким конусом, не тратим время на точное наведение
-
         AimDir = DirToTargetW;
 
-        // Почти форсаж
         AxisF = FMath::GetMappedRangeValueClamped(
             FVector2D(IdealDistM * 0.5f, IdealDistM * 2.5f),
             FVector2D(0.7f, 1.0f),
             DistM
         );
 
-        // МИНИМАЛЬНЫЕ боковые маневры - только грубая корректировка
         const float sidePos = FVector::DotProduct(DirToTargetW, RightW);
         const float vertPos = FVector::DotProduct(DirToTargetW, UpW);
 
@@ -793,18 +807,13 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     }
     else if (Mode == EAttackMode::EvasiveApproach)
     {
-        // EVASIVE APPROACH: змейка при сближении
-        // Летим к цели, но делаем синусоидальные уклонения влево-вправо
-
         AimDir = DirToTargetW;
 
-        // Синусоида для змейки - каждый бот со своей частотой
         const uint32 seed = Ow->GetUniqueID();
         const float snakeFreq = 0.8f + float(seed % 50) * 0.02f;  // 0.8-1.8 Hz
         const float snakeTime = GetWorld()->GetTimeSeconds() * snakeFreq;
         const float snakePattern = FMath::Sin(snakeTime * PI * 2.f);
 
-        // Базовая скорость сближения
         const float Vf_self  = FVector::DotProduct(Vself_mps, FwdW);
         const float DistErrM = DistM - IdealDistM;
         float Vforward_des_mps = PosKp * 0.8f * DistErrM - PosKd * 0.8f * Vf_self;
@@ -812,7 +821,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
         AxisF = FMath::Max(Vforward_des_mps / VxMax, 0.6f);
 
-        // Змейка - интенсивность зависит от дистанции
         const float snakeIntensity = FMath::GetMappedRangeValueClamped(
             FVector2D(IdealDistM * 0.5f, IdealDistM * 2.0f),
             FVector2D(0.3f, 0.8f),
@@ -821,9 +829,32 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
         AxisStrafe = snakePattern * MaxStrafe * snakeIntensity;
 
-        // Вертикаль - небольшая коррекция
         const float vertPos = FVector::DotProduct(DirToTargetW, UpW);
         AxisUp = FMath::Clamp(vertPos * 0.3f, -MaxUp * 0.4f, MaxUp * 0.4f);
+    }
+    else if (Mode == EAttackMode::AnchorFire)
+    {
+        // ===== ЯКОРНЫЙ СТРЕЛОК =====
+        // Идея: почти не гонимся, держим комфортную дистанцию и конус.
+        // Чуть подруливаем скоростью вперёд/назад, минимум страфа/вертикали.
+
+        AimDir = DirToTargetW;
+
+        const float Vf_self  = FVector::DotProduct(Vself_mps, FwdW);
+        const float DistErrM = DistM - IdealDistM;
+
+        // Более мягкий PD, чем в Approach – чтобы не разгоняться
+        float Vforward_des_mps = (PosKp * 0.35f) * DistErrM - (PosKd * 0.35f) * Vf_self;
+        Vforward_des_mps = FMath::Clamp(Vforward_des_mps, -VxMax * 0.25f, VxMax * 0.25f);
+
+        AxisF = Vforward_des_mps / VxMax; // может быть около 0, иногда чуть вперёд/назад
+
+        const float sidePos = FVector::DotProduct(DirToTargetW, RightW);
+        const float vertPos = FVector::DotProduct(DirToTargetW, UpW);
+
+        // Чуть подруливаем страфом/апом, но без орбиты
+        AxisStrafe = FMath::Clamp(sidePos * 0.18f, -MaxStrafe * 0.45f, MaxStrafe * 0.45f);
+        AxisUp     = FMath::Clamp(vertPos * 0.18f, -MaxUp * 0.45f,     MaxUp * 0.45f);
     }
 
     // =========================
@@ -836,17 +867,14 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         styleUpBias      = 0.f;
         styleForwardBias = 0.f;
 
-        // Точка, куда целимся: чуть вперёд по скорости цели (lead-погоня)
         const float TgtSpeed_mps = TgtVel_mps.Size();
         FVector TgtDirVel        = (TgtSpeed_mps > KINDA_SMALL_NUMBER) ? (TgtVel_mps / TgtSpeed_mps) : TgtFwdW;
 
-        // Чем дальше, тем чуть дальше вперёд берём точку (очень короткое упреждение, чтобы не качать носом)
         const float aheadM   = FMath::Clamp(DistM * 0.18f, 120.f, 280.f);
         const FVector AimPos = TgtPos + (TgtDirVel * aheadM * 100.f); // м → см
 
         AimDir = (AimPos - SelfPos).GetSafeNormal();
 
-        // Продольная скорость: PD по дистанции, но только вперёд (не газуем задом)
         const float Vf_self  = FVector::DotProduct(Vself_mps, FwdW);
         const float DistErrM = DistM - IdealDistM;
         const float closeScale = FMath::GetMappedRangeValueClamped(
@@ -862,7 +890,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         AxisF = Vforward_des_mps / VxMax;
         AxisF = FMath::Max(AxisF, MinForwardAxis * 0.8f);
 
-        // Бок / вертикаль: позиция + гашение относительной скорости
         const float sidePos   = FVector::DotProduct(DirToTargetW, RightW);
         const float vertPos   = FVector::DotProduct(DirToTargetW, UpW);
         const float sideVel   = FVector::DotProduct(Vrel_mps, RightW);
@@ -877,7 +904,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         AxisStrafe = FMath::Clamp(AxisStrafe, -MaxStrafe * 0.4f, MaxStrafe * 0.4f);
         AxisUp     = FMath::Clamp(AxisUp,     -MaxUp     * 0.4f, MaxUp     * 0.4f);
 
-        // Немного прижимаем вперёд, но без пересближения
         AxisF = FMath::Clamp(AxisF, TailLockForwardHold, 1.0f);
     }
 
@@ -902,30 +928,27 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         }
         else if (DistM > IdealDistM * 1.2f)
         {
-            // На средних дистанциях тоже летим быстро
             AxisF = FMath::Max(AxisF, 0.75f);
         }
         else
         {
-            // Даже близко к цели не летим медленно
             AxisF = FMath::Max(AxisF, MinForwardAxis * 1.3f);
         }
 
         const float sidePos = FVector::DotProduct(DirToTargetW, RightW);
         const float vertPos = FVector::DotProduct(DirToTargetW, UpW);
 
-        // Сильно уменьшили боковые компоненты - меньше орбиты, больше прямых атак
         const float farScale = (DistM > IdealDistM * 1.4f) ? 0.5f : 0.3f;
         AxisStrafe = FMath::Clamp(sidePos * farScale, -MaxStrafe * 0.6f, MaxStrafe * 0.6f);
         AxisUp     = FMath::Clamp(vertPos * 0.4f,     -MaxUp * 0.6f,     MaxUp * 0.6f);
 
         const float orbitAlpha = FMath::GetMappedRangeValueClamped(
             FVector2D(CloseDistM, IdealDistM * 1.4f),
-            FVector2D(1.f,        0.05f),  // ещё меньше!
+            FVector2D(1.f,        0.05f),
             DistM
         );
 
-        AxisStrafe += orbitDir * OrbitStrafeBias * orbitAlpha * 0.2f; // НАМНОГО меньше орбиты!
+        AxisStrafe += orbitDir * OrbitStrafeBias * orbitAlpha * 0.2f;
         AimDir      = DirToTargetW;
     }
 
@@ -952,7 +975,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
                 AShipPawn* Other = *It;
                 if (!Other || Other == Ow) continue;
 
-                // Only separate from same-team ships; collisions with enemies are fine.
                 if (SelfTeam != INDEX_NONE && Other->GetTeamId() != SelfTeam)
                 {
                     continue;
@@ -965,7 +987,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
                     continue;
                 }
 
-                // Stronger push when very close.
                 Push += Diff.GetSafeNormal() * (SepRadiusSq - DistSq) / SepRadiusSq;
             }
 
@@ -975,15 +996,14 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
             AxisStrafe += FMath::Clamp(PushRight * SepScale, -MaxStrafe, MaxStrafe);
             AxisUp     += FMath::Clamp(PushUp    * SepScale, -MaxUp,     MaxUp);
-            AxisF      += FMath::Clamp(PushFwd   * SepScale * 0.25f, -0.5f, 0.0f); // back off a bit if we are inside a blob
+            AxisF      += FMath::Clamp(PushFwd   * SepScale * 0.25f, -0.5f, 0.0f);
         }
     }
 
     AxisStrafe = FMath::Clamp(AxisStrafe, -MaxStrafe, MaxStrafe);
     AxisUp     = FMath::Clamp(AxisUp,     -MaxUp,     MaxUp);
 
-    // Если сильно не смотрим туда, куда летим — режем страф и ап,
-    // чтобы не уходить в очередной орбитальный танец
+    // Если сильно не смотрим туда, куда летим — режем страф и ап
     const float alignDotSteer = FVector::DotProduct(FwdW, AimDir);
     if (alignDotSteer < 0.25f)
     {
@@ -1010,8 +1030,15 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     }
     else
     {
-        // Всегда летим ВПЕРЁД, как живой пилот на W
-        AxisF = FMath::Clamp(AxisF, MinForwardAxis, 1.0f);
+        // Для якорного стрелка позволяем чуть медленнее лететь, вплоть до 0
+        if (Mode == EAttackMode::AnchorFire)
+        {
+            AxisF = FMath::Clamp(AxisF, 0.f, 1.0f);
+        }
+        else
+        {
+            AxisF = FMath::Clamp(AxisF, MinForwardAxis, 1.0f);
+        }
     }
 
     AxisF *= FMath::Clamp(AIForwardAxisScale, 0.1f, 1.0f);
@@ -1032,8 +1059,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     float YawRateCmdDeg   = 0.f;
     float RollRateCmdDeg  = 0.f;
 
-    // Плавно сглаживаем AimDir, чтобы нос не дёргался (особенно в хвостовом режиме)
-    // но если угол большой, даём повернуть быстро без сглаживания
     const float rawAngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(AimDirSmooth, AimDir), -1.f, 1.f)));
     if (rawAngleDeg > 30.f)
     {
@@ -1054,36 +1079,37 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
     if (axisLen < KINDA_SMALL_NUMBER || angleToAimDeg < 0.5f)
     {
-        // Почти идеально смотрим — выключаем override, чтобы не рыскал
         Flight->SetAngularRateOverride(false, 0.f, 0.f, 0.f);
     }
     else
     {
-        // === РАЗНАЯ АГРЕССИВНОСТЬ ПОВОРОТОВ ДЛЯ РАЗНЫХ РЕЖИМОВ ===
-
         const float BaseAlignFactor = bIsHeavyShip ? HeavyAlignRateFactor : AlignRateFactor;
         float UsedAlignFactor = BaseAlignFactor;
 
-        // Режимы с минимальным кручением носом
         if (Mode == EAttackMode::TailChase)
         {
-            UsedAlignFactor = BaseAlignFactor * 0.8f;  // Стабильное ведение
+            UsedAlignFactor = BaseAlignFactor * 0.8f;
         }
         else if (Mode == EAttackMode::StrafePass)
         {
-            UsedAlignFactor = BaseAlignFactor * 0.4f;  // МИНИМУМ кручения - летим прямо!
+            UsedAlignFactor = BaseAlignFactor * 0.4f;
         }
         else if (Mode == EAttackMode::AggressivePursuit)
         {
-            UsedAlignFactor = BaseAlignFactor * 0.55f;  // Грубое наведение
+            UsedAlignFactor = BaseAlignFactor * 0.55f;
         }
         else if (Mode == EAttackMode::EvasiveApproach)
         {
-            UsedAlignFactor = BaseAlignFactor * 0.65f;  // Умеренное наведение
+            UsedAlignFactor = BaseAlignFactor * 0.65f;
+        }
+        else if (Mode == EAttackMode::AnchorFire)
+        {
+            // Якорный стрелок — плавнее сильно, нос почти не дёргаем
+            UsedAlignFactor = BaseAlignFactor * 0.45f;
         }
         else
         {
-            UsedAlignFactor = BaseAlignFactor * 1.0f;   // Стандартное
+            UsedAlignFactor = BaseAlignFactor * 1.0f;
         }
 
         const float AlignRateMaxDeg =
@@ -1097,7 +1123,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         PitchRateCmdDeg = FMath::RadiansToDegrees(omegaLocal.Y);
         YawRateCmdDeg   = FMath::RadiansToDegrees(omegaLocal.Z);
 
-        // Чем ближе к цели по углу, тем мягче доворачиваем
         const float AlignScale = FMath::GetMappedRangeValueClamped(
             FVector2D(0.f, 35.f),
             FVector2D(0.4f, 1.0f),
@@ -1109,7 +1134,7 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
         if (Mode == EAttackMode::TailChase)
         {
-            PitchRateCmdDeg *= 0.75f; 
+            PitchRateCmdDeg *= 0.75f;
             YawRateCmdDeg   *= 0.75f;
         }
 
@@ -1122,7 +1147,7 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     }
 
     // =========================
-    // 6) Стрельба: в хвостовом/подходе, когда реально в конусе
+    // 6) Стрельба
     // =========================
 
     const bool bAllowFire = !bInBreakAway;
@@ -1133,31 +1158,32 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
             FMath::Acos(FMath::Clamp(FVector::DotProduct(FwdW, DirToTargetW), -1.f, 1.f))
         );
 
-        // === РАСШИРЕННЫЕ УГЛЫ ОГНЯ ДЛЯ РАЗНЫХ РЕЖИМОВ ===
-        // Больше огня = больше экшена!
+        float UsedFireCone = AttackFireAngleDeg * 2.0f;
 
-        float UsedFireCone = AttackFireAngleDeg * 2.0f;  // Базовый конус x2
-
-        // Разные конусы для разных режимов
         if (Mode == EAttackMode::TailChase)
         {
-            UsedFireCone = FMath::Max(AttackFireAngleDeg * 2.0f, 25.f);  // 25° в хвосте
+            UsedFireCone = FMath::Max(AttackFireAngleDeg * 2.0f, 25.f);
         }
         else if (Mode == EAttackMode::StrafePass)
         {
-            UsedFireCone = 45.f;  // ШИРОКИЙ конус для стрейф-атаки
+            UsedFireCone = 45.f;
         }
         else if (Mode == EAttackMode::AggressivePursuit)
         {
-            UsedFireCone = 38.f;  // Широкий конус для агрессивной атаки
+            UsedFireCone = 38.f;
         }
         else if (Mode == EAttackMode::EvasiveApproach)
         {
-            UsedFireCone = 32.f;  // Средний конус при змейке
+            UsedFireCone = 32.f;
+        }
+        else if (Mode == EAttackMode::AnchorFire)
+        {
+            // Якорный — стабильно стреляет в относительно широком, но не безумном конусе
+            UsedFireCone = 35.f;
         }
         else
         {
-            UsedFireCone = FMath::Max(AttackFireAngleDeg * 2.0f, 20.f);  // Минимум 20°
+            UsedFireCone = FMath::Max(AttackFireAngleDeg * 2.0f, 20.f);
         }
 
         const bool bInFireDist  = (DistM <= AttackFireMaxDistM);
@@ -1221,17 +1247,34 @@ void UShipAIPilotComponent::TryBindComponents()
 
 AActor* UShipAIPilotComponent::ResolveTarget()
 {
-	if (TargetActor.IsValid())
-	{
-		return TargetActor.Get();
-	}
+    AActor* OwActor = GetOwner();
+    AShipPawn* SelfShip = Cast<AShipPawn>(OwActor);
 
-	if (bAutoAcquireEnemies || bAutoAcquirePlayer)
-	{
-		TargetActor = FindBestEnemyShip();
-	}
+    // 1) Явно заданный Target (скриптом/спавнером)
+    if (TargetActor.IsValid())
+    {
+        return TargetActor.Get();
+    }
 
-	return TargetActor.Get();
+    // 2) Сквад-цель, если включена логика
+    if (bEnableSquadLogic && SelfShip && SelfShip->HasAuthority())
+    {
+        if (UShipAISquadronSubsystem* SquadSys = SelfShip->GetWorld()->GetSubsystem<UShipAISquadronSubsystem>())
+        {
+            if (AActor* SquadTgt = SquadSys->GetSquadTargetForShip(SelfShip))
+            {
+                return SquadTgt;
+            }
+        }
+    }
+
+    // 3) Соло-логика как раньше
+    if (bAutoAcquireEnemies || bAutoAcquirePlayer)
+    {
+        TargetActor = FindBestEnemyShip();
+    }
+
+    return TargetActor.Get();
 }
 
 AActor* UShipAIPilotComponent::FindBestEnemyShip()
@@ -1241,7 +1284,7 @@ AActor* UShipAIPilotComponent::FindBestEnemyShip()
     if (!World || !Ow) return nullptr;
 
     const FVector     SelfLoc  = Ow->GetActorLocation();
-    const AShipPawn*  SelfShip = Cast<AShipPawn>(Ow);
+    AShipPawn*    SelfShip = Cast<AShipPawn>(Ow);
     const int32       SelfTeam = SelfShip ? SelfShip->GetTeamId() : INDEX_NONE;
 
     // Cache ship list per-world to avoid O(N^2) scans each tick across hundreds of bots.
@@ -1296,8 +1339,31 @@ AActor* UShipAIPilotComponent::FindBestEnemyShip()
             Best      = OtherShip;
         }
     }
-
+    // Если мы лидер сквада — отдать цель сабсистеме
+    // Если мы лидер сквада — отдать цель сабсистеме
+    if (SelfShip && bEnableSquadLogic && bIsSquadLeader && Best && Ow->HasAuthority())
+    {
+        if (UShipAISquadronSubsystem* SquadSys = World->GetSubsystem<UShipAISquadronSubsystem>())
+        {
+            SquadSys->SetSquadTargetForLeader(SelfShip, Best);
+        }
+    }
     return Best;
+    return Best;
+}
+void UShipAIPilotComponent::SetupSquadTactics(EDogfightStyle InStyle, bool bInAnchorShooter)
+{
+    bUseSquadStyle      = true;
+    SquadStyle          = InStyle;
+    bSquadAnchorShooter = bInAnchorShooter;
+
+    // зафиксируем начальный стиль
+    CurrentDogfightStyle = SquadStyle;
+
+    // пусть держит стиль подольше, чем рандомные боты
+    const float minHold = FMath::Max(0.2f, StrategyMinHoldTime);
+    const float maxHold = FMath::Max(minHold, StrategyMaxHoldTime);
+    DogfightStyleTimeLeft = FMath::FRandRange(minHold * 1.5f, maxHold * 1.5f);
 }
 
 void UShipAIPilotComponent::ApplyIdleInput()
@@ -1333,15 +1399,34 @@ void UShipAIPilotComponent::UpdateAI(float Dt)
 
 void UShipAIPilotComponent::TickDogfightStyle(float Dt)
 {
-	if (DogfightStyleTimeLeft <= 0.f)
-	{
-		SelectNewDogfightStyle();
-	}
-	else
-	{
-		DogfightStyleTimeLeft -= Dt;
-	}
+    if (bUseSquadStyle)
+    {
+        // Стиль задан эскадрильей — просто отчитываем таймер, но не рандомим.
+        if (DogfightStyleTimeLeft > 0.f)
+        {
+            DogfightStyleTimeLeft -= Dt;
+        }
+        else
+        {
+            // Обновим только время жизни, сам стиль не меняем
+            const float minHold = FMath::Max(0.2f, StrategyMinHoldTime);
+            const float maxHold = FMath::Max(minHold, StrategyMaxHoldTime);
+            DogfightStyleTimeLeft = FMath::FRandRange(minHold * 1.5f, maxHold * 1.5f);
+        }
+        return;
+    }
+
+    // старое поведение
+    if (DogfightStyleTimeLeft <= 0.f)
+    {
+        SelectNewDogfightStyle();
+    }
+    else
+    {
+        DogfightStyleTimeLeft -= Dt;
+    }
 }
+
 
 void UShipAIPilotComponent::SelectNewDogfightStyle()
 {

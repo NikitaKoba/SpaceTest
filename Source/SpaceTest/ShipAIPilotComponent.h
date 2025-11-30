@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ShipAISquadronSubsystem.h"
 #include "Components/ActorComponent.h"
 #include "ShipAIPilotComponent.generated.h"
 
@@ -13,7 +14,13 @@ enum class EDogfightStyle : uint8
 	FlankRight  UMETA(DisplayName="Flank Right"),
 	BoomAndZoom UMETA(DisplayName="Boom & Zoom")
 };
-
+UENUM()
+enum class ESquadBehavior : uint8
+{
+	None,           // не участвуем в эскадрильях
+	PackAttack,     // просто вместе валим одну цель
+	ProtectLeader   // часть ботов защищают лидера/эскорт
+};
 class UFlightComponent;
 class UPrimitiveComponent;
 
@@ -294,6 +301,40 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="0.0", ClampMax="5.0"))
 	float TailLockStickyTime = 1.2f;
 	
+	// Включить сквад-логику
+	UPROPERTY(EditAnywhere, Category="AI|Squad")
+	bool bEnableSquadLogic = true;
+
+	// Поведение сквада (на будущее — можно переключать волнами)
+	UPROPERTY(EditAnywhere, Category="AI|Squad")
+	ESquadBehavior SquadBehavior = ESquadBehavior::PackAttack;
+
+	// ---- служебка, только на сервере ----
+	int32 GetSquadId() const { return SquadId; }
+	bool  IsSquadLeader() const { return bIsSquadLeader; }
+
+	void OnSquadAssigned(int32 InSquadId, ESquadRole InRole, AShipPawn* InLeader);
+	void OnSquadCleared();
+	UPROPERTY()
+	bool bUseSquadStyle = false;
+
+	UPROPERTY()
+	EDogfightStyle SquadStyle = EDogfightStyle::Pursuit;
+	void SetupSquadTactics(EDogfightStyle InStyle, bool bInAnchorShooter);
+	// Этот бот — "якорный стрелок": меньше манёвров, больше стоять/висеть и стрелять
+	UPROPERTY()
+	bool bSquadAnchorShooter = false;
+private:
+	UPROPERTY()
+	int32 SquadId = INDEX_NONE;
+
+	UPROPERTY()
+	ESquadRole SquadRole = ESquadRole::Attacker;
+
+	UPROPERTY()
+	TWeakObjectPtr<AShipPawn> SquadLeader;
+
+	bool bIsSquadLeader = false;
 protected:
 	TWeakObjectPtr<UFlightComponent>   Flight;
 	TWeakObjectPtr<UPrimitiveComponent> Body;
@@ -306,7 +347,7 @@ protected:
 	float          CloseRangeStall       = 0.f;
 	float          ExtendStateTimeLeft   = 0.f;
 	FVector        ExtendDirWorld        = FVector::ZeroVector;
-
+	
 	void TryBindComponents();
 	void UpdateAI(float Dt);
 	void TickDogfightStyle(float Dt);
