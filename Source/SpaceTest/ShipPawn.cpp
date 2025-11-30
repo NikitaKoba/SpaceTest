@@ -16,9 +16,37 @@
 #include "EngineUtils.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/App.h"
 
 static FORCEINLINE float Clamp01(float v){ return FMath::Clamp(v, 0.f, 1.f); }
+
+// Replication-rate knobs (runtime-tunable via console)
+static TAutoConsoleVariable<float> CVar_ShipNet_PlayerHz(
+	TEXT("ship.net.player.hz"),
+	30.f,
+	TEXT("NetUpdateFrequency (Hz) for player-controlled ships"));
+static TAutoConsoleVariable<float> CVar_ShipNet_PlayerMinHz(
+	TEXT("ship.net.player.minhz"),
+	20.f,
+	TEXT("MinNetUpdateFrequency (Hz) for player-controlled ships"));
+static TAutoConsoleVariable<float> CVar_ShipNet_PlayerPriority(
+	TEXT("ship.net.player.priority"),
+	2.0f,
+	TEXT("NetPriority for player-controlled ships"));
+
+static TAutoConsoleVariable<float> CVar_ShipNet_AIHz(
+	TEXT("ship.net.ai.hz"),
+	10.f,
+	TEXT("NetUpdateFrequency (Hz) for AI/non-player ships"));
+static TAutoConsoleVariable<float> CVar_ShipNet_AIMinHz(
+	TEXT("ship.net.ai.minhz"),
+	6.f,
+	TEXT("MinNetUpdateFrequency (Hz) for AI/non-player ships"));
+static TAutoConsoleVariable<float> CVar_ShipNet_AIPriority(
+	TEXT("ship.net.ai.priority"),
+	1.0f,
+	TEXT("NetPriority for AI/non-player ships"));
 
 // ShipPawn.cpp
 AShipPawn::AShipPawn()
@@ -32,8 +60,8 @@ AShipPawn::AShipPawn()
 	bOnlyRelevantToOwner = false;
 	// Do not pre-spawn on clients from map load; let the server replicate existing ships (fixes late-join ghosts).
 	bNetLoadOnClient = false;
-	SetNetUpdateFrequency(120.f);
-	SetMinNetUpdateFrequency(60.f);
+	// Low default; will be overridden based on controller type (player vs AI).
+	ApplyNetSettingsForRole(false);
 	CursorPilot = CreateDefaultSubobject<UShipCursorPilotComponent>(TEXT("CursorPilot"));
 	// Root mesh (physics)
 	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
@@ -95,11 +123,40 @@ AShipPawn::AShipPawn()
 	Shield = MaxShield;
 }
 
+void AShipPawn::ApplyNetSettingsForRole(bool bPlayerControlled)
+{
+	// Tunable runtime defaults to keep replication cost sane when hundreds of bots are present.
+	const float Hz = FMath::Max(1.f, bPlayerControlled
+		? CVar_ShipNet_PlayerHz.GetValueOnGameThread()
+		: CVar_ShipNet_AIHz.GetValueOnGameThread());
+	const float MinHzRaw = bPlayerControlled
+		? CVar_ShipNet_PlayerMinHz.GetValueOnGameThread()
+		: CVar_ShipNet_AIMinHz.GetValueOnGameThread();
+	const float MinHz = FMath::Clamp(MinHzRaw, 1.f, Hz);
+
+	const float Priority = FMath::Max(0.1f, bPlayerControlled
+		? CVar_ShipNet_PlayerPriority.GetValueOnGameThread()
+		: CVar_ShipNet_AIPriority.GetValueOnGameThread());
+
+	SetNetUpdateFrequency(Hz);
+	SetMinNetUpdateFrequency(MinHz);
+	NetPriority = Priority;
+
+	// When role switches (AI <-> player) force a refresh so the new rate takes effect immediately.
+	if (HasAuthority() && HasActorBegunPlay())
+	{
+		ForceNetUpdate();
+	}
+}
+
 // ShipPawn.cpp
 // ShipPawn.cpp
 void AShipPawn::BeginPlay()
 {
 	Super::BeginPlay();
+
+	ApplyNetSettingsForRole(IsPlayerControlled());
+
 	if (HasAuthority())
 	{
 		Health = FMath::Max(1.f, MaxHealth);
@@ -165,6 +222,19 @@ void AShipPawn::BeginPlay()
 	bHyperDrivePrev = bHyperDriveActive;
 	RequestCameraResync();
 	CameraResyncFrames = 3;
+}
+
+void AShipPawn::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+	const bool bIsPlayer = NewController && NewController->IsPlayerController();
+	ApplyNetSettingsForRole(bIsPlayer);
+}
+
+void AShipPawn::UnPossessed()
+{
+	Super::UnPossessed();
+	ApplyNetSettingsForRole(false);
 }
 
 void AShipPawn::Destroyed()

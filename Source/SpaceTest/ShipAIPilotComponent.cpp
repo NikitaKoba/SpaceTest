@@ -13,6 +13,21 @@
 #include "Engine/Engine.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h" // TActorIterator
+static TAutoConsoleVariable<int32> CVar_ShipBot_DebugOrbit(
+    TEXT("ship.bot.debug.orbit"),
+    0,
+    TEXT("Enable orbit-break debug logs for ship bots (0=off, 1=on)")
+);
+
+static TAutoConsoleVariable<int32> CVar_ShipBot_DebugDraw(
+    TEXT("ship.bot.debug.draw"),
+    0,
+    TEXT("Draw debug aim gizmos for ship bots (0=off, 1=on)")
+);
+static TAutoConsoleVariable<float> CVar_ShipBot_TargetRefresh(
+	TEXT("ship.bot.target.refresh"),
+	0.35f,
+	TEXT("Seconds between rebuilding global ship list cache for AI target selection (per world)"));
 
 DEFINE_LOG_CATEGORY_STATIC(LogShipBot, Log, All);
 
@@ -31,45 +46,65 @@ UShipAIPilotComponent::UShipAIPilotComponent()
 
 void UShipAIPilotComponent::BeginPlay()
 {
-	Super::BeginPlay();
+    Super::BeginPlay();
 
-	TryBindComponents();
+    // Сдвигаем фазу мозгового тика, чтобы боты думали не в один кадр
+    BrainTimeAccumulator = FMath::FRandRange(0.f, BrainUpdateInterval);
 
-	if (Flight.IsValid())
-	{
-		// Для ботов всегда включаем FA, мы работаем по желаемой скорости
-		Flight->SetFlightAssistEnabled(true);
-		// Важно: чтобы полётный компонент тиковал ПОСЛЕ нас
-		Flight->AddTickPrerequisiteComponent(this);
-	}
+    TryBindComponents();
+
+    if (Flight.IsValid())
+    {
+        // Для ботов всегда включаем FA, мы работаем по желаемой скорости
+        Flight->SetFlightAssistEnabled(true);
+        // Важно: чтобы полётный компонент тиковал ПОСЛЕ нас
+        Flight->AddTickPrerequisiteComponent(this);
+    }
 }
+
 
 void UShipAIPilotComponent::TickComponent(
-	float DeltaTime,
-	ELevelTick TickType,
-	FActorComponentTickFunction* ThisTickFunction
+    float DeltaTime,
+    ELevelTick TickType,
+    FActorComponentTickFunction* ThisTickFunction
 )
 {
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+    Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	AActor* Ow = GetOwner();
-	if (!Ow || !ShouldDriveOnThisMachine(Ow))
-	{
-		// На клиентах бот НЕ рулит — только реплика снапшотов
-		return;
-	}
+    AActor* Ow = GetOwner();
+    if (!Ow || !ShouldDriveOnThisMachine(Ow))
+    {
+        // На клиентах бот НЕ рулит — только реплика снапшотов
+        return;
+    }
 
-	if (!Flight.IsValid() || !Body.IsValid())
-	{
-		TryBindComponents();
-		if (!Flight.IsValid() || !Body.IsValid())
-		{
-			return;
-		}
-	}
+    if (!Flight.IsValid() || !Body.IsValid())
+    {
+        TryBindComponents();
+        if (!Flight.IsValid() || !Body.IsValid())
+        {
+            return;
+        }
+    }
 
-	UpdateAI(DeltaTime);
+    // --- "Редкий мозг": тяжёлый AI апдейт не каждый кадр ---
+    // FlightComponent всё равно тикает каждый кадр и применяет прошлые оси управления.
+    BrainTimeAccumulator += DeltaTime;
+
+    const float EffectiveInterval = FMath::Max(BrainUpdateInterval, 0.01f); // защита от нуля/отрицательных
+
+    if (BrainTimeAccumulator < EffectiveInterval)
+    {
+        // В этом кадре только продолжаем лететь по уже выставленным осям
+        return;
+    }
+
+    const float BrainDt = BrainTimeAccumulator;
+    BrainTimeAccumulator = 0.f;
+
+    UpdateAI(BrainDt);
 }
+
 void UShipAIPilotComponent::UpdateAI_Follow(float Dt, AActor* Target)
 {
     bWantsToFireLaser     = false;
@@ -337,18 +372,21 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         bAimDirInit  = true;
     }
 
+    const AShipPawn* SelfShip = Cast<AShipPawn>(Ow);
+    const int32 SelfTeam = SelfShip ? SelfShip->GetTeamId() : INDEX_NONE;
+
     bool bIsHeavyShip = false;
-    if (const AShipPawn* Ship = Cast<AShipPawn>(Ow))
+    if (SelfShip)
     {
-        bIsHeavyShip = (Ship->ShipRole == EShipRole::Corvette);
+        bIsHeavyShip = (SelfShip->ShipRole == EShipRole::Corvette);
     }
 
     // --- Дистанции в метрах ---
     const float DistM      = Dist * 0.01f;
     const float IdealDistM = AttackIdealDistanceCm    * 0.01f;
     const float FarDistM   = AttackFarDistanceCm      * 0.01f;
-	const float CloseDistM = AttackTooCloseDistanceCm * 0.01f;
-    const float AvoidDistM = FMath::Max(AvoidHeadOnDistanceCm    * 0.01f, CloseDistM);
+    const float CloseDistM = AttackTooCloseDistanceCm * 0.01f;
+    const float AvoidDistM = FMath::Max(AvoidHeadOnDistanceCm * 0.01f, CloseDistM);
 
     // --- Скорости ---
     const FVector Vself_cmps = Body->GetPhysicsLinearVelocity();
@@ -365,34 +403,34 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
     const float MinForwardAxis =
         bIsHeavyShip
-        ? FMath::Min(HeavyMaxForwardAxis, AggressiveMinForwardAxis)
-        : AggressiveMinForwardAxis;
+            ? FMath::Min(HeavyMaxForwardAxis, AggressiveMinForwardAxis)
+            : AggressiveMinForwardAxis;
 
     // --- Геометрия / относительное положение ---
-	const float selfFrontDot    = FVector::DotProduct(FwdW,    DirToTargetW);      // 1 = цель по курсу
-	const float targetFacingUs  = FVector::DotProduct(TgtFwdW, -DirToTargetW);     // >0 = он смотрит на нас
-	const float closingSpeedMps = -FVector::DotProduct(Vrel_mps, DirToTargetW);    // >0 = сближаемся
+    const float selfFrontDot    = FVector::DotProduct(FwdW,    DirToTargetW);      // 1 = цель по курсу
+    const float targetFacingUs  = FVector::DotProduct(TgtFwdW, -DirToTargetW);     // >0 = он смотрит на нас
+    const float closingSpeedMps = -FVector::DotProduct(Vrel_mps, DirToTargetW);    // >0 = сближаемся
 
-	// === Корректный детектор "мы у него на хвосте" ===
-	// DirToTargetW: от нас к цели. Если мы СЗАДИ, то он примерно совпадает с TgtFwdW.
+    // === Корректный детектор "мы у него на хвосте" ===
+    // DirToTargetW: от нас к цели. Если мы СЗАДИ, то он примерно совпадает с TgtFwdW.
     const float behindDot = FVector::DotProduct(DirToTargetW, TgtFwdW);
 
-	// Используем твои TailLock-настройки из конфига
-	const float tailDistMin = IdealDistM * TailLockDistMinFactor; // 0.65
-	const float tailDistMax = IdealDistM * TailLockDistMaxFactor; // 2.0
+    // Используем твои TailLock-настройки из конфига
+    const float tailDistMin = IdealDistM * TailLockDistMinFactor; // 0.65
+    const float tailDistMax = IdealDistM * TailLockDistMaxFactor; // 2.0
 
-	const bool bInTailConeGeom =
-		(behindDot    > TailLockTargetFacingDot) &&   // 0.25 = мы реально позади
-		(selfFrontDot > TailLockFrontDot);            // 0.55 = мы смотрим на цель
+    const bool bInTailConeGeom =
+        (behindDot    > TailLockTargetFacingDot) &&   // 0.25 = мы реально позади
+        (selfFrontDot > TailLockFrontDot);            // 0.55 = мы смотрим на цель
 
-	const bool bInTailDistance =
-		(DistM > tailDistMin) &&
-		(DistM < tailDistMax);
+    const bool bInTailDistance =
+        (DistM > tailDistMin) &&
+        (DistM < tailDistMax);
 
-	const bool bTailClosingOk =
-		(FMath::Abs(closingSpeedMps) < TailLockMaxClosingSpeedMps);
+    const bool bTailClosingOk =
+        (FMath::Abs(closingSpeedMps) < TailLockMaxClosingSpeedMps);
 
-	const bool bInTailCone = bInTailConeGeom && bInTailDistance && bTailClosingOk;
+    const bool bInTailCone = bInTailConeGeom && bInTailDistance && bTailClosingOk;
 
     // Гистерезис: если были в tail-chase недавно, держим его ещё TailLockStickyTime
     if (bInTailCone)
@@ -407,11 +445,11 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     // --- Детектор "орбитального танца" + Break State Machine ---
     // OrbitStuckTime > 0: накапливаем детекцию орбиты
     // OrbitStuckTime < 0: активный break маневр + cooldown
-    
-    const float OrbitDetectThreshold = 0.5f + (float(Ow->GetUniqueID() % 100) * 0.01f);  // 0.5-1.5 сек с асинхронностью
-    const float OrbitBreakDuration   = 2.5f + FMath::FRandRange(0.f, 1.5f);              // 2.5-4 сек break
-    const float OrbitCooldownDuration = 3.f;                                               // 3 сек cooldown после break
-    
+
+    const float OrbitDetectThreshold  = 0.5f + (float(Ow->GetUniqueID() % 100) * 0.01f);  // 0.5-1.5 сек с асинхронностью
+    const float OrbitBreakDuration    = 2.5f + FMath::FRandRange(0.f, 1.5f);              // 2.5-4 сек break
+    const float OrbitCooldownDuration = 3.f;                                              // 3 сек cooldown после break
+
     const float OrbitSideDotLimit      = 0.55f;
     const float OrbitMinRadialSpeedMps = 25.f;
     const float OrbitDistBandMin       = IdealDistM * 0.5f;
@@ -423,7 +461,7 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         FMath::Abs(selfFrontDot) < OrbitSideDotLimit;
 
     const bool bOrbitRadialSlow = FMath::Abs(closingSpeedMps) < OrbitMinRadialSpeedMps;
-    
+
     const FVector ToTargetNorm = DirToTargetW;
     const FVector CrossVel = FVector::CrossProduct(ToTargetNorm, Vself_mps);
     const float TangentialSpeedMps = CrossVel.Size();
@@ -431,22 +469,25 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
     // Состояние break'а: OrbitStuckTime < 0
     const bool bInOrbitBreak = (OrbitStuckTime < -0.01f);
-    
+
     if (bInOrbitBreak)
     {
         // В режиме break - отсчитываем время обратно к 0
         const float oldTime = OrbitStuckTime;
         OrbitStuckTime += Dt;
+
         // Когда досчитали до cooldown порога - переходим в cooldown
         if (OrbitStuckTime > -OrbitCooldownDuration)
         {
             OrbitStuckTime = FMath::Min(OrbitStuckTime, -0.01f);  // Остаемся в cooldown
-            
-            // Transition log
+
             if (oldTime <= -OrbitCooldownDuration && OrbitStuckTime > -OrbitCooldownDuration)
             {
-                UE_LOG(LogShipBot, Log, TEXT("[BOT %s] OrbitBreak -> Cooldown (%.1f sec remaining)"),
-                    *Ow->GetName(), -OrbitStuckTime);
+                if (CVar_ShipBot_DebugOrbit.GetValueOnGameThread() != 0)
+                {
+                    UE_LOG(LogShipBot, Log, TEXT("[BOT %s] OrbitBreak -> Cooldown (%.1f sec remaining)"),
+                        *Ow->GetName(), -OrbitStuckTime);
+                }
             }
         }
     }
@@ -454,13 +495,16 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     {
         // Накапливаем детекцию
         OrbitStuckTime += Dt;
-        
+
         // Триггер: переходим в break mode
         if (OrbitStuckTime > OrbitDetectThreshold)
         {
-            UE_LOG(LogShipBot, Warning, TEXT("[BOT %s] ORBIT DETECTED! Starting OrbitBreak (%.1f sec)"),
-                *Ow->GetName(), OrbitBreakDuration);
-            
+            if (CVar_ShipBot_DebugOrbit.GetValueOnGameThread() != 0)
+            {
+                UE_LOG(LogShipBot, Warning, TEXT("[BOT %s] ORBIT DETECTED! Starting OrbitBreak (%.1f sec)"),
+                    *Ow->GetName(), OrbitBreakDuration);
+            }
+
             OrbitStuckTime = -(OrbitBreakDuration + OrbitCooldownDuration);  // Break + cooldown
         }
     }
@@ -520,10 +564,10 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     {
         // === ВЫБОР СТИЛЯ АТАКИ НА ОСНОВЕ DOGFIGHT STYLE ===
         // Больше разнообразия - не все должны делать одно и то же!
-        
+
         const bool bMediumRange = (DistM > IdealDistM * 0.8f && DistM < IdealDistM * 2.0f);
         const bool bLongRange   = (DistM >= IdealDistM * 2.0f);
-        
+
         switch (CurrentDogfightStyle)
         {
         case EDogfightStyle::BoomAndZoom:
@@ -537,7 +581,7 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
                 Mode = EAttackMode::Approach;
             }
             break;
-            
+
         case EDogfightStyle::FlankLeft:
         case EDogfightStyle::FlankRight:
             // Фланговая атака = змейка при сближении
@@ -550,7 +594,7 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
                 Mode = EAttackMode::Approach;
             }
             break;
-            
+
         case EDogfightStyle::Pursuit:
         default:
             // Прямое преследование = агрессивная атака без точного наведения
@@ -677,12 +721,12 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         const float dodgeSign = ((seed ^ 0x7f7f) & 1) ? 1.f : -1.f;
         const float verticalSign = ((seed ^ 0xA5A5) & 1) ? 1.f : -1.f;
         const float mixFactor = float((seed >> 8) % 100) / 100.f;  // 0.0-1.0
-        
+
         // Вариативные веса для разнообразия
-        const float forwardWeight = 0.5f + mixFactor * 0.3f;        // 0.5-0.8
-        const float lateralWeight = 0.3f + mixFactor * 0.2f;        // 0.3-0.5
-        const float verticalWeight = 0.7f + mixFactor * 0.3f;       // 0.7-1.0
-        
+        const float forwardWeight  = 0.5f + mixFactor * 0.3f;        // 0.5-0.8
+        const float lateralWeight  = 0.3f + mixFactor * 0.2f;        // 0.3-0.5
+        const float verticalWeight = 0.7f + mixFactor * 0.3f;        // 0.7-1.0
+
         // Агрессивный 3D маневр
         FVector extendDir =
               FwdW * forwardWeight                            // Умеренно вперед
@@ -701,84 +745,82 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
         AxisUp     = verticalSign * MaxUp * (0.8f + mixFactor * 0.2f);
         bInBreakAway = true;
     }
-    
+
     // =========================
     // NEW COMBAT MODES - РАЗНООБРАЗИЕ БОЯ
     // =========================
-    
+
     else if (Mode == EAttackMode::StrafePass)
     {
         // STRAFE PASS: пролет мимо цели на высокой скорости с огнем
         // Летим прямо, минимум маневров, стреляем на проходе
-        
+
         const uint32 seed = Ow->GetUniqueID();
         const float passOffset = ((seed & 1) ? 1.f : -1.f);  // лево/право
-        
+
         // Целимся НЕ в центр цели, а мимо - проходим сбоку
         const FVector PassPoint = TgtPos + RightW * (passOffset * 400.f * 100.f); // 400м сбоку
         AimDir = (PassPoint - SelfPos).GetSafeNormal();
-        
+
         // ФОРСАЖ - летим быстро
         AxisF = 1.0f;
-        
+
         // Минимальный страф - только для корректировки
         const float sideError = FVector::DotProduct(PassPoint - SelfPos, RightW);
         AxisStrafe = FMath::Clamp(sideError * 0.0003f, -MaxStrafe * 0.3f, MaxStrafe * 0.3f);
         AxisUp = 0.f;
     }
-    
     else if (Mode == EAttackMode::AggressivePursuit)
     {
         // AGGRESSIVE PURSUIT: прямая атака без идеального наведения
         // Летим на цель, стреляем широким конусом, не тратим время на точное наведение
-        
+
         AimDir = DirToTargetW;
-        
+
         // Почти форсаж
         AxisF = FMath::GetMappedRangeValueClamped(
             FVector2D(IdealDistM * 0.5f, IdealDistM * 2.5f),
             FVector2D(0.7f, 1.0f),
             DistM
         );
-        
+
         // МИНИМАЛЬНЫЕ боковые маневры - только грубая корректировка
         const float sidePos = FVector::DotProduct(DirToTargetW, RightW);
         const float vertPos = FVector::DotProduct(DirToTargetW, UpW);
-        
+
         AxisStrafe = FMath::Clamp(sidePos * 0.25f, -MaxStrafe * 0.4f, MaxStrafe * 0.4f);
         AxisUp     = FMath::Clamp(vertPos * 0.25f, -MaxUp * 0.4f,     MaxUp * 0.4f);
     }
-    
     else if (Mode == EAttackMode::EvasiveApproach)
     {
         // EVASIVE APPROACH: змейка при сближении
         // Летим к цели, но делаем синусоидальные уклонения влево-вправо
-        
+
         AimDir = DirToTargetW;
-        
+
         // Синусоида для змейки - каждый бот со своей частотой
         const uint32 seed = Ow->GetUniqueID();
         const float snakeFreq = 0.8f + float(seed % 50) * 0.02f;  // 0.8-1.8 Hz
         const float snakeTime = GetWorld()->GetTimeSeconds() * snakeFreq;
         const float snakePattern = FMath::Sin(snakeTime * PI * 2.f);
-        
+
         // Базовая скорость сближения
-        const float Vf_self = FVector::DotProduct(Vself_mps, FwdW);
+        const float Vf_self  = FVector::DotProduct(Vself_mps, FwdW);
         const float DistErrM = DistM - IdealDistM;
         float Vforward_des_mps = PosKp * 0.8f * DistErrM - PosKd * 0.8f * Vf_self;
         Vforward_des_mps = FMath::Clamp(Vforward_des_mps, 0.f, VxMax);
-        
+
         AxisF = FMath::Max(Vforward_des_mps / VxMax, 0.6f);
-        
+
         // Змейка - интенсивность зависит от дистанции
         const float snakeIntensity = FMath::GetMappedRangeValueClamped(
             FVector2D(IdealDistM * 0.5f, IdealDistM * 2.0f),
             FVector2D(0.3f, 0.8f),
             DistM
         );
-        
+
         AxisStrafe = snakePattern * MaxStrafe * snakeIntensity;
-        
+
         // Вертикаль - небольшая коррекция
         const float vertPos = FVector::DotProduct(DirToTargetW, UpW);
         AxisUp = FMath::Clamp(vertPos * 0.3f, -MaxUp * 0.4f, MaxUp * 0.4f);
@@ -837,9 +879,6 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
         // Немного прижимаем вперёд, но без пересближения
         AxisF = FMath::Clamp(AxisF, TailLockForwardHold, 1.0f);
-
-        // В хвостовом режиме практически игнорируем "орбиты"
-        // style* уже ослаблены выше
     }
 
     // =========================
@@ -897,6 +936,48 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     AxisStrafe += styleStrafeBias;
     AxisUp     += styleUpBias;
     AxisF      += styleForwardBias;
+
+    // --- Simple flock separation so bots do not pile up in one spot ---
+    {
+        const float SepRadius = 8000.f;           // 80 m
+        const float SepRadiusSq = SepRadius * SepRadius;
+        const float SepScale = 0.35f;
+
+        UWorld* World = Ow ? Ow->GetWorld() : nullptr;
+        if (World)
+        {
+            FVector Push = FVector::ZeroVector;
+            for (TActorIterator<AShipPawn> It(World); It; ++It)
+            {
+                AShipPawn* Other = *It;
+                if (!Other || Other == Ow) continue;
+
+                // Only separate from same-team ships; collisions with enemies are fine.
+                if (SelfTeam != INDEX_NONE && Other->GetTeamId() != SelfTeam)
+                {
+                    continue;
+                }
+
+                const FVector Diff = SelfPos - Other->GetActorLocation();
+                const float DistSq = Diff.SizeSquared();
+                if (DistSq < KINDA_SMALL_NUMBER || DistSq > SepRadiusSq)
+                {
+                    continue;
+                }
+
+                // Stronger push when very close.
+                Push += Diff.GetSafeNormal() * (SepRadiusSq - DistSq) / SepRadiusSq;
+            }
+
+            const float PushRight = FVector::DotProduct(Push, RightW);
+            const float PushUp    = FVector::DotProduct(Push, UpW);
+            const float PushFwd   = FVector::DotProduct(Push, FwdW);
+
+            AxisStrafe += FMath::Clamp(PushRight * SepScale, -MaxStrafe, MaxStrafe);
+            AxisUp     += FMath::Clamp(PushUp    * SepScale, -MaxUp,     MaxUp);
+            AxisF      += FMath::Clamp(PushFwd   * SepScale * 0.25f, -0.5f, 0.0f); // back off a bit if we are inside a blob
+        }
+    }
 
     AxisStrafe = FMath::Clamp(AxisStrafe, -MaxStrafe, MaxStrafe);
     AxisUp     = FMath::Clamp(AxisUp,     -MaxUp,     MaxUp);
@@ -979,10 +1060,10 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
     else
     {
         // === РАЗНАЯ АГРЕССИВНОСТЬ ПОВОРОТОВ ДЛЯ РАЗНЫХ РЕЖИМОВ ===
-        
+
         const float BaseAlignFactor = bIsHeavyShip ? HeavyAlignRateFactor : AlignRateFactor;
         float UsedAlignFactor = BaseAlignFactor;
-        
+
         // Режимы с минимальным кручением носом
         if (Mode == EAttackMode::TailChase)
         {
@@ -1054,9 +1135,9 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
 
         // === РАСШИРЕННЫЕ УГЛЫ ОГНЯ ДЛЯ РАЗНЫХ РЕЖИМОВ ===
         // Больше огня = больше экшена!
-        
+
         float UsedFireCone = AttackFireAngleDeg * 2.0f;  // Базовый конус x2
-        
+
         // Разные конусы для разных режимов
         if (Mode == EAttackMode::TailChase)
         {
@@ -1101,10 +1182,13 @@ void UShipAIPilotComponent::UpdateAI_AttackLaser(float Dt, AActor* Target)
                 }
             }
 
+            if (CVar_ShipBot_DebugDraw.GetValueOnGameThread() != 0)
+            {
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-            DrawDebugLine(GetWorld(), SelfPos, AimPos, FColor::Red, false, 0.05f, 0, 2.f);
-            DrawDebugSphere(GetWorld(), AimPos, 500.f, 8, FColor::Red, false, 0.05f, 0, 1.f);
+                DrawDebugLine(GetWorld(), SelfPos, AimPos, FColor::Red, false, 0.05f, 0, 2.f);
+                DrawDebugSphere(GetWorld(), AimPos, 500.f, 8, FColor::Red, false, 0.05f, 0, 1.f);
 #endif
+            }
         }
     }
 }
@@ -1160,66 +1244,56 @@ AActor* UShipAIPilotComponent::FindBestEnemyShip()
     const AShipPawn*  SelfShip = Cast<AShipPawn>(Ow);
     const int32       SelfTeam = SelfShip ? SelfShip->GetTeamId() : INDEX_NONE;
 
+    // Cache ship list per-world to avoid O(N^2) scans each tick across hundreds of bots.
+    struct FShipCache
+    {
+        TArray<TWeakObjectPtr<AShipPawn>> Ships;
+        double LastRefresh = -1.0;
+    };
+    static TMap<TWeakObjectPtr<UWorld>, FShipCache> CacheByWorld;
+
+    const double Now = World->GetTimeSeconds();
+    const float RefreshPeriod = FMath::Max(0.05f, CVar_ShipBot_TargetRefresh.GetValueOnGameThread());
+    FShipCache& Cache = CacheByWorld.FindOrAdd(World);
+
+    const bool bStale = (Cache.LastRefresh < 0.0) || (Now - Cache.LastRefresh > RefreshPeriod);
+    if (bStale)
+    {
+        Cache.Ships.Reset();
+        for (TActorIterator<AShipPawn> It(World); It; ++It)
+        {
+            AShipPawn* Ship = *It;
+            if (Ship)
+            {
+                Cache.Ships.Add(Ship);
+            }
+        }
+        Cache.LastRefresh = Now;
+    }
+
     AActor* Best      = nullptr;
     float   BestScore = TNumericLimits<float>::Max();
 
-    // Перебираем всех потенциальных врагов
-    for (TActorIterator<APawn> It(World); It; ++It)
+    for (const TWeakObjectPtr<AShipPawn>& ShipPtr : Cache.Ships)
     {
-        APawn* P = *It;
-        if (!P || P == Ow) continue;
+        AShipPawn* OtherShip = ShipPtr.Get();
+        if (!OtherShip || OtherShip == Ow) continue;
 
-        if (!P->IsA(AShipPawn::StaticClass()))
-            continue;
-
-        const AShipPawn* OtherShip = Cast<AShipPawn>(P);
-        if (!OtherShip) continue;
-
-        // Свои нам не враги
         if (SelfTeam != INDEX_NONE && OtherShip->GetTeamId() == SelfTeam)
         {
             continue;
         }
 
-        const float DistSq = FVector::DistSquared(SelfLoc, P->GetActorLocation());
+        const float DistSq = FVector::DistSquared(SelfLoc, OtherShip->GetActorLocation());
 
-        // === ANTI-КУЧКОВАНИЕ: считаем, сколько наших союзников уже держат ЭТОТ корабль в таргете ===
-        int32 NumFriendLockers = 0;
-
-        for (TActorIterator<APawn> It2(World); It2; ++It2)
-        {
-            APawn* P2 = *It2;
-            if (!P2 || P2 == Ow) continue;
-            if (!P2->IsA(AShipPawn::StaticClass())) continue;
-
-            const AShipPawn* FriendShip = Cast<AShipPawn>(P2);
-            if (!FriendShip) continue;
-
-            // Только наши союзники
-            if (SelfTeam != INDEX_NONE && FriendShip->GetTeamId() != SelfTeam)
-            {
-                continue;
-            }
-
-            if (UShipAIPilotComponent* FriendPilot = P2->FindComponentByClass<UShipAIPilotComponent>())
-            {
-                if (FriendPilot->TargetActor.IsValid() &&
-                    FriendPilot->TargetActor.Get() == P)
-                {
-                    ++NumFriendLockers;
-                }
-            }
-        }
-
-        // Чем больше союзников уже бьют эту цель, тем хуже её "скор"
-        // Score = расстояние^2 * (1 + 2.0 * N_союзников)
-        const float SpreadWeight = 2.0f;  // Сильный штраф за кучкование
-        const float Score = DistSq * (1.f + NumFriendLockers * SpreadWeight);
+        // Slight random bias per ship to reduce lock-step targeting.
+        const float Jitter = 1.f + (float(OtherShip->GetUniqueID() & 0xFF) / 1024.f);
+        const float Score  = DistSq * Jitter;
 
         if (Score < BestScore)
         {
             BestScore = Score;
-            Best      = P;
+            Best      = OtherShip;
         }
     }
 

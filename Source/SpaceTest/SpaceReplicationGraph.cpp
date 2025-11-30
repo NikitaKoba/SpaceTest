@@ -13,6 +13,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "ShipPawn.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSpaceRepGraph, Log, All);
 
@@ -46,6 +47,16 @@ static TAutoConsoleVariable<int32> CVar_SRG_LogStatsPerConnMax(
 	6,
 	TEXT("Max number of per-connection lines to emit each period"));
 
+static TAutoConsoleVariable<float> CVar_SRG_DefaultCullMeters(
+	TEXT("space.repgraph.cullmeters"),
+	1200.f,
+	TEXT("Default cull distance in meters for replication graph (fallback for any actor)"));
+
+static TAutoConsoleVariable<float> CVar_SRG_ShipCullMeters(
+	TEXT("space.repgraph.ship.cullmeters"),
+	1900.f,
+	TEXT("Cull distance in meters for ships (AShipPawn)"));
+
 USpaceReplicationGraph::USpaceReplicationGraph()
 {
 }
@@ -56,7 +67,7 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 
 	// Spatial grid
 	GridNode = CreateNewNode<UReplicationGraphNode_GridSpatialization2D>();
-	GridNode->CellSize = 50000.f; // 500m cells
+	GridNode->CellSize = 90000.f; // 500m cells
 	GridNode->SpatialBias = FVector2D::ZeroVector;
 	AddGlobalGraphNode(GridNode);
 
@@ -74,11 +85,16 @@ void USpaceReplicationGraph::InitGlobalGraphNodes()
 void USpaceReplicationGraph::InitGlobalActorClassSettings()
 {
 	Super::InitGlobalActorClassSettings();
-	const float DefaultCullMeters = 2000.f;
+	const float DefaultCullMeters = FMath::Max(100.f, CVar_SRG_DefaultCullMeters.GetValueOnAnyThread());
 	const float DefaultCullUU = FMath::Square(DefaultCullMeters * 100.f);
+	const float ShipCullMeters = FMath::Max(100.f, CVar_SRG_ShipCullMeters.GetValueOnAnyThread());
+	const float ShipCullUU = FMath::Square(ShipCullMeters * 100.f);
 
 	FClassReplicationInfo& Any = GlobalActorReplicationInfoMap.GetClassInfo(AActor::StaticClass());
 	Any.SetCullDistanceSquared(DefaultCullUU);
+
+	FClassReplicationInfo& ShipInfo = GlobalActorReplicationInfoMap.GetClassInfo(AShipPawn::StaticClass());
+	ShipInfo.SetCullDistanceSquared(ShipCullUU);
 }
 
 void USpaceReplicationGraph::InitConnectionGraphNodes(UNetReplicationGraphConnection* ConnMgr)

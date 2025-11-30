@@ -199,9 +199,12 @@ public:
 	void UpdateGlobalPosIncremental(float DeltaSeconds);
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual void UnPossessed() override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:
+	void ApplyNetSettingsForRole(bool bPlayerControlled);
 	void ApplyFlightProfile(bool bHyper);
 	void StopAfterHyperDrive();
 	void ResetCameraBufferImmediate();

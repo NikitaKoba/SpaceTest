@@ -4,12 +4,15 @@
 #include "FlightComponent.h"
 #include "SpaceFloatingOriginSubsystem.h"
 
+#include "Engine/Engine.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/World.h"
 #include "Misc/ScopeExit.h"
 #include "Net/UnrealNetwork.h"
+#include <limits>
 
 DEFINE_LOG_CATEGORY(LogShipNet);
 
@@ -32,6 +35,30 @@ static TAutoConsoleVariable<float> CVar_ShipNet_InterpDelayOverride(
 static TAutoConsoleVariable<float> CVar_ShipNet_InterpLeadSeconds(
 	TEXT("ship.Net.InterpLeadSeconds"), 0.02f,
 	TEXT("Optional forward lead (seconds) to reduce visible trailing vs server"));
+
+static TAutoConsoleVariable<int32> CVar_ShipNet_ReconHUD(
+	TEXT("ship.Net.ReconHUD"), 1,
+	TEXT("Show on-screen reconcile stats on owning client (0=off)"));
+
+// Net LOD throttling for AI ships (authoritative)
+static TAutoConsoleVariable<float> CVar_ShipNetLOD_UpdatePeriod(
+	TEXT("ship.Net.LOD.UpdatePeriod"), 0.6f,
+	TEXT("Seconds between AI net LOD recalcs (per ship, authority only)"));
+static TAutoConsoleVariable<float> CVar_ShipNetLOD_NearDist(
+	TEXT("ship.Net.LOD.NearDist"), 80000.f,
+	TEXT("Distance in uu for near net LOD (higher rate)"));
+static TAutoConsoleVariable<float> CVar_ShipNetLOD_MidDist(
+	TEXT("ship.Net.LOD.MidDist"), 200000.f,
+	TEXT("Distance in uu for mid net LOD"));
+static TAutoConsoleVariable<float> CVar_ShipNetLOD_NearHz(
+	TEXT("ship.Net.LOD.NearHz"), 15.f,
+	TEXT("NetUpdateFrequency for AI when near players"));
+static TAutoConsoleVariable<float> CVar_ShipNetLOD_MidHz(
+	TEXT("ship.Net.LOD.MidHz"), 8.f,
+	TEXT("NetUpdateFrequency for AI when mid-range to players"));
+static TAutoConsoleVariable<float> CVar_ShipNetLOD_FarHz(
+	TEXT("ship.Net.LOD.FarHz"), 4.f,
+	TEXT("NetUpdateFrequency for AI when far from players"));
 
 static FORCEINLINE bool ShipNet_ShouldLog()
 {
@@ -179,6 +206,11 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	HandleFloatingOriginShift();
 	UpdatePhysicsSimState();
 
+	if (OwPawn->HasAuthority())
+	{
+		UpdateNetLOD_ForAI();
+	}
+
 	// === 1) Р’Р»Р°РґРµР»РµС† в†’ СЃРµСЂРІРµСЂ: RPC СЃ РёРЅРїСѓС‚РѕРј + Р»РѕРєР°Р»СЊРЅРѕРµ РєСЌС€РёСЂРѕРІР°РЅРёРµ ===
 	if (OwPawn->IsLocallyControlled() && OwPawn->GetLocalRole() == ROLE_AutonomousProxy)
 	{
@@ -252,6 +284,71 @@ void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 			}
 		}
 		// LastAckSeq СЃРµСЂРІРµСЂ РѕР±РЅРѕРІР»СЏРµС‚ РІ Server_SendInput()
+	}
+}
+
+void UShipNetComponent::UpdateNetLOD_ForAI()
+{
+	if (!OwPawn || !OwPawn->HasAuthority()) return;
+	// Players handled separately by ShipPawn settings; only throttle AI.
+	if (OwPawn->IsPlayerControlled()) return;
+	UWorld* World = OwPawn->GetWorld();
+	if (!World) return;
+
+	const double Now = World->GetTimeSeconds();
+	const float Period = FMath::Max(0.1f, CVar_ShipNetLOD_UpdatePeriod.GetValueOnGameThread());
+	if (LastNetLODUpdateTime > 0.0 && (Now - LastNetLODUpdateTime) < Period)
+	{
+		return;
+	}
+	LastNetLODUpdateTime = Now;
+
+	float MinDistSq = std::numeric_limits<float>::max();
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* PC = It->Get();
+		const APawn* PlayerPawn = PC ? PC->GetPawn() : nullptr;
+		if (!PlayerPawn) continue;
+
+		const float DistSq = FVector::DistSquared(PlayerPawn->GetActorLocation(), OwPawn->GetActorLocation());
+		MinDistSq = FMath::Min(MinDistSq, DistSq);
+	}
+
+	if (MinDistSq == std::numeric_limits<float>::max())
+	{
+		return; // no players yet
+	}
+
+	const float Dist = FMath::Sqrt(MinDistSq);
+	const float Near = FMath::Max(0.f, CVar_ShipNetLOD_NearDist.GetValueOnGameThread());
+	const float Mid  = FMath::Max(Near, CVar_ShipNetLOD_MidDist.GetValueOnGameThread());
+
+	float TargetHz = CVar_ShipNetLOD_FarHz.GetValueOnGameThread();
+	float TargetPriority = 0.6f;
+	if (Dist <= Near)
+	{
+		TargetHz = CVar_ShipNetLOD_NearHz.GetValueOnGameThread();
+		TargetPriority = 1.3f;
+	}
+	else if (Dist <= Mid)
+	{
+		TargetHz = CVar_ShipNetLOD_MidHz.GetValueOnGameThread();
+		TargetPriority = 1.0f;
+	}
+
+	TargetHz = FMath::Max(1.f, TargetHz);
+	const float TargetMinHz = FMath::Clamp(TargetHz * 0.5f, 1.f, TargetHz);
+
+	const bool bFreqChanged = !FMath::IsNearlyEqual(OwPawn->NetUpdateFrequency, TargetHz, 0.1f)
+		|| !FMath::IsNearlyEqual(OwPawn->MinNetUpdateFrequency, TargetMinHz, 0.1f)
+		|| !FMath::IsNearlyEqual(OwPawn->NetPriority, TargetPriority, 0.01f);
+
+	if (bFreqChanged)
+	{
+		OwPawn->SetNetUpdateFrequency(TargetHz);
+		OwPawn->SetMinNetUpdateFrequency(TargetMinHz);
+		OwPawn->NetPriority = TargetPriority;
+		OwPawn->ForceNetUpdate();
 	}
 }
 
@@ -578,11 +675,15 @@ void UShipNetComponent::DriveSimulatedProxy()
 
 	Ship->SetActorLocationAndRotation(P, Qs.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
 }
+static TAutoConsoleVariable<int32> CVar_ShipNet_OwnerRecon(
+	TEXT("ship.Net.OwnerRecon"), 1, TEXT("Owner reconcile enable/disable"));
 
 // === Р’Р»Р°РґРµР»РµС†: РјСЏРіРєР°СЏ СЂРµРєРѕРЅСЃРёР»СЏС†РёСЏ СЃ РѕРіСЂР°РЅРёС‡РµРЅРЅС‹Рј В«РїРёРЅРєРѕРјВ» ===
 // ShipNetComponent.cpp
 void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 {
+	if (CVar_ShipNet_OwnerRecon.GetValueOnAnyThread() == 0)
+		return;
 	if (!bHaveOwnerRecon || !ShipMesh || DeltaSeconds <= 0.f || !GetWorld())
 		return;
 
@@ -645,8 +746,43 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	const bool bHardSnap = (PosErr > PosSnap_Hard) || (VelErr > VelSnap_Hard) || (AngErr > AngSnap_Hard);
 	const bool bSoftSnap = !bHardSnap && ((PosErr > PosSnap_Soft) || (VelErr > VelSnap_Soft) || (AngErr > AngSnap_Soft));
 
+	const bool bLocalPawn = OwPawn && OwPawn->IsLocallyControlled();
+	const bool bHudEnabled = bLocalPawn && bReconHUD && (CVar_ShipNet_ReconHUD.GetValueOnAnyThread() != 0);
+
+	auto PushReconHUD = [&](const TCHAR* Tag)
+	{
+		if (!bHudEnabled || !GEngine) return;
+
+		ReconHUD_LastPosErrM   = float(PosErr / 100.0);
+		ReconHUD_LastVelErrMps = float(VelErr / 100.0);
+		ReconHUD_LastAngErrRad = float(AngErr);
+		if (bSoftSnap) ++ReconHUD_SoftCount;
+		if (bHardSnap) ++ReconHUD_HardCount;
+		ReconHUD_LastUpdateTime = Now;
+
+		const FString Hud = FString::Printf(
+			TEXT("[Recon %s] pos=%.1fm vel=%.1fm/s ang=%.2frad | ahead=%.3fs | soft=%d hard=%d"),
+			Tag,
+			ReconHUD_LastPosErrM,
+			ReconHUD_LastVelErrMps,
+			ReconHUD_LastAngErrRad,
+			Ahead,
+			ReconHUD_SoftCount,
+			ReconHUD_HardCount);
+
+		const FColor Col = bHardSnap ? FColor::Red : (bSoftSnap ? FColor(255, 140, 0) : FColor::Green);
+		GEngine->AddOnScreenDebugMessage(
+			(uint64)this,
+			ReconHUDHoldSeconds,
+			Col,
+			Hud,
+			true,
+			FVector2D(ReconHUDScale, ReconHUDScale));
+	};
+
 	if (bHardSnap)
 	{
+		PushReconHUD(TEXT("HARD"));
 		UE_LOG(LogShipNet, Warning,
 			TEXT("[HARD SNAP] %s | PosErr=%.0f m | VelErr=%.0f m/s | AngErr=%.1f rad/s"),
 			*GetNameSafe(Ship),
@@ -654,9 +790,26 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 			VelErr / 100.0,
 			AngErr);
 		
-		ShipMesh->SetWorldLocationAndRotation(LocS, RotS.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
-		ShipMesh->SetPhysicsLinearVelocity(VelS, false);
-		ShipMesh->SetPhysicsAngularVelocityInRadians(Wrad, false);
+		// Анти-рывок: если ошибка не космическая, делаем сильный бленд вместо телепорта.
+		const bool bCanBlendHard = (PosErr < 200000.0); // <2 км
+		if (bCanBlendHard)
+		{
+			const FVector Delta = LocS - LocC;
+			const FVector Step  = Delta.GetClampedToMaxSize(30000.f); // максимум 300 м за тик
+			ShipMesh->SetWorldLocation(LocC + Step, false, nullptr, ETeleportType::None);
+
+			const FVector VelBlend = VelC + (VelS - VelC).GetClampedToMaxSize(15000.f);
+			ShipMesh->SetPhysicsLinearVelocity(VelBlend, false);
+
+			const FVector AngBlend = Wcur + (Wrad - Wcur).GetClampedToMaxSize(2.5f); // ~143 deg/s
+			ShipMesh->SetPhysicsAngularVelocityInRadians(AngBlend, false);
+		}
+		else
+		{
+			ShipMesh->SetWorldLocationAndRotation(LocS, RotS.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+			ShipMesh->SetPhysicsLinearVelocity(VelS, false);
+			ShipMesh->SetPhysicsAngularVelocityInRadians(Wrad, false);
+		}
 
 		if (PendingInputs.Num() > 0)
 			PendingInputs.Reset();
@@ -665,15 +818,36 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	}
 
 	// --- РјСЏРіРєР°СЏ СЂРµРєРѕРЅСЃРёР»СЏС†РёСЏ (РєСЂРёС‚РёС‡РµСЃРєРё РґРµРјРїС„РёСЂРѕРІР°РЅРЅС‹Р№ PD) ---
-	const float TauPos   = bSoftSnap ? (bHyper ? 0.25f : 0.14f) : 0.08f;
-	const float TauAng   = bSoftSnap ? 0.18f : 0.10f;
+	// tiny-error skip to avoid micro-jitter
+	const bool bTinyErr =
+		(PosErr < 200.0) &&     // < 2 м
+		(VelErr < 150.0) &&     // < 1.5 м/с
+		(AngErr < 0.10);        // < ~6°/с
+
+	// если ошибка совсем маленькая и нет soft/hard — вообще ничего не делаем
+	if (!bSoftSnap && bTinyErr)
+	{
+		PushReconHUD(TEXT("OK"));
+		return;
+	}
+
+	// !!! ВОТ ЭТО УБИРАЕМ !!!
+	// if (!bSoftSnap)
+	// {
+	//     PushReconHUD(TEXT("OK"));
+	//     return;
+	// }
+	// ------------------------------------
+
+	// Мягкая реконсиляция — ВСЕГДА, если ошибка не tiny и не hard
+	const float TauPos   = bSoftSnap ? (bHyper ? 0.30f : 0.18f) : 0.30f;
+	const float TauAng   = bSoftSnap ? 0.22f : 0.20f;
 	const float AlphaPos = 1.f - FMath::Exp(-DeltaSeconds / TauPos);
 	const float AlphaAng = 1.f - FMath::Exp(-DeltaSeconds / TauAng);
 
-	// Р›РёРЅРµР№РЅР°СЏ С‡Р°СЃС‚СЊ
 	const FVector Vtgt = VelS + (LocS - LocC) / FMath::Max(1e-3f, TauPos);
 
-	const float MAX_VEL_NUDGE = bSoftSnap ? (bHyper ? 60000.f : 25000.f) : 10000.f;
+	const float MAX_VEL_NUDGE = bSoftSnap ? (bHyper ? 60000.f : 25000.f) : 8000.f;
 	FVector Vnew = FMath::Lerp(VelC, Vtgt, AlphaPos);
 	const FVector Nudge = Vnew - VelC;
 	if (Nudge.Size() > MAX_VEL_NUDGE)
@@ -693,6 +867,8 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 		const FVector Wblend = FMath::Lerp(Wcur, Wtgt, AlphaAng);
 		ShipMesh->SetPhysicsAngularVelocityInRadians(Wblend, false);
 	}
+
+	PushReconHUD(bSoftSnap ? TEXT("SOFT") : TEXT("OK"));
 }
 
 

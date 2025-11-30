@@ -165,6 +165,11 @@ public:
 	UPROPERTY(EditAnywhere) float OwnerHardSnapDistance = 200.f;  // см
 	UPROPERTY(EditAnywhere) float OwnerMaxVelNudge   = 8000.f;    // см/с за секунду
 
+	// On-screen reconcile HUD (client-only)
+	UPROPERTY(EditAnywhere, Category="Flight|Debug") bool bReconHUD = true;
+	UPROPERTY(EditAnywhere, Category="Flight|Debug", meta=(ClampMin="0.1")) float ReconHUDHoldSeconds = 1.5f;
+	UPROPERTY(EditAnywhere, Category="Flight|Debug", meta=(ClampMin="0.25", ClampMax="4.0")) float ReconHUDScale = 1.0f;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -182,6 +187,7 @@ protected:
 	void DriveSimulatedProxy();
 	void OwnerReconcile_Tick(float DeltaSeconds);
 	void AdaptiveInterpDelay_OnSample(double OffsetSample);
+	void UpdateNetLOD_ForAI();
 
 	// Маленький интегратор для ориентации по угл.скорости
 	static FQuat IntegrateQuat(const FQuat& Q0, const FVector& AngVelRad, float Dt);
@@ -211,10 +217,21 @@ protected:
 	bool   bHaveOwnerRecon = false;
 	FShipServerSnap OwnerReconTarget;
 
+	// HUD stats for reconcile (client-only)
+	double ReconHUD_LastUpdateTime = 0.0;
+	float  ReconHUD_LastPosErrM = 0.f;
+	float  ReconHUD_LastVelErrMps = 0.f;
+	float  ReconHUD_LastAngErrRad = 0.f;
+	int32  ReconHUD_SoftCount = 0;
+	int32  ReconHUD_HardCount = 0;
+
 	// Адаптивный delay: окно смещений
 	TStaticArray<double, 64> DelaySamples;
 	int32 DelaySamplesCount = 0;
 	int32 DelaySamplesHead  = 0;
+
+	// Net LOD throttling for AI ships
+	double LastNetLODUpdateTime = -1.0;
 
 	// Tick порядок
 	void SetupTickOrder();

@@ -293,7 +293,7 @@ public:
 	/** Сколько секунд держим tail-chase, даже если геометрия слегка ломается (гистерезис). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Attack", meta=(ClampMin="0.0", ClampMax="5.0"))
 	float TailLockStickyTime = 1.2f;
-
+	
 protected:
 	TWeakObjectPtr<UFlightComponent>   Flight;
 	TWeakObjectPtr<UPrimitiveComponent> Body;
@@ -314,7 +314,11 @@ protected:
 
 	AActor* ResolveTarget();
 	AActor* FindBestEnemyShip();
+	UPROPERTY(EditAnywhere, Category="AI|Perf")
+	float BrainUpdateInterval = 0.05f; // "частота мозгов" ~20 Гц
 
+	// Аккумулятор времени между мозговыми апдейтами
+	float BrainTimeAccumulator = 0.f;
 
 	void    ApplyIdleInput();
 };
