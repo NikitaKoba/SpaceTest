@@ -68,6 +68,19 @@ public:
 	// Установить базовую скорость мира, которую болт добавляет к своему полёту
 	UFUNCTION(BlueprintCallable, Category="Laser|Move")
 	void SetBaseVelocity(const FVector& V) { BaseVelW = V; }
+
+	// === Damage ===
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser|Damage", meta=(ClampMin="0.0"))
+	float Damage = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser|Damage", meta=(ClampMin="0.0"))
+	float HitRadiusUU = 35.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Laser|Damage")
+	TEnumAsByte<ECollisionChannel> HitChannel = ECC_Pawn;
+
+	UFUNCTION(BlueprintCallable, Category="Laser|Damage")
+	void ConfigureDamage(float InDamage, AActor* InCauser, int32 InTeamId);
 	// Базовая скорость мира, заданная при спавне
     UPROPERTY(Replicated)
     FVector BaseVelW = FVector::ZeroVector;
@@ -79,6 +92,12 @@ protected:
 	virtual void OnConstruction(const FTransform& Transform) override;
 
 private:
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AActor> DamageCauser;
+
+	UPROPERTY(Transient)
+	int32 InstigatorTeamId = INDEX_NONE;
+
 	void ApplyShapeScale();
 	void ApplyMaterialParams();
 };

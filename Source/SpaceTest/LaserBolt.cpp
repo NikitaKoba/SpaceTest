@@ -2,6 +2,8 @@
 #include "Components/StaticMeshComponent.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Net/UnrealNetwork.h"
+#include "ShipPawn.h"
+#include "Engine/World.h"
 
 ALaserBolt::ALaserBolt()
 {
@@ -56,34 +58,77 @@ void ALaserBolt::BeginPlay()
 	SetLifeSpan(LifeTimeSec);
 }
 
+void ALaserBolt::ConfigureDamage(float InDamage, AActor* InCauser, int32 InTeamId)
+{
+	Damage = InDamage;
+	DamageCauser = InCauser;
+	InstigatorTeamId = InTeamId;
+}
+
 void ALaserBolt::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
 	if (SpeedUUps > 1.f)
 	{
-		// РРЎРџР РђР’Р›Р•РќРР•: Р”Р»СЏ РїСЂРёС†РµР»СЊРЅРѕР№ СЃС‚СЂРµР»СЊР±С‹ РќР• РЅР°СЃР»РµРґСѓРµРј СЃРєРѕСЂРѕСЃС‚СЊ РєРѕСЂР°Р±Р»СЏ
-		// Р‘РѕР»С‚С‹ Р»РµС‚СЏС‚ СЃС‚СЂРѕРіРѕ Рє РєСѓСЂСЃРѕСЂСѓ Р±РµР· РёСЃРєСЂРёРІР»РµРЅРёСЏ С‚СЂР°РµРєС‚РѕСЂРёРё
-		// Р•СЃР»Рё РЅСѓР¶РЅР° "СЂРµР°Р»РёСЃС‚РёС‡РЅР°СЏ" Р±Р°Р»Р»РёСЃС‚РёРєР° - РёСЃРїРѕР»СЊР·СѓР№С‚Рµ InheritOwnerVelPct > 0
-		
 		const FVector BoltForward = GetActorForwardVector();
 		const FVector vForward = BoltForward * SpeedUUps;
-		
-		// РћРїС†РёРѕРЅР°Р»СЊРЅРѕ: РјРѕР¶РЅРѕ РґРѕР±Р°РІРёС‚СЊ РЅРµР±РѕР»СЊС€РѕР№ РїСЂРѕС†РµРЅС‚ РїСЂРѕРґРѕР»СЊРЅРѕР№ СЃРєРѕСЂРѕСЃС‚Рё
-		// РґР»СЏ СЌС„С„РµРєС‚Р° "РІС‹СЃС‚СЂРµР»Р° СЃ РґРІРёР¶СѓС‰РµРіРѕСЃСЏ РєРѕСЂР°Р±Р»СЏ"
+
+		// Base bolt velocity plus optional inherited forward component
 		FVector vTotal = vForward;
-		
 		if (InheritOwnerVelPct > 0.001f)
 		{
-			// РќР°СЃР»РµРґСѓРµРј С‚РѕР»СЊРєРѕ РєРѕРјРїРѕРЅРµРЅС‚ РІРґРѕР»СЊ РЅР°РїСЂР°РІР»РµРЅРёСЏ РїРѕР»С‘С‚Р° Р±РѕР»С‚Р°
 			const float InheritedSpeed = FVector::DotProduct(BaseVelW, BoltForward);
 			vTotal += BoltForward * FMath::Max(0.f, InheritedSpeed) * InheritOwnerVelPct;
 		}
-		
-		const FVector Delta = vTotal * DeltaSeconds;
 
-		// Р’РёР·СѓР°Р»СЊРЅС‹Р№ СЃРЅР°СЂСЏРґ вЂ” С‚РµР»РµРїРѕСЂС‚РѕРј Р±РµР· sweep
-		SetActorLocation(GetActorLocation() + Delta, false, nullptr, ETeleportType::None);
+		const FVector Delta = vTotal * DeltaSeconds;
+		const FVector Start = GetActorLocation();
+		const FVector End   = Start + Delta;
+
+		bool bHitSomething = false;
+
+		if (HasAuthority() && Damage > KINDA_SMALL_NUMBER)
+		{
+			FHitResult Hit;
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(LaserBoltSweep), true, this);
+			if (DamageCauser.IsValid())
+			{
+				Params.AddIgnoredActor(DamageCauser.Get());
+			}
+			Params.AddIgnoredActor(this);
+
+			const float SweepRadius = FMath::Max3(HitRadiusUU, RadiusUU * 0.5f, 5.f);
+			if (UWorld* World = GetWorld())
+			{
+				bHitSomething = World->SweepSingleByChannel(
+					Hit,
+					Start,
+					End,
+					FQuat::Identity,
+					HitChannel,
+					FCollisionShape::MakeSphere(SweepRadius),
+					Params);
+			}
+
+			if (bHitSomething)
+			{
+				SetActorLocation(Hit.Location, false, nullptr, ETeleportType::None);
+
+				if (AShipPawn* Ship = Cast<AShipPawn>(Hit.GetActor()))
+				{
+					if (InstigatorTeamId == INDEX_NONE || Ship->GetTeamId() != InstigatorTeamId)
+					{
+						Ship->ApplyDamage(Damage, DamageCauser.Get());
+					}
+				}
+
+				Destroy();
+				return;
+			}
+		}
+
+		SetActorLocation(End, false, nullptr, ETeleportType::None);
 	}
 }
 

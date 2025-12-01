@@ -285,32 +285,13 @@ void UShipLaserComponent::ServerSpawn_FromAimPoint(const FVector& AimPoint)
 		if (UWorld* W = GetWorld())
 		{
 			FHitResult Hit;
-			if (GetOwner() && GetOwner()->HasAuthority())
+			if (GetOwner())
 			{
 				FCollisionQueryParams Q(SCENE_QUERY_STAT(LaserDamage), true, GetOwner());
 				Q.AddIgnoredActor(GetOwner());
 
 				const FVector TraceEnd = MuzzleLoc + Dir * MaxAimRangeUU;
-				if (W->LineTraceSingleByChannel(Hit, MuzzleLoc, TraceEnd, ECC_Pawn, Q))
-				{
-					if (AShipPawn* Ship = Cast<AShipPawn>(Hit.GetActor()))
-					{
-						const AShipPawn* OwnerShip = Cast<AShipPawn>(GetOwner());
-						const APawn* OwnerPawn = Cast<APawn>(GetOwner());
-						const bool bOwnerIsPlayer = OwnerPawn && OwnerPawn->GetController() && OwnerPawn->GetController()->IsPlayerController();
-						const int32 OwnerTeam = OwnerShip ? OwnerShip->GetTeamId() : INDEX_NONE;
-						if (OwnerTeam != INDEX_NONE && Ship->GetTeamId() == OwnerTeam)
-						{
-							// Friendly, ignore.
-						}
-						else
-						{
-							const float DamageToApply = DamagePerShot * (bOwnerIsPlayer ? 1.f : FMath::Clamp(AIDamageScale, 0.05f, 1.0f));
-							Ship->ApplyDamage(DamageToApply, GetOwner());
-						}
-					}
-				}
-				if (Hit.bBlockingHit)
+				if (W->LineTraceSingleByChannel(Hit, MuzzleLoc, TraceEnd, ECC_Visibility, Q))
 				{
 					BeamLengthUU = FMath::Clamp(Hit.Distance, 10.f, MaxAimRangeUU);
 				}
@@ -392,8 +373,16 @@ void UShipLaserComponent::Multicast_SpawnBolt_Implementation(
 		}
 	}
 
+	const AShipPawn* OwnerShip = Cast<AShipPawn>(GetOwner());
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	const bool bOwnerIsPlayer = OwnerPawn && OwnerPawn->GetController() && OwnerPawn->GetController()->IsPlayerController();
+	const int32 OwnerTeam = OwnerShip ? OwnerShip->GetTeamId() : INDEX_NONE;
+	const float DamageToApply = DamagePerShot * (bOwnerIsPlayer ? 1.f : FMath::Clamp(AIDamageScale, 0.05f, 1.0f));
+
 	ALaserBolt* Bolt = GetWorld()->SpawnActor<ALaserBolt>(BoltClass, SpawnTM, Params);
 	if (!Bolt) return;
+
+	Bolt->ConfigureDamage(DamageToApply, GetOwner(), OwnerTeam);
 
 	// Наследуем скорость владельца
 	FVector OwnerVel = FVector::ZeroVector;
