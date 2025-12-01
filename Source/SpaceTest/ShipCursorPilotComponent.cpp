@@ -48,6 +48,11 @@ bool UShipCursorPilotComponent::MakeAimRay(FVector& OutOrigin, FVector& OutDir) 
 }
 
 
+static TAutoConsoleVariable<int32> CVar_ShipHud_ShowBotBars(
+	TEXT("ship.hud.showbotbars"),
+	1,
+	TEXT("Draw debug HP/Shield bars over other ships (0=off,1=on)")
+);
 
 
 bool UShipCursorPilotComponent::GetAimRay(FVector& OutWorldOrigin, FVector& OutWorldDir) const
@@ -146,33 +151,37 @@ void UShipCursorPilotComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 // ShipCursorPilotComponent.cpp
 // ==============================
 
-void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* PC)
+void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* ViewPC)
 {
-    if (!bDebugDraw || !Canvas || !GetOwner()) return;
+    if (!bDebugDraw || !Canvas || !GetOwner())
+        return;
 
     APawn* Pawn = Cast<APawn>(GetOwner());
-    if (!Pawn || !Pawn->IsLocallyControlled()) return;
+    if (!Pawn || !Pawn->IsLocallyControlled())
+        return;
 
-    // 1) запомним реальные размеры Canvas и пиксельную точку прицела
+    // ВАЖНО: используем PC, который реально рисует эту вьюху.
+    APlayerController* PC = ViewPC ? ViewPC : Cast<APlayerController>(Pawn->GetController());
+    if (!PC)
+        return;
+
+    // 1) размеры Canvas и точка прицела
     LastCanvasW = int32(Canvas->ClipX);
     LastCanvasH = int32(Canvas->ClipY);
 
     const FVector2D C(LastCanvasW * 0.5f, LastCanvasH * 0.5f);
-    const FVector2D P = C + CursorSm;       // та же формула, что и для отрисовки
-    LastScreenAimPx  = P;                    // сохраняем для MakeAimRay()
-
-    // --- ниже просто отрисовка, можешь оставить как тебе нравится ---
+    const FVector2D P = C + CursorSm;
+    LastScreenAimPx   = P;
 
     const FLinearColor ColMain (0.f, 0.9f, 1.f, 1.f);
     const FLinearColor ColFill (0.f, 1.f, 0.6f, 0.9f);
     const FLinearColor ColHint (0.f, 0.4f, 0.6f, 0.75f);
 
-    // крест и окружности
+    // --- прицел ---
     DrawCrosshair(Canvas, C, 8.f, ColHint, 1.5f);
     DrawCircle(Canvas,   C, DeadzonePx,   64, ColHint, 1.f);
     DrawCircle(Canvas,   C, MaxDeflectPx, 64, ColHint, 1.f);
 
-    // линия от центра к точке + маленький кружок в точке
     {
         FCanvasLineItem L(C, P);
         L.SetColor(ColHint.ToFColor(true));
@@ -181,7 +190,7 @@ void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* 
         DrawCircle(Canvas, P, 6.f, 24, ColMain, 2.f);
     }
 
-    // вертикальные индикаторы (|X|)
+    // --- вертикальные индикаторы (|X|) ---
     {
         const float margin = ReticleGapPx;
         const float H = ReticleBarLengthPx;
@@ -209,7 +218,7 @@ void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* 
         DrawBarV(RBarPos, fillX, /*bFromBottom=*/false);
     }
 
-    // горизонтальные индикаторы (|Y|)
+    // --- горизонтальные индикаторы (|Y|) ---
     {
         const float margin = ReticleGapPx;
         const float H = ReticleBarLengthPx;
@@ -237,6 +246,7 @@ void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* 
         DrawBarH(BBarPos, fillY, /*bFromRight=*/false);
     }
 
+    // --- вспомогательные лямбды для полосок ---
     auto DrawBar = [&](const FVector2D& Pos, const FVector2D& Size, float Fill01, const FLinearColor& Bg, const FLinearColor& FillColor)
     {
         const float Clamped = FMath::Clamp(Fill01, 0.f, 1.f);
@@ -255,45 +265,105 @@ void UShipCursorPilotComponent::OnDebugDraw(UCanvas* Canvas, APlayerController* 
         const FVector2D ShieldPos = BasePos;
         const FVector2D HpPos     = BasePos + FVector2D(0.f, Size.Y + Pad);
 
-        DrawBar(ShieldPos, Size, Shield01, FLinearColor(0.f, 0.f, 0.f, 0.6f), FLinearColor(0.2f, 0.6f, 1.f, 0.9f));
-        DrawBar(HpPos,     Size, Hp01,     FLinearColor(0.f, 0.f, 0.f, 0.6f), FLinearColor(0.1f, 0.9f, 0.1f, 0.9f));
+        DrawBar(ShieldPos, Size, Shield01,
+            FLinearColor(0.f, 0.f, 0.f, 0.6f),
+            FLinearColor(0.2f, 0.6f, 1.f, 0.9f));
+
+        DrawBar(HpPos,     Size, Hp01,
+            FLinearColor(0.f, 0.f, 0.f, 0.6f),
+            FLinearColor(0.1f, 0.9f, 0.1f, 0.9f));
     };
 
-    // Player shield + health (bottom center)
+    // --- Полоска игрока (внизу, как было) ---
     if (const AShipPawn* Ship = Cast<AShipPawn>(Pawn))
     {
-        const float Hp01 = (Ship->MaxHealth > 1e-3f) ? (Ship->Health / Ship->MaxHealth) : 0.f;
-        const float Sh01 = (Ship->MaxShield > 1e-3f) ? (Ship->Shield / Ship->MaxShield) : 0.f;
+        const float MaxHp = (Ship->MaxHealth > 1e-3f) ? Ship->MaxHealth : 1.f;
+        const float MaxSh = (Ship->MaxShield > 1e-3f) ? Ship->MaxShield : 1.f;
+
+        const float Hp01 = FMath::Clamp(Ship->Health / MaxHp, 0.f, 1.f);
+        const float Sh01 = FMath::Clamp(Ship->Shield / MaxSh, 0.f, 1.f);
+
         const FVector2D Size(260.f, 14.f);
         const FVector2D Pos(LastCanvasW * 0.5f - Size.X * 0.5f, LastCanvasH - 100.f);
         DrawShieldAndHealth(Pos, Size, Sh01, Hp01);
 
         if (GEngine && GEngine->GetSmallFont())
         {
-            const FString Label = FString::Printf(TEXT("SH: %.0f / %.0f   HP: %.0f / %.0f"), Ship->Shield, Ship->MaxShield, Ship->Health, Ship->MaxHealth);
-            FCanvasTextItem Txt(Pos + FVector2D(4.f, -18.f), FText::FromString(Label), GEngine->GetSmallFont(), FLinearColor::White);
+            const FString Label = FString::Printf(TEXT("SH: %.0f / %.0f   HP: %.0f / %.0f"),
+                Ship->Shield, Ship->MaxShield, Ship->Health, Ship->MaxHealth);
+            FCanvasTextItem Txt(Pos + FVector2D(4.f, -18.f),
+                FText::FromString(Label), GEngine->GetSmallFont(), FLinearColor::White);
             Txt.EnableShadow(FLinearColor::Black);
             Canvas->DrawItem(Txt);
         }
     }
 
-    // Bars for other ships (AI/bots) projected above them
-    if (UWorld* World = GetWorld())
+    // --- Полоски над ботами ---
+    if (CVar_ShipHud_ShowBotBars.GetValueOnGameThread() != 0)
     {
-        for (TActorIterator<AShipPawn> It(World); It; ++It)
+        if (UWorld* World = GetWorld())
         {
-            const AShipPawn* Other = *It;
-            if (!Other || Other == Pawn) continue;
-            if (Other->MaxHealth <= 1e-3f) continue;
-
-            FVector2D Screen;
-            if (PC->ProjectWorldLocationToScreen(Other->GetActorLocation() + FVector(0.f, 0.f, 400.f), Screen))
+            for (TActorIterator<AShipPawn> It(World); It; ++It)
             {
-                const float Hp01 = FMath::Clamp(Other->Health / Other->MaxHealth, 0.f, 1.f);
-                const float Sh01 = (Other->MaxShield > 1e-3f) ? FMath::Clamp(Other->Shield / Other->MaxShield, 0.f, 1.f) : 0.f;
-                const FVector2D Size(150.f, 10.f);
-                const FVector2D Base = Screen - FVector2D(Size.X * 0.5f, Size.Y);
+                const AShipPawn* Other = *It;
+                if (!Other || Other == Pawn)
+                    continue;
+
+                // можно скипать трупы
+                if (Other->Health <= 0.f)
+                    continue;
+
+                // позиция над кораблём: используем bounds ShipMesh, чтобы точно сверху
+                const UStaticMeshComponent* OtherMesh =
+                    Other->ShipMesh ? Other->ShipMesh : Other->FindComponentByClass<UStaticMeshComponent>();
+
+                FVector WorldLoc = Other->GetActorLocation() + FVector(0.f, 0.f, 400.f);
+                if (OtherMesh)
+                {
+                    const FBoxSphereBounds B = OtherMesh->Bounds;
+                    WorldLoc = B.Origin + FVector(0.f, 0.f, B.BoxExtent.Z + 80.f); // чуть выше корабля
+                }
+
+                FVector2D Screen;
+                // ВАЖНО: bPlayerViewportRelative = true — особенно в PIE/клиенте
+                const bool bProjected = PC->ProjectWorldLocationToScreen(
+                    WorldLoc,
+                    Screen,
+                    /*bPlayerViewportRelative=*/true);
+
+                if (!bProjected)
+                    continue;
+
+                const float MaxHp = (Other->MaxHealth > 1e-3f) ? Other->MaxHealth : 1.f;
+                const float MaxSh = (Other->MaxShield > 1e-3f) ? Other->MaxShield : 1.f;
+
+                const float Hp01 = FMath::Clamp(Other->Health / MaxHp, 0.f, 1.f);
+                const float Sh01 = FMath::Clamp(Other->Shield / MaxSh, 0.f, 1.f);
+
+                const FVector2D Size(170.f, 12.f);
+                const FVector2D Base = Screen - FVector2D(Size.X * 0.5f, Size.Y + 8.f);
+
                 DrawShieldAndHealth(Base, Size, Sh01, Hp01);
+
+#if 0 // включи при необходимости дебага
+                UE_LOG(LogTemp, Warning, TEXT("BotBar %s  HP=%.1f/%.1f SH=%.1f/%.1f Screen=(%.1f, %.1f)"),
+                    *GetNameSafe(Other),
+                    Other->Health, Other->MaxHealth,
+                    Other->Shield, Other->MaxShield,
+                    Screen.X, Screen.Y);
+#endif
+
+                if (GEngine && GEngine->GetTinyFont())
+                {
+                    const FString Label = FString::Printf(TEXT("HP %.0f / %.0f | SH %.0f / %.0f"),
+                        Other->Health, Other->MaxHealth, Other->Shield, Other->MaxShield);
+                    FCanvasTextItem Txt(Base + FVector2D(0.f, -14.f),
+                        FText::FromString(Label),
+                        GEngine->GetTinyFont(),
+                        FLinearColor::White);
+                    Txt.EnableShadow(FLinearColor::Black);
+                    Canvas->DrawItem(Txt);
+                }
             }
         }
     }
