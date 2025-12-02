@@ -20,7 +20,10 @@ public class SpaceTest : ModuleRules
 			"PhysicsCore"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "NetCore"  });
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"NetCore",
+			"ProceduralMeshComponent"
+		});
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

@@ -87,6 +87,13 @@ public:
 	bool bDrawOtherPlayerMarker = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
 	float OtherPlayerMarkerRadius = 800.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
+	bool bDrawNavPointMarker = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
+	float NavPointMarkerRadius = 800.f;
+	// Fixed global coordinates (UU) for a navigation marker (primary local player only)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
+	FVector NavPointGlobalUU = FVector(157320350.293333f, -79047476.772109f, -112376001.890297f);
 	// Hyperdrive mode (replicated)
 	UPROPERTY(ReplicatedUsing=OnRep_HyperDrive, EditAnywhere, Category="Flight|Hyper")
 	bool bHyperDriveActive = false;

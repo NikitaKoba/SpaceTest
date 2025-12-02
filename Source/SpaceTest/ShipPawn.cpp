@@ -13,6 +13,7 @@
 #include "Camera/CameraComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
+#include "Engine/LocalPlayer.h"
 #include "EngineUtils.h"
 #include "ShipAISquadronSubsystem.h"
 #include "Net/UnrealNetwork.h"
@@ -412,6 +413,39 @@ void AShipPawn::Tick(float DeltaSeconds)
 				DrawDebugString(World, MarkerLoc + FVector(0.f, 0.f, OtherPlayerMarkerRadius + 150.f),
 					FString::Printf(TEXT("%.1f km"), DistKm), nullptr, Color, 0.f, true);
 			}
+		}
+	}
+
+	// --- Route marker to a fixed navigation point for any local player ---
+	if (IsLocallyControlled() && bDrawNavPointMarker)
+	{
+		UWorld* World = GetWorld();
+		if (World && World->GetNetMode() != NM_DedicatedServer)
+		{
+			const FVector3d NavGlobal = FVector3d(NavPointGlobalUU);
+			FVector TargetWorld = FVector(NavGlobal);
+
+			if (USpaceFloatingOriginSubsystem* FO = World->GetSubsystem<USpaceFloatingOriginSubsystem>())
+			{
+				TargetWorld = FO->GlobalToWorld_Vector(NavGlobal);
+			}
+
+			const FVector MyLoc = GetActorLocation();
+			const FVector Dir   = TargetWorld - MyLoc;
+			const double  Dist  = Dir.Length();
+			const FVector DirN  = Dir.IsNearlyZero() ? FVector::ForwardVector : Dir.GetSafeNormal();
+
+			const float MaxArrowLen = 20000.f;
+			const float ArrowLen    = (Dist > MaxArrowLen) ? MaxArrowLen : (float)Dist;
+			const FVector MarkerLoc = MyLoc + DirN * ArrowLen;
+
+			const FColor Color = FColor::Yellow;
+			DrawDebugSphere(World, MarkerLoc, NavPointMarkerRadius, 16, Color, false, 0.f, 0, 2.f);
+			DrawDebugDirectionalArrow(World, MyLoc, MarkerLoc, 400.f, Color, false, 0.f, 0, 2.f);
+
+			const float DistKm = (float)(Dist / 100000.0); // cm -> km
+			DrawDebugString(World, MarkerLoc + FVector(0.f, 0.f, NavPointMarkerRadius + 150.f),
+				FString::Printf(TEXT("%.1f km"), DistKm), nullptr, Color, 0.f, true);
 		}
 	}
 }
