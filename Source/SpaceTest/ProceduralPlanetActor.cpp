@@ -288,6 +288,7 @@ AProceduralPlanetActor::AProceduralPlanetActor()
     SetRootComponent(Mesh);
     Mesh->bUseAsyncCooking = true;
     Mesh->SetCollisionProfileName(TEXT("BlockAll"));
+    Mesh->ClearFlags(RF_Transactional); // avoid huge undo/redo payloads when saving large procedural mesh in editor
 }
 
 void AProceduralPlanetActor::OnConstruction(const FTransform& Transform)
@@ -717,6 +718,7 @@ void AProceduralPlanetActor::BuildPlanet()
     Mesh->ClearAllMeshSections();
 
     InitNoise();
+    bControlMapsBuilt = false; // force rebuild so parameter tweaks (SeaLevel, noise, erosion) apply every time
     BuildControlMaps();
 
     const FVector BrushDir = GetBrushDir();
@@ -737,6 +739,7 @@ void AProceduralPlanetActor::BuildPlanet()
     };
 
     const bool bCreateCollision = bIsGameWorld;
+    // Allow backfaces even in editor so interior is visible; beware of heavier meshes when saving.
     const bool bNeedBackfaces   = bGenerateBackfaces;
 
     int32 SectionIndex = 0;
@@ -813,6 +816,24 @@ void AProceduralPlanetActor::BuildPlanet()
                     }
                 }
 
+                auto AddTriEnsuringOutward = [&](int32 a, int32 b, int32 c)
+                {
+                    const FVector& va = Verts[a];
+                    const FVector& vb = Verts[b];
+                    const FVector& vc = Verts[c];
+                    const FVector triNormal = FVector::CrossProduct(vb - va, vc - va);
+                    const FVector desired   = Normals[a];
+                    const bool bCorrectWinding = FVector::DotProduct(triNormal, desired) >= 0.f;
+                    if (bCorrectWinding)
+                    {
+                        Indices.Add(a); Indices.Add(b); Indices.Add(c);
+                    }
+                    else
+                    {
+                        Indices.Add(a); Indices.Add(c); Indices.Add(b);
+                    }
+                };
+
                 for (int32 y = 0; y < ChunkRes - 1; ++y)
                 {
                     for (int32 x = 0; x < ChunkRes - 1; ++x)
@@ -822,18 +843,8 @@ void AProceduralPlanetActor::BuildPlanet()
                         const int32 i2 = i0 + ChunkRes;
                         const int32 i3 = i2 + 1;
 
-                        const bool bFlipWinding = (Face == 0 || Face == 3 || Face == 4);
-
-                        if (!bFlipWinding)
-                        {
-                            Indices.Add(i0); Indices.Add(i2); Indices.Add(i3);
-                            Indices.Add(i0); Indices.Add(i3); Indices.Add(i1);
-                        }
-                        else
-                        {
-                            Indices.Add(i0); Indices.Add(i3); Indices.Add(i2);
-                            Indices.Add(i0); Indices.Add(i1); Indices.Add(i3);
-                        }
+                        AddTriEnsuringOutward(i0, i2, i3);
+                        AddTriEnsuringOutward(i0, i3, i1);
 
                         if (bNeedBackfaces)
                         {
@@ -842,8 +853,8 @@ void AProceduralPlanetActor::BuildPlanet()
                             const int32 j2 = i2 + BaseVertCount;
                             const int32 j3 = i3 + BaseVertCount;
 
-                            Indices.Add(j0); Indices.Add(j2); Indices.Add(j3);
-                            Indices.Add(j0); Indices.Add(j3); Indices.Add(j1);
+                            AddTriEnsuringOutward(j0, j3, j2);
+                            AddTriEnsuringOutward(j0, j1, j3);
                         }
                     }
                 }
