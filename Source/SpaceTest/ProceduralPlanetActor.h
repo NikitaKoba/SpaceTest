@@ -1,11 +1,10 @@
-// ProceduralPlanetActor.h
 #pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ProceduralPlanetActor.generated.h"
 
-// --- forward declarations (тут без include'ов) ---
+// --- forward declarations ---
 class UProceduralMeshComponent;
 class FastNoiseLite;
 
@@ -16,7 +15,8 @@ class AProceduralPlanetActor : public AActor
 
 public:
     AProceduralPlanetActor();
-    // === НОВОЕ: API выборки высоты ===
+
+    // === API выборки высоты ===
 
     // Чисто h01 в [0..1] (0 – океан, 1 – вершины)
     UFUNCTION(BlueprintCallable, Category="Planet|Sampling")
@@ -48,14 +48,19 @@ public:
     // Если хочешь тот же градиент цвета (океан/пляж/лес/камни/снег)
     UFUNCTION(BlueprintCallable, Category="Planet|Color")
     FLinearColor SampleColorFromHeight01(float H) const { return HeightToColor(H); }
+
     virtual void OnConstruction(const FTransform& Transform) override;
+
     float ComputeHeightCmFrom01(float H01) const;
+
     UPROPERTY(EditAnywhere, Category="Planet")
     UMaterialInterface* PlanetMaterial = nullptr;
+
 #if WITH_EDITOR
     UFUNCTION(CallInEditor, Category="Planet")
     void RebuildPlanet_Editor();
 #endif
+
     // --- чанки ---
 
     // Сколько чанков по одной стороне на каждую грань кубосферы (4 = 4x4 = 16 чанков на грань)
@@ -64,13 +69,11 @@ public:
 
     // Разрешение чанка по одной стороне (вершины). Итоговая детализация = ChunksPerFace * ChunkResolution.
     UPROPERTY(EditAnywhere, Category="Planet|Chunks")
-    int32 ChunkResolution = 33; // Типичный вариант: 33, 65, 129
-    // --- контрольные карты планеты (базовый рельеф после эрозии) ---
-    // Одна карта на каждую грань куба, храним в [face][y * ControlResolution + x]
+    int32 ChunkResolution = 33; // 33, 65, 129 ...
 
+    // --- контрольные карты планеты (базовый рельеф после эрозии) ---
     int32 ControlResolution = 0;
     TArray<float> BaseHeightMaps[6];
-
     bool bControlMapsBuilt = false;
 
     // Вспомогательные функции:
@@ -78,6 +81,7 @@ public:
     void  BuildControlMaps();
     float SampleBaseHeight01(const FVector& NormalDir) const;
     float SampleBaseHeightFaceUV(int32 Face, float U01, float V01) const;
+
 protected:
     // ---- Вспомогательные методы ----
     void InitNoise();
@@ -88,7 +92,20 @@ protected:
     FLinearColor HeightToColor(float H) const;
     FVector GetBrushDir() const;
     void BuildPlanet();
-    
+
+    // === ЛОКАЛЬНЫЙ ПАТЧ ТЕРРЕЙНА (100 км и т.п.) ===
+    float ApplyLocalPatch(const FVector& NormalDir, float BaseH01) const;
+
+#if WITH_EDITOR
+    // Кнопка "Add mountains" – создаём/перемещаем патч в направлении кисти
+    UFUNCTION(CallInEditor, Category="Planet|Patch")
+    void AddMountainsPatchFromBrush();
+
+    // Выключить патч
+    UFUNCTION(CallInEditor, Category="Planet|Patch")
+    void ClearPatch();
+#endif
+
     // ---- Компоненты ----
     UPROPERTY(VisibleAnywhere)
     UProceduralMeshComponent* Mesh = nullptr;
@@ -207,7 +224,7 @@ protected:
         meta=(EditCondition="bEnableHeightBlur", ClampMin="1", ClampMax="8"))
     int32 HeightBlurIterations = 1;
 
-    // ---- Локальная кисть ----
+    // ---- Локальная кисть (старый режим) ----
     UPROPERTY(EditAnywhere, Category="Brush")
     bool bUseLocalizedNoise = false;
 
@@ -218,17 +235,55 @@ protected:
     UPROPERTY(EditAnywhere, Category="Brush",
         meta=(EditCondition="bUseLocalizedNoise"))
     float BrushRadiusDeg = 45.f;
-    
+
     UPROPERTY(EditAnywhere, Category="Brush",
         meta=(EditCondition="bUseLocalizedNoise"))
     float BrushFalloffDeg = 20.f;
-    friend class APlanetLocalPatchActor; // <--- ДОБАВЬ ЭТО
+
+    friend class APlanetLocalPatchActor; // если захочешь отдельный актор-патч
+
     UPROPERTY(EditAnywhere, Category="Planet")
     bool bAutoRebuildInEditor = true;
+
     // --- Rendering ---
     UPROPERTY(EditAnywhere, Category="Planet|Rendering")
     bool bGenerateBackfaces = true; // duplicate triangles inward so surface is visible from inside
-    
+
+    // === ПАРАМЕТРЫ ЛОКАЛЬНОГО ПАТЧА В КИЛОМЕТРАХ ===
+    UPROPERTY(EditAnywhere, Category="Planet|Patch")
+    bool bPatchEnabled = false;
+
+    // Радиус активной области патча (где гарантированно горы), км
+    UPROPERTY(EditAnywhere, Category="Planet|Patch",
+        meta=(EditCondition="bPatchEnabled", ClampMin="1.0", ClampMax="1000.0"))
+    float PatchRadiusKm = 100.f;
+
+    // Плавный переход к обычному рельефу, км
+    UPROPERTY(EditAnywhere, Category="Planet|Patch",
+        meta=(EditCondition="bPatchEnabled", ClampMin="1.0", ClampMax="1000.0"))
+    float PatchFalloffKm = 30.f;
+
+    // Размер деталей (примерно "размер гор") в километрах
+    // 1-3 км = мелкие, детализированные горы
+    UPROPERTY(EditAnywhere, Category="Planet|Patch",
+        meta=(EditCondition="bPatchEnabled", ClampMin="0.1", ClampMax="50.0"))
+    float PatchFeatureSizeKm = 2.0f;
+
+    // Дополнительная высота (0..1) – насколько сильно поднимем горы над уровнем моря
+    UPROPERTY(EditAnywhere, Category="Planet|Patch",
+        meta=(EditCondition="bPatchEnabled", ClampMin="0.1", ClampMax="1.0"))
+    float PatchExtraHeight01 = 0.7f;
+
+    // Игнорировать ли море внутри патча (всегда суша)
+    UPROPERTY(EditAnywhere, Category="Planet|Patch",
+        meta=(EditCondition="bPatchEnabled"))
+    bool bPatchIgnoreSeaLevel = true;
+
+    // Направление центра патча (единичный вектор от центра планеты)
+    UPROPERTY(EditAnywhere, Category="Planet|Patch",
+        meta=(EditCondition="bPatchEnabled"))
+    FVector PatchCenterDir = FVector(1.f, 0.f, 0.f);
+
     // ---- FastNoiseLite инстансы ----
     FastNoiseLite* ContinentalNoise    = nullptr;
     FastNoiseLite* MountainNoise       = nullptr;
@@ -240,4 +295,7 @@ protected:
     FastNoiseLite* WarpNoiseZ          = nullptr;
     FastNoiseLite* OceanNoise          = nullptr;
     FastNoiseLite* ErosionControlNoise = nullptr;
+
+    // Локальный шум для патча (детализированные горы в км)
+    FastNoiseLite* LocalPatchNoise     = nullptr;
 };

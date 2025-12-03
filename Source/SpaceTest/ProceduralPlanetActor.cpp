@@ -1,5 +1,3 @@
-// ProceduralPlanetActor.cpp
-
 #include "ProceduralPlanetActor.h"
 
 #include "ProceduralMeshComponent.h"
@@ -38,6 +36,7 @@ static FVector FaceDir(int32 Face)
     default:return -FVector::UpVector;      // -Z
     }
 }
+
 // ========== КУБОСФЕРА: МАППИНГ НАПРАВЛЕНИЙ ==========
 
 struct FCubeFaceUV
@@ -157,6 +156,7 @@ static FVector DirectionFromFaceUV(int32 Face, float U01, float V01)
 }
 
 // ================== AProceduralPlanetActor ==================
+
 float AProceduralPlanetActor::ComputeBaseHeight01_NoErosion(const FVector& NormalDir) const
 {
     // Тут мы считаем только крупные континенты / океаны (без горных деталей)
@@ -173,6 +173,7 @@ float AProceduralPlanetActor::ComputeBaseHeight01_NoErosion(const FVector& Norma
     float h = FMath::Lerp(OceanFloor, LandPlateau, landMask);
     return FMath::Clamp(h, 0.0f, 1.0f);
 }
+
 void AProceduralPlanetActor::BuildControlMaps()
 {
     if (bControlMapsBuilt)
@@ -181,7 +182,6 @@ void AProceduralPlanetActor::BuildControlMaps()
     // На всякий случай
     InitNoise();
 
-    // Берём разрешение глобальной карты из настроек
     const int32 Faces = 6;
     const int32 MinRes = 64;
     const int32 MaxRes = 2048;
@@ -240,6 +240,7 @@ void AProceduralPlanetActor::BuildControlMaps()
 
     bControlMapsBuilt = true;
 }
+
 float AProceduralPlanetActor::SampleBaseHeightFaceUV(int32 Face, float U01, float V01) const
 {
     if (ControlResolution <= 1 || Face < 0 || Face >= 6 || BaseHeightMaps[Face].Num() == 0)
@@ -340,6 +341,7 @@ void AProceduralPlanetActor::InitNoise()
     if (!WarpNoiseZ)          WarpNoiseZ          = MakeNoise();
     if (!OceanNoise)          OceanNoise          = MakeNoise();
     if (!ErosionControlNoise) ErosionControlNoise = MakeNoise();
+    if (!LocalPatchNoise)     LocalPatchNoise     = MakeNoise();
 
     const int32 BaseSeed = Seed;
 
@@ -436,6 +438,15 @@ void AProceduralPlanetActor::InitNoise()
     ErosionControlNoise->SetFractalOctaves(3);
     ErosionControlNoise->SetFractalLacunarity(2.0f);
     ErosionControlNoise->SetFractalGain(0.5f);
+
+    // --- локальный шум для патча (детализированные горы) ---
+    LocalPatchNoise->SetSeed(BaseSeed + 777);
+    LocalPatchNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    LocalPatchNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+    LocalPatchNoise->SetFractalOctaves(4);
+    LocalPatchNoise->SetFractalLacunarity(2.0f);
+    LocalPatchNoise->SetFractalGain(0.5f);
+    // Frequency подстраиваем через PatchFeatureSizeKm при выборке
 }
 
 // ---------- ФУНКЦИЯ ВЫСОТЫ ----------
@@ -512,14 +523,109 @@ float AProceduralPlanetActor::GetHeight01(const FVector& NormalDir) const
     float oceanMask = 1.f - landMask;
     float ocean = To01(OceanNoise->GetNoise(P.X * 2.f, P.Y * 2.f, P.Z * 2.f)) * oceanMask;
 
-    // --- Итог ---
+    // --- Итог по планете ---
     float h = baseH;
     h += mountains * MountainHeight;
     h += hills * HillsHeight;
     h -= canyon * CanyonDepth;
     h += ocean * 0.08f;
 
+    // === ПРИМЕНЯЕМ ЛОКАЛЬНЫЙ ПАТЧ (100 км детальных гор) ===
+    h = ApplyLocalPatch(NormalDir, h);
+
     return FMath::Clamp(h, 0.f, 1.f);
+}
+
+// ---------- ЛОКАЛЬНЫЙ ПАТЧ -----------
+
+float AProceduralPlanetActor::ApplyLocalPatch(const FVector& NormalDir, float BaseH01) const
+{
+    if (!bPatchEnabled || PatchRadiusKm <= 0.f)
+        return BaseH01;
+
+    // Центр патча – нормализованный вектор
+    FVector CenterDir = PatchCenterDir.GetSafeNormal();
+    if (CenterDir.IsNearlyZero())
+        return BaseH01;
+
+    // Расстояние по дуге между точкой и центром патча (в км)
+    float dot = FVector::DotProduct(NormalDir, CenterDir);
+    dot = FMath::Clamp(dot, -1.f, 1.f);
+    const float angleRad = FMath::Acos(dot);
+    const float distKm   = angleRad * PlanetRadiusKm;
+
+    const float innerRadiusKm = PatchRadiusKm;
+    const float falloffKm     = FMath::Max(PatchFalloffKm, 1.f);
+
+    // Вне зоны патча + его фоллофа — ничего не делаем
+    if (distKm >= innerRadiusKm + falloffKm)
+        return BaseH01;
+
+    // Вес патча [0..1]: 1 в центре, 0 на краю фоллофа
+    float weight = 1.f;
+    if (distKm > innerRadiusKm)
+    {
+        const float t = (distKm - innerRadiusKm) / falloffKm;
+        weight = 1.f - SmoothStep01(t);
+    }
+
+    // --- Локальные координаты в км для детализации ---
+    // Ортонормальный базис в касательной плоскости
+    FVector upRef = (FMath::Abs(CenterDir.Z) < 0.99f) ? FVector::UpVector : FVector::RightVector;
+    FVector axisX = FVector::CrossProduct(upRef, CenterDir).GetSafeNormal();
+    FVector axisY = FVector::CrossProduct(CenterDir, axisX).GetSafeNormal();
+
+    // Угол вокруг центра
+    FVector tangent = (NormalDir - CenterDir * dot).GetSafeNormal();
+    if (!tangent.IsNearlyZero())
+    {
+        float x = FVector::DotProduct(tangent, axisX);
+        float y = FVector::DotProduct(tangent, axisY);
+        const float angleAround = FMath::Atan2(y, x);
+
+        const float radialKm = distKm;
+        const float xKm = radialKm * FMath::Cos(angleAround);
+        const float yKm = radialKm * FMath::Sin(angleAround);
+
+        // Размер деталей в км -> частота шума
+        const float featureKm = FMath::Max(PatchFeatureSizeKm, 0.1f);
+        const float freq      = 1.f / featureKm;
+
+        float n = 0.f;
+        if (LocalPatchNoise)
+        {
+            n = LocalPatchNoise->GetNoise(xKm * freq, yKm * freq, 0.f); // [-1,1]
+        }
+
+        float n01 = To01(n);                 // 0..1
+        n01 = FMath::Pow(n01, 1.3f);         // чуть острее вершины
+
+        // Делаем "плато" суши и пики гор
+        const float plateau   = SeaLevel01 + 0.15f;                             // поле
+        const float peak      = FMath::Min(1.0f, plateau + PatchExtraHeight01); // вершины
+        float localH = FMath::Lerp(plateau, peak, n01);
+
+        if (bPatchIgnoreSeaLevel && localH < SeaLevel01 + 0.05f)
+        {
+            localH = SeaLevel01 + 0.05f;
+        }
+
+        // В центре патча берём ТОЛЬКО локальные горы
+        float result = BaseH01;
+        if (distKm <= innerRadiusKm)
+        {
+            result = localH;
+        }
+        else
+        {
+            // В зоне фоллофа плавно переходим от глобального рельефа к локальному
+            result = FMath::Lerp(BaseH01, localH, weight);
+        }
+
+        return FMath::Clamp(result, 0.f, 1.f);
+    }
+
+    return BaseH01;
 }
 
 // ---------- ТЕРМАЛЬНАЯ ЭРОЗИЯ ----------
@@ -718,7 +824,6 @@ void AProceduralPlanetActor::BuildPlanet()
     Mesh->ClearAllMeshSections();
 
     InitNoise();
-    bControlMapsBuilt = false; // force rebuild so parameter tweaks (SeaLevel, noise, erosion) apply every time
     BuildControlMaps();
 
     const FVector BrushDir = GetBrushDir();
@@ -739,8 +844,7 @@ void AProceduralPlanetActor::BuildPlanet()
     };
 
     const bool bCreateCollision = bIsGameWorld;
-    // Allow backfaces even in editor so interior is visible; beware of heavier meshes when saving.
-    const bool bNeedBackfaces   = bGenerateBackfaces;
+    const bool bNeedBackfaces   = bGenerateBackfaces && bIsGameWorld;
 
     int32 SectionIndex = 0;
 
@@ -879,6 +983,7 @@ void AProceduralPlanetActor::BuildPlanet()
         Mesh->SetMaterial(0, PlanetMaterial);
     }
 }
+
 float AProceduralPlanetActor::ComputeHeightCmFrom01(float H01) const
 {
     const float RadiusCm = FMath::Max(1.f, PlanetRadiusKm * 100000.f);
@@ -912,6 +1017,7 @@ float AProceduralPlanetActor::ComputeHeightCmFrom01(float H01) const
         return t2 * MaxLandHeightCm;
     }
 }
+
 float AProceduralPlanetActor::SampleHeight01(const FVector& NormalDir) const
 {
     // гарантируем, что всё инициализировано
@@ -935,3 +1041,30 @@ void AProceduralPlanetActor::SampleHeight(const FVector& NormalDir, float& OutH0
     OutH01      = SampleHeight01(NormalDir);
     OutHeightCm = ComputeHeightCmFrom01(OutH01);
 }
+
+#if WITH_EDITOR
+void AProceduralPlanetActor::AddMountainsPatchFromBrush()
+{
+    // Центр патча – туда, куда направлена кисть
+    PatchCenterDir = GetBrushDir();
+    if (PatchCenterDir.IsNearlyZero())
+    {
+        PatchCenterDir = FVector(1.f, 0.f, 0.f);
+    }
+
+    if (PatchRadiusKm <= 0.f)
+    {
+        PatchRadiusKm = 100.f;
+    }
+
+    bPatchEnabled = true;
+
+    BuildPlanet();
+}
+
+void AProceduralPlanetActor::ClearPatch()
+{
+    bPatchEnabled = false;
+    BuildPlanet();
+}
+#endif
