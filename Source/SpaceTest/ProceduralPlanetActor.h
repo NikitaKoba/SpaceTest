@@ -37,6 +37,48 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet")
 	bool bGenerateCollision = false;
 
+	// --- Noise / Terrain ---
+
+	/** Seed for procedural noise. */
+	UPROPERTY(EditAnywhere, Category="Terrain")
+	int32 NoiseSeed = 1337;
+
+	/** Base height amplitude in km (low-frequency continents). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float BaseHeightKm = 0.3f; // 300 m
+
+	/** Mountain height amplitude in km (ridged noise). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float MountainHeightKm = 3.0f; // 3 km
+
+	/** Frequency for continental noise (1/km). Smaller = larger features. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0001", UIMin="0.0001"))
+	float ContinentFreq = 0.0015f; // ~650 km wavelength
+
+	/** Frequency for mountain ridges (1/km). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0001", UIMin="0.0001"))
+	float MountainFreq = 0.02f; // ~50 km wavelength
+
+	/** Domain warp amplitude in km to break up patterns. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float WarpKm = 5.0f;
+
+	/** Domain warp frequency (1/km). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0001", UIMin="0.0001"))
+	float WarpFreq = 0.01f;
+
+	/** Mountains only inside this arc-length radius (km) from MountainRegionDir (0 = everywhere). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float MountainRegionRadiusKm = 80.f;
+
+	/** Direction (unit) of mountain region center on the planet (will be normalized). */
+	UPROPERTY(EditAnywhere, Category="Terrain")
+	FVector MountainRegionDir = FVector(0.f, 0.f, 1.f);
+
+	/** Debug: color vertices by mountain mask (0=blue,1=red) to locate the region. */
+	UPROPERTY(EditAnywhere, Category="Debug")
+	bool bDebugMountainMask = false;
+
 	/** Max quadtree depth per face (0 = whole face single patch). */
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0", UIMin="0"))
 	int32 MaxLOD = 6;
@@ -84,9 +126,10 @@ protected:
 	UProceduralMeshComponent* Mesh = nullptr;
 
 private:
-	void BuildPlanetMesh(const FVector& CameraPosWS);
+	void BuildPlanetMesh(const FVector& CameraPosWS, bool bForceRebuild = false);
 	void BuildLODForFace(int32 Face, int32 LodLevel, int32 XIndex, int32 YIndex, const FVector& CameraPosLS, TArray<struct FPlanetPatch>& OutPatches) const;
 	bool ShouldSplitPatch(int32 LodLevel, float PatchSize01, const FVector& CameraPosLS, const FVector& PatchCenterDir) const;
+	float SampleHeightKm(const FVector& SphereDir, float RadiusKmLocal, float& OutMountainMask) const;
 	void BuildPatchSection(const struct FPlanetPatch& Patch, int32 SectionIndex);
 	FVector GetCameraPosition() const;
 	FVector CubeToSphere(const FVector& P) const;
@@ -97,4 +140,5 @@ private:
 	float LastBuildTime = -1.f;
 
 	TMap<uint64, int32> PatchKeyToSection;
+	TArray<int32> FreeSectionIndices;
 };

@@ -19,6 +19,41 @@ struct FPlanetPatch
 	float V0 = 0.f;   // derived
 	float Size = 1.f; // derived
 };
+static float Perlin3(const FVector& P)
+{
+	return FMath::PerlinNoise3D(P);
+}
+
+// Ridged multifractal: несколько октав, острые пики
+static float RidgedMulti(const FVector& P, float BaseFreq, int32 Octaves)
+{
+	float Sum   = 0.f;
+	float Amp   = 1.f;
+	float Freq  = BaseFreq;
+	float AmpSum = 0.f;
+
+	for (int32 i = 0; i < Octaves; ++i)
+	{
+		float n = Perlin3(P * Freq);       // [-1;1]
+		float r = 1.f - FMath::Abs(n);     // ridged [0;1]
+		r *= r;                            // острее пик
+
+		Sum   += r * Amp;
+		AmpSum += Amp;
+
+		Freq *= 2.f;   // больше деталей
+		Amp  *= 0.5f;
+	}
+
+	if (AmpSum < KINDA_SMALL_NUMBER)
+	{
+		return 0.f;
+	}
+
+	float H = Sum / AmpSum;               // ~[0..1]
+	return FMath::Clamp(H, 0.f, 1.f);
+}
+
 
 AProceduralPlanetActor::AProceduralPlanetActor()
 {
@@ -35,7 +70,7 @@ AProceduralPlanetActor::AProceduralPlanetActor()
 void AProceduralPlanetActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
-	BuildPlanetMesh(GetCameraPosition());
+	BuildPlanetMesh(GetCameraPosition(), true);
 }
 
 void AProceduralPlanetActor::Tick(float DeltaSeconds)
@@ -92,6 +127,12 @@ void AProceduralPlanetActor::Tick(float DeltaSeconds)
 float AProceduralPlanetActor::GetRadiusCm() const
 {
 	return FMath::Max(1.f, RadiusKm * 100000.f);
+}
+
+static float SmoothStep01(float T)
+{
+	const float X = FMath::Clamp(T, 0.f, 1.f);
+	return X * X * (3.f - 2.f * X);
 }
 
 FVector AProceduralPlanetActor::GetCameraPosition() const
@@ -183,6 +224,81 @@ bool AProceduralPlanetActor::ShouldSplitPatch(int32 LodLevel, float PatchSize01,
 	return bLargeEnough && bCloseEnough;
 }
 
+static float SamplePerlin(const FVector& P)
+{
+	return FMath::PerlinNoise3D(P);
+}
+
+static float SampleRidged(const FVector& P)
+{
+	return 1.f - FMath::Abs(FMath::PerlinNoise3D(P));
+}
+
+float AProceduralPlanetActor::SampleHeightKm(
+    const FVector& SphereDir,
+    float RadiusKmLocal,
+    float& OutMountainMask) const
+{
+    // Координата на сфере в км
+    const float SeedOffset = static_cast<float>(NoiseSeed) * 13.37f;
+    const FVector P = SphereDir * RadiusKmLocal + FVector(SeedOffset);
+
+    // --- 1) Базовая высота (континенты) ---
+
+    float Cont = 0.5f + 0.5f * Perlin3(P * ContinentFreq); // [0..1]
+    float BaseKm = BaseHeightKm * (Cont * 0.5f + 0.5f);    // чуть выше на континентах
+
+
+    // --- 2) Маска региона по дуге (100–200 км на поверхности) ---
+
+    float RegionMask = 1.f;
+    if (MountainRegionRadiusKm > KINDA_SMALL_NUMBER)
+    {
+        const FVector RegionDir = MountainRegionDir.GetSafeNormal();
+        const float Dot = FVector::DotProduct(RegionDir, SphereDir);
+        const float Angle = FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)); // рад
+        const float ArcKm = Angle * RadiusKmLocal; // длина дуги по поверхности в км
+
+        // Делаем "ядро" и мягкий край:
+        const float Inner = MountainRegionRadiusKm * 0.7f;  // внутри 70% радиуса маска =1
+        const float Outer = MountainRegionRadiusKm;          // на этом радиусе маска=0
+
+        if (ArcKm >= Outer)
+        {
+            RegionMask = 0.f;
+        }
+        else if (ArcKm <= Inner)
+        {
+            RegionMask = 1.f;
+        }
+        else
+        {
+            const float T = (Outer - ArcKm) / (Outer - Inner); // [0..1]
+            RegionMask = SmoothStep01(T); // плавное затухание
+        }
+    }
+
+
+    // --- 3) Собственно горный рельеф ---
+
+    // ВАЖНО: MountainFreq делай довольно большим для реалистичных гор:
+    // 0.05–0.15 (фичи 20–7 км) + октавы => есть пики <1 км
+    const int32 Octaves = 5;
+    float RidgedH = RidgedMulti(P, MountainFreq, Octaves);    // [0..1]
+
+    // Итоговая маска гор внутри региона
+    float MountainMask = RidgedH * RegionMask;
+
+    // Амплитуда гор НЕ душится континентами
+    float MountainsKm = MountainHeightKm * MountainMask;
+
+    OutMountainMask = MountainMask;
+
+    return BaseKm + MountainsKm;
+}
+
+
+
 void AProceduralPlanetActor::BuildLODForFace(int32 Face, int32 LodLevel, int32 XIndex, int32 YIndex, const FVector& CameraPosLS, TArray<FPlanetPatch>& OutPatches) const
 {
 	const float InvPow = 1.f / static_cast<float>(1 << LodLevel);
@@ -230,13 +346,16 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FVector2D> UVs;
+	TArray<FLinearColor> Colors;
 
 	Vertices.Reserve(VertsPerEdge * VertsPerEdge);
 	Normals.Reserve(VertsPerEdge * VertsPerEdge);
 	UVs.Reserve(VertsPerEdge * VertsPerEdge);
+	Colors.Reserve(VertsPerEdge * VertsPerEdge);
 	Triangles.Reserve(PatchResolution * PatchResolution * 6);
 
 	const float RadiusCm = GetRadiusCm();
+	const float RadiusKmLocal = RadiusCm / 100000.f;
 
 	for (int32 Y = 0; Y < VertsPerEdge; ++Y)
 	{
@@ -250,11 +369,46 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 
 			const FVector Cube      = FacePoint(Patch.Face, UFace, VFace);
 			const FVector SphereDir = CubeToSphere(Cube);
-			const FVector Pos       = SphereDir * RadiusCm;
+			float MountainMask = 0.f;
+			const float HeightKm    = SampleHeightKm(SphereDir, RadiusKmLocal, MountainMask);
+			const FVector Pos       = SphereDir * (RadiusCm + HeightKm * 100000.f);
 
 			Vertices.Add(Pos);
-			Normals.Add(SphereDir);
+			Normals.Add(SphereDir); // placeholder, will recompute with height
 			UVs.Add(FVector2D(static_cast<float>(X) / PatchResolution, static_cast<float>(Y) / PatchResolution));
+			if (bDebugMountainMask)
+			{
+				const float M = FMath::Clamp(MountainMask, 0.f, 1.f);
+				Colors.Add(FLinearColor(M, 0.f, 1.f - M, 1.f)); // red=mountain, blue=flat
+			}
+			else
+			{
+				Colors.Add(FLinearColor::White);
+			}
+		}
+	}
+
+	// Recompute normals using neighboring vertices (finite differences)
+	for (int32 Y = 0; Y < VertsPerEdge; ++Y)
+	{
+		for (int32 X = 0; X < VertsPerEdge; ++X)
+		{
+			const int32 Idx = Y * VertsPerEdge + X;
+			const int32 X0 = FMath::Max(0, X - 1);
+			const int32 X1 = FMath::Min(PatchResolution, X + 1);
+			const int32 Y0 = FMath::Max(0, Y - 1);
+			const int32 Y1 = FMath::Min(PatchResolution, Y + 1);
+
+			const FVector Px0 = Vertices[Y * VertsPerEdge + X0];
+			const FVector Px1 = Vertices[Y * VertsPerEdge + X1];
+			const FVector Py0 = Vertices[Y0 * VertsPerEdge + X];
+			const FVector Py1 = Vertices[Y1 * VertsPerEdge + X];
+
+			const FVector Dx = Px1 - Px0;
+			const FVector Dy = Py1 - Py0;
+			const FVector N = FVector::CrossProduct(Dy, Dx).GetSafeNormal();
+
+			Normals[Idx] = N;
 		}
 	}
 
@@ -297,7 +451,7 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 		Triangles,
 		Normals,
 		UVs,
-		TArray<FLinearColor>(),
+		Colors,
 		TArray<FProcMeshTangent>(),
 		bGenerateCollision);
 
@@ -307,7 +461,7 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 	}
 }
 
-void AProceduralPlanetActor::BuildPlanetMesh(const FVector& CameraPosWS)
+void AProceduralPlanetActor::BuildPlanetMesh(const FVector& CameraPosWS, bool bForceRebuild)
 {
 	if (!Mesh || PatchResolution < 2)
 	{
@@ -343,27 +497,46 @@ void AProceduralPlanetActor::BuildPlanetMesh(const FVector& CameraPosWS)
 		NewKeys.Add(MakeKey(Patch));
 	}
 
-	// Remove sections that are no longer needed
-	for (auto It = PatchKeyToSection.CreateIterator(); It; ++It)
+	if (bForceRebuild)
 	{
-		if (!NewKeys.Contains(It.Key()))
+		Mesh->ClearAllMeshSections();
+		PatchKeyToSection.Empty();
+		FreeSectionIndices.Reset();
+	}
+	else
+	{
+		// Remove sections that are no longer needed
+		for (auto It = PatchKeyToSection.CreateIterator(); It; ++It)
 		{
-			Mesh->ClearMeshSection(It.Value());
-			It.RemoveCurrent();
+			if (!NewKeys.Contains(It.Key()))
+			{
+				Mesh->ClearMeshSection(It.Value());
+				FreeSectionIndices.Add(It.Value());
+				It.RemoveCurrent();
+			}
 		}
 	}
 
-	// Reuse existing sections or create new ones
+	// Reuse existing sections or create new ones (if force rebuild, map is empty so all will be rebuilt)
 	for (const FPlanetPatch& Patch : Patches)
 	{
 		const uint64 Key = MakeKey(Patch);
 		int32* ExistingSection = PatchKeyToSection.Find(Key);
-		if (ExistingSection)
+		if (ExistingSection && !bForceRebuild)
 		{
 			continue; // keep existing
 		}
 
-		const int32 NewSection = Mesh->GetNumSections();
+		int32 NewSection = INDEX_NONE;
+		if (FreeSectionIndices.Num() > 0)
+		{
+			NewSection = FreeSectionIndices.Pop(EAllowShrinking::No);
+		}
+		else
+		{
+			NewSection = Mesh->GetNumSections();
+		}
+
 		BuildPatchSection(Patch, NewSection);
 		PatchKeyToSection.Add(Key, NewSection);
 	}
