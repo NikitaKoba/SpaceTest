@@ -5,8 +5,12 @@
 #include "Materials/MaterialInterface.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
+#include "FastNoiseLite.h"   // <--- добавь это
 
 #include <limits>
+
+// Если подключишь FastNoiseLite / FastNoise2 – раскомментируй и настрои.
+// #include "FastNoiseLite.h"
 
 struct FPlanetPatch
 {
@@ -19,41 +23,162 @@ struct FPlanetPatch
 	float V0 = 0.f;   // derived
 	float Size = 1.f; // derived
 };
+// ---------------------- ШУМ НА FASTNOISELITE ----------------------
+
+// fBm для континентов (можно оставить и старый FBm на FMath, но так всё в одном стиле)
+static float FNL_FBm(const FVector& P, int32 Seed, float BaseFreq, int32 Octaves,
+                     float Lacunarity = 2.f, float Gain = 0.5f)
+{
+    static FastNoiseLite Noise;
+    Noise.SetSeed(Seed * 911382323 + 1);
+    Noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    Noise.SetFractalType(FastNoiseLite::FractalType_FBm);
+    Noise.SetFractalOctaves(Octaves);
+    Noise.SetFractalLacunarity(Lacunarity);
+    Noise.SetFractalGain(Gain);
+    Noise.SetFrequency(BaseFreq);
+
+    float v = Noise.GetNoise(P.X, P.Y, P.Z); // [-1;1]
+    return FMath::Clamp(v, -1.f, 1.f);
+}
+
+// Ridged multifractal (как в примерах FastNoise "Mountain")
+static float FNL_Ridged(const FVector& P, int32 Seed, float BaseFreq, int32 Octaves)
+{
+    static FastNoiseLite Noise;
+    Noise.SetSeed(Seed * 16807 + 3);
+    Noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    Noise.SetFractalType(FastNoiseLite::FractalType_Ridged);
+    Noise.SetFractalOctaves(Octaves);
+    Noise.SetFractalLacunarity(2.0f);
+    Noise.SetFractalGain(0.5f);
+    Noise.SetFrequency(BaseFreq);
+
+    float v = Noise.GetNoise(P.X, P.Y, P.Z); // [-1;1]
+    return FMath::Clamp(0.5f + 0.5f * v, 0.f, 1.f); // [0;1]
+}
+
+// Domain warp для 3D, чтобы получить хребты и разломы
+static FVector FNL_DomainWarp3D(const FVector& P, int32 Seed, float Freq, float Strength)
+{
+    static FastNoiseLite WarpX;
+    static FastNoiseLite WarpY;
+    static FastNoiseLite WarpZ;
+
+    WarpX.SetSeed(Seed * 101 + 11);
+    WarpY.SetSeed(Seed * 101 + 23);
+    WarpZ.SetSeed(Seed * 101 + 47);
+
+    WarpX.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    WarpY.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    WarpZ.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+
+    WarpX.SetFrequency(Freq);
+    WarpY.SetFrequency(Freq);
+    WarpZ.SetFrequency(Freq);
+
+    const float x = P.X;
+    const float y = P.Y;
+    const float z = P.Z;
+
+    FVector Offset(
+        WarpX.GetNoise(x, y, z),
+        WarpY.GetNoise(x + 37.f, y + 17.f, z + 13.f),
+        WarpZ.GetNoise(x - 11.f, y + 53.f, z + 7.f)
+    );
+
+    return P + Offset * Strength;
+}
+
+// -----------------------------------------------------
+// БАЗОВЫЕ ХЕЛПЕРЫ ШУМА
+// -----------------------------------------------------
+
+// ---------- ШУМ ----------
+
+// Базовый перлин. Сюда можно повесить FastNoise2/LibNoise.
 static float Perlin3(const FVector& P)
 {
-	return FMath::PerlinNoise3D(P);
+    // TODO: заменить на внешний шум при желании.
+    return FMath::PerlinNoise3D(P);
 }
 
-// Ridged multifractal: несколько октав, острые пики
-static float RidgedMulti(const FVector& P, float BaseFreq, int32 Octaves)
+// fBm для континентов / общего рельефа
+static float FBm(const FVector& P, float BaseFreq, int32 Octaves, float Lacunarity = 2.f, float Gain = 0.5f)
 {
-	float Sum   = 0.f;
-	float Amp   = 1.f;
-	float Freq  = BaseFreq;
-	float AmpSum = 0.f;
+    float Sum = 0.f;
+    float Amp = 1.f;
+    float Freq = BaseFreq;
+    float AmpSum = 0.f;
 
-	for (int32 i = 0; i < Octaves; ++i)
-	{
-		float n = Perlin3(P * Freq);       // [-1;1]
-		float r = 1.f - FMath::Abs(n);     // ridged [0;1]
-		r *= r;                            // острее пик
+    for (int32 i = 0; i < Octaves; ++i)
+    {
+        float N = Perlin3(P * Freq); // [-1;1]
+        Sum += N * Amp;
+        AmpSum += Amp;
 
-		Sum   += r * Amp;
-		AmpSum += Amp;
+        Freq *= Lacunarity;
+        Amp  *= Gain;
+    }
 
-		Freq *= 2.f;   // больше деталей
-		Amp  *= 0.5f;
-	}
+    if (AmpSum < KINDA_SMALL_NUMBER)
+        return 0.f;
 
-	if (AmpSum < KINDA_SMALL_NUMBER)
-	{
-		return 0.f;
-	}
-
-	float H = Sum / AmpSum;               // ~[0..1]
-	return FMath::Clamp(H, 0.f, 1.f);
+    float H = Sum / AmpSum;          // [-1;1]
+    return FMath::Clamp(H, -1.f, 1.f);
 }
 
+// Векторный шум – для доменного варпа
+static FVector NoiseVec3(const FVector& P, float Freq)
+{
+    const FVector Off1(37.0f, 17.0f,  3.0f);
+    const FVector Off2(-11.0f, 53.0f, 7.0f);
+    const FVector Off3(19.0f, -29.0f, 31.0f);
+
+    return FVector(
+        Perlin3(P * Freq + Off1),
+        Perlin3(P * Freq + Off2),
+        Perlin3(P * Freq + Off3)
+    );
+}
+
+// Ridged multifractal with domain warp: даёт хребты и пики
+static float RidgedMultiWarp(const FVector& P, float BaseFreq, int32 Octaves, float WarpFreq, float WarpStrength)
+{
+    float Sum    = 0.f;
+    float Amp    = 1.f;
+    float Freq   = BaseFreq;
+    float AmpSum = 0.f;
+
+    FVector AccWarp = FVector::ZeroVector;
+
+    for (int32 i = 0; i < Octaves; ++i)
+    {
+        // копим искажение – вытянутые хребты, изломы
+        FVector Warp = NoiseVec3(P, WarpFreq) * WarpStrength;
+        AccWarp += Warp;
+
+        float N = Perlin3(P * Freq + AccWarp); // [-1;1]
+        float R = 1.f - FMath::Abs(N);         // [0;1] гребни
+        R *= R;                                // острее пики
+
+        Sum += R * Amp;
+        AmpSum += Amp;
+
+        Freq       *= 2.f;
+        WarpFreq   *= 2.f;
+        WarpStrength *= 0.5f;
+        Amp        *= 0.5f;
+    }
+
+    if (AmpSum < KINDA_SMALL_NUMBER)
+        return 0.f;
+
+    float H = Sum / AmpSum;                   // [0;1]
+    return FMath::Clamp(H, 0.f, 1.f);
+}
+
+// -----------------------------------------------------
 
 AProceduralPlanetActor::AProceduralPlanetActor()
 {
@@ -224,44 +349,45 @@ bool AProceduralPlanetActor::ShouldSplitPatch(int32 LodLevel, float PatchSize01,
 	return bLargeEnough && bCloseEnough;
 }
 
-static float SamplePerlin(const FVector& P)
-{
-	return FMath::PerlinNoise3D(P);
-}
-
-static float SampleRidged(const FVector& P)
-{
-	return 1.f - FMath::Abs(FMath::PerlinNoise3D(P));
-}
-
+// -----------------------------------------------------
+// ОСНОВНОЙ АЛГОРИТМ ВЫСОТЫ
+// -----------------------------------------------------
 float AProceduralPlanetActor::SampleHeightKm(
     const FVector& SphereDir,
     float RadiusKmLocal,
     float& OutMountainMask) const
 {
-    // Координата на сфере в км
+    // Базовые координаты на сфере в "километровом" пространстве шума
     const float SeedOffset = static_cast<float>(NoiseSeed) * 13.37f;
-    const FVector P = SphereDir * RadiusKmLocal + FVector(SeedOffset);
+    const FVector PBase = SphereDir * 1000.f + FVector(SeedOffset);
 
-    // --- 1) Базовая высота (континенты) ---
+    // ---------------- 1) Континенты / базовая высота ----------------
 
-    float Cont = 0.5f + 0.5f * Perlin3(P * ContinentFreq); // [0..1]
-    float BaseKm = BaseHeightKm * (Cont * 0.5f + 0.5f);    // чуть выше на континентах
+    const int32 ContOctaves = 4;
+    float ContN  = FBm(PBase, ContinentFreq, ContOctaves); // [-1;1]
+    float Cont01 = 0.5f + 0.5f * ContN;                    // [0;1]
 
+    // Маска суши
+    float LandMask = SmoothStep01((Cont01 - 0.35f) / 0.35f);
 
-    // --- 2) Маска региона по дуге (100–200 км на поверхности) ---
+    float BaseKm = BaseHeightKm * LandMask;
+
+    // ---------------- 2) Маска горного региона по дуге ----------------
+    //
+    // ДЕЛАЕМ НЕ КУПОЛ, А ПО ПРАКТИКЕ:
+    // внутри радиуса ~1, с тонкой полосой плавного перехода по краю.
 
     float RegionMask = 1.f;
     if (MountainRegionRadiusKm > KINDA_SMALL_NUMBER)
     {
         const FVector RegionDir = MountainRegionDir.GetSafeNormal();
-        const float Dot = FVector::DotProduct(RegionDir, SphereDir);
+        const float Dot   = FVector::DotProduct(RegionDir, SphereDir);
         const float Angle = FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)); // рад
-        const float ArcKm = Angle * RadiusKmLocal; // длина дуги по поверхности в км
+        const float ArcKm = Angle * RadiusKmLocal;                     // дуга по поверхности
 
-        // Делаем "ядро" и мягкий край:
-        const float Inner = MountainRegionRadiusKm * 0.7f;  // внутри 70% радиуса маска =1
-        const float Outer = MountainRegionRadiusKm;          // на этом радиусе маска=0
+        const float Outer = MountainRegionRadiusKm;
+        const float Fade  = Outer * 0.05f; // 5% радиуса – зона сглаживания
+        const float Inner = FMath::Max(0.f, Outer - Fade);
 
         if (ArcKm >= Outer)
         {
@@ -273,23 +399,99 @@ float AProceduralPlanetActor::SampleHeightKm(
         }
         else
         {
+            // от 1 до 0 только в узкой полосе по краю
             const float T = (Outer - ArcKm) / (Outer - Inner); // [0..1]
-            RegionMask = SmoothStep01(T); // плавное затухание
+            RegionMask = SmoothStep01(T);
         }
     }
 
+    // ---------------- 3) Горы с "shape-scale" по высоте ----------------
+    //
+    // Хотим, чтобы при 80 км форма нам нравилась.
+    // При меньших высотах СИЛЬНО сжимаем шум по горизонтали,
+    // чтобы уклон склонов оставался визуально крутым.
 
-    // --- 3) Собственно горный рельеф ---
+    const float HeightRefKm = 80.f;                       // под эту высоту мы "калибруемся"
+    const float SafeHeight  = FMath::Max(0.5f, MountainHeightKm);
 
-    // ВАЖНО: MountainFreq делай довольно большим для реалистичных гор:
-    // 0.05–0.15 (фичи 20–7 км) + октавы => есть пики <1 км
-    const int32 Octaves = 5;
-    float RidgedH = RidgedMulti(P, MountainFreq, Octaves);    // [0..1]
+    // Чем меньше высота, тем больше ShapeScale.
+    // Квадрат специально, чтобы при 6–8 км реально были резкие пики.
+    float ShapeScale = FMath::Square(HeightRefKm / SafeHeight);
+    ShapeScale = FMath::Clamp(ShapeScale, 1.f, 150.f);    // не даём совсем уйти в безумие
 
-    // Итоговая маска гор внутри региона
-    float MountainMask = RidgedH * RegionMask;
+    // Координаты для горного шума
+    const FVector PMountain = PBase * ShapeScale;
 
-    // Амплитуда гор НЕ душится континентами
+    // Базовая частота гор (MountainFreq понимаем как частоту при 80 км)
+    const float BaseFreqRaw = (MountainFreq > 0.f) ? MountainFreq : 0.02f;
+    float BaseMountainFreq  = BaseFreqRaw * ShapeScale;
+
+    // Параметры варпа – тоже зависят от ShapeScale
+    float WarpFreqLocal = (WarpFreq > 0.f)
+        ? WarpFreq * ShapeScale
+        : BaseMountainFreq * 0.5f;
+
+    float WarpStrengthLocal = (WarpKm > 0.f)
+        ? (WarpKm / 8.f)               // 5–15 км дадут нормальное искажение
+        : 4.f;
+
+    const int32 MountainOctavesLarge = 5;
+    const int32 MountainOctavesMid   = 4;
+    const int32 MountainOctavesSmall = 3;
+
+    // Крупные хребты
+    float Large = RidgedMultiWarp(
+        PMountain,
+        BaseMountainFreq,
+        MountainOctavesLarge,
+        WarpFreqLocal,
+        WarpStrengthLocal
+    );
+
+    // Средние детали
+    float Mid = RidgedMultiWarp(
+        PMountain * 2.f,
+        BaseMountainFreq * 2.f,
+        MountainOctavesMid,
+        WarpFreqLocal * 2.f,
+        WarpStrengthLocal * 0.5f
+    );
+
+    // Мелкие скальные детали
+    float Small = RidgedMultiWarp(
+        PMountain * 4.f,
+        BaseMountainFreq * 4.f,
+        MountainOctavesSmall,
+        WarpFreqLocal * 4.f,
+        WarpStrengthLocal * 0.25f
+    );
+
+    float MountainShape =
+        Large * 0.6f +
+        Mid   * 0.3f +
+        Small * 0.1f;
+
+    // Немного усиливаем пики
+    MountainShape = FMath::Pow(MountainShape, 1.35f);
+
+    // Лёгкий террасинг – скальные стены
+    const float TerraceStrength = 0.2f;
+    const int32 TerraceCount    = 7;
+    if (TerraceStrength > KINDA_SMALL_NUMBER && TerraceCount > 1)
+    {
+        const float Step = 1.f / static_cast<float>(TerraceCount);
+        const float Level = FMath::FloorToFloat(MountainShape / Step) * Step;
+        MountainShape = FMath::Lerp(MountainShape, Level, TerraceStrength);
+    }
+
+    // Горы только на суше
+    MountainShape *= LandMask;
+
+    // Итоговая маска гор
+    float MountainMask = MountainShape * RegionMask;
+
+    // ТЕПЕРЬ: при MountainHeightKm = 6–8 форма такая же "злая",
+    // как при 80, просто всё ниже по вертикали.
     float MountainsKm = MountainHeightKm * MountainMask;
 
     OutMountainMask = MountainMask;
@@ -298,6 +500,8 @@ float AProceduralPlanetActor::SampleHeightKm(
 }
 
 
+
+// -----------------------------------------------------
 
 void AProceduralPlanetActor::BuildLODForFace(int32 Face, int32 LodLevel, int32 XIndex, int32 YIndex, const FVector& CameraPosLS, TArray<FPlanetPatch>& OutPatches) const
 {
