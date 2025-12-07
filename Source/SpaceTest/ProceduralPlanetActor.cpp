@@ -235,48 +235,50 @@ FVector3f AProceduralPlanetActor::DomainWarp(const FVector3f& P, const float Fre
 
 float AProceduralPlanetActor::SampleHeightKm(const FVector3f& PositionKm) const
 {
-	// Базовая позиция в километрах. Добавляем seed-сдвиг, чтобы не зависеть от мировых координат.
-	const float SeedMul = static_cast<float>(NoiseSeed);
-	const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
-	const FVector3f P = PositionKm + SeedShift;
+    const float SeedMul = static_cast<float>(NoiseSeed);
+    const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
+    const FVector3f P = PositionKm + SeedShift;
 
-	// Частоты заданы в обратных километрах (1/длина).
-	const float ContinentFreq = 1.0f / 900.0f;    // крупные формы
-	const float WarpFreq      = 1.0f / 1400.0f;   // изгиб континентов
-	const float MountainFreq  = 1.0f / 55.0f;     // хребты 15-30 км
-	const float RidgeWarpFreq = 1.0f / 180.0f;    // варп для хребтов
-	const float ValleyFreq    = 1.0f / 160.0f;    // впадины/плато
-	const float MicroFreq     = 1.0f / 2.5f;      // мелкие детали (~2.5 км)
-	const float CrackFreq     = 1.0f / 1.2f;      // трещины (~1.2 км)
+    const float ContinentFreq = 1.0f / 900.0f;
+    const float WarpFreq      = 1.0f / 1400.0f;
+    const float MountainFreq  = 1.0f / 400.0f;   // растягиваем хребты, чтобы не алиасило на низком резе
+    const float RidgeWarpFreq = 1.0f / 800.0f;
+    const float ValleyFreq    = 1.0f / 600.0f;
+    const float MicroFreq     = 1.0f / 2.5f;     // пока не используется
+    const float CrackFreq     = 1.0f / 1.2f;     // пока не используется
 
-	// Континенты.
-	FVector3f PWarp = DomainWarp(P * ContinentFreq, WarpFreq, 0.55f, 2);
-	const float Continents = Fbm(PWarp, 6, 0.45f, 1.9f);
-	const float LandMask = FMath::SmoothStep(-0.08f, 0.12f, Continents); // чуть больше суши
+    // --- Континенты ---
+    const FVector3f PWarp = DomainWarp(P * ContinentFreq, WarpFreq, 0.55f, 2);
+    const float Continents = Fbm(PWarp, 6, 0.45f, 1.9f);
+    const float LandMask   = FMath::SmoothStep(-0.08f, 0.12f, Continents); // 0..1
 
-	// Хребты.
-	const FVector3f MountainP = DomainWarp(P * MountainFreq, RidgeWarpFreq, 0.12f, 2);
-	const float RidgesRaw = RidgedFbm(MountainP, 6, 0.52f, 2.05f);
-	const float RidgesSharp = FMath::Pow(FMath::Clamp(RidgesRaw, 0.0f, 1.0f), 1.35f); // острые пики
-	const float RidgeMask = FMath::Clamp((LandMask - 0.1f) * 2.5f, 0.0f, 1.0f);
+    // Вместо сырого фрактала делаем гладкую “базу” континентов
+    const float BaseLand = (LandMask - 0.5f) * 2.0f; // примерно -1..1, но без мелкого шума
 
-	// Впадины/плато.
-	const float Valleys = 1.0f - FMath::Abs(BillowFbm(P * ValleyFreq, 4, 0.5f, 2.1f));
+    // --- Хребты ---
+    const FVector3f MountainP = DomainWarp(P * MountainFreq, RidgeWarpFreq, 0.12f, 2);
+    const float RidgesRaw   = RidgedFbm(MountainP, 6, 0.52f, 2.05f);
+    const float RidgesSharp = FMath::Pow(FMath::Clamp(RidgesRaw, 0.0f, 1.0f), 1.35f);
+    const float RidgeMask   = FMath::Clamp((LandMask - 0.1f) * 2.5f, 0.0f, 1.0f);
 
-	// Слоистость по высоте.
-	const float Strata = FMath::Sin(P.Z * 0.011f + Fbm(P * 0.018f, 2, 0.6f, 2.0f)) * 0.06f;
+    // --- Впадины / плато ---
+    const float Valleys = 1.0f - FMath::Abs(BillowFbm(P * ValleyFreq, 4, 0.5f, 2.1f));
 
-	// Микродеталь и трещины (делаем их острее, но малой амплитуды, чтобы не “резиново”).
-	const float Micro = Fbm(P * MicroFreq, 4, 0.55f, 2.2f) * 0.05f;
-	const float Cracks = RidgedFbm(P * CrackFreq, 3, 0.62f, 2.25f) * 0.02f;
+    // --- Слоистость ---
+    const float Strata = FMath::Sin(P.Z * 0.011f + Fbm(P * 0.018f, 2, 0.6f, 2.0f)) * 0.06f;
 
-	// Итог в километрах.
-	const float HeightKm =
-		Continents * 1.4f +                              // ±1.4 км
-		RidgesSharp * 3.6f * RidgeMask +                 // горы до ~3.6 км
-		Valleys * 1.1f * (1.0f - RidgeMask) +            // впадины/плато
-		Strata +                                         // слоистость
-		Micro + Cracks;                                  // микро
+    // --- Микро и трещины — ВЫКЛЮЧЕНЫ ---
+    // const float Micro  = Fbm(P * MicroFreq, 4, 0.55f, 2.2f) * 0.05f;
+    // const float Cracks = RidgedFbm(P * CrackFreq, 3, 0.62f, 2.25f) * 0.02f;
 
-	return HeightKm;
+    const float ContinentsAmp = FMath::Max(0.0f, ContinentHeightKm);
+
+    const float HeightKm =
+        BaseLand * ContinentsAmp +                // гладкие континенты вместо дырявых
+        RidgesSharp * 3.6f * RidgeMask +          // горы как были
+        Valleys * 1.1f * (1.0f - RidgeMask) +     // впадины/плато
+        Strata;                                   // слоистость
+
+    const float MinDepthKm = -0.2f * ContinentsAmp;
+    return FMath::Clamp(HeightKm, MinDepthKm, ContinentsAmp * 4.0f);
 }

@@ -18,7 +18,7 @@ class SPACETEST_API AProceduralPlanetActor : public AActor
 
 public:
 	AProceduralPlanetActor();
-
+	
 	/** Базовый радиус планеты в километрах. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet", meta=(ClampMin="10.0", UIMin="10.0"))
 	float PlanetRadiusKm = 3000.f;
@@ -30,6 +30,10 @@ public:
 	/** Общий seed шума. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet|Noise")
 	int32 NoiseSeed = 1337;
+
+	/** Амплитуда континентов (км). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet|Noise", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentHeightKm = 2.0f;
 
 	/** Масштаб амплитуд шума (быстрое управление “дикостью” рельефа). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet|Noise", meta=(ClampMin="0.1", UIMin="0.1"))
