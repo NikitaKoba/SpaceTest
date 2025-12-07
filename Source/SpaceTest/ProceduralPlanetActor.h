@@ -67,9 +67,37 @@ public:
 	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0001", UIMin="0.0001"))
 	float WarpFreq = 0.01f;
 
+	/** Gentle height for shallow continental shelf in km. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ShelfHeightKm = 0.12f;
+
+	/** Strength of high-frequency surface detail on mountains. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float MountainDetailStrength = 0.35f;
+
+	/** Depth multiplier for broad valleys carved into the ridge field. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ValleyDepthMultiplier = 0.35f;
+
+	/** Approximate erosion strength along flow directions (0=off). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ErosionStrength = 0.35f;
+
+	/** Elevation (km) where peaks start to flatten into glacial caps. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float GlacialHeightKm = 2.0f;
+
+	/** Blend distance (km) for glacial flattening transition. */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
+	float GlacialBlendKm = 0.8f;
+
+	/** Peak shaping exponent (higher = sharper ridges). */
+	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.5", UIMin="0.5"))
+	float PeakSharpness = 1.35f;
+
 	/** Mountains only inside this arc-length radius (km) from MountainRegionDir (0 = everywhere). */
 	UPROPERTY(EditAnywhere, Category="Terrain", meta=(ClampMin="0.0", UIMin="0.0"))
-	float MountainRegionRadiusKm = 80.f;
+	float MountainRegionRadiusKm = 0.f;
 
 	/** Direction (unit) of mountain region center on the planet (will be normalized). */
 	UPROPERTY(EditAnywhere, Category="Terrain")

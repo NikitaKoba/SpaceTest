@@ -1,192 +1,236 @@
 #include "ProceduralPlanetActor.h"
-
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
-#include "FastNoiseLite.h"   // <--- добавь это
-
+#include "FastNoiseLite.h"
 #include <limits>
 
-// Если подключишь FastNoiseLite / FastNoise2 – раскомментируй и настрои.
-// #include "FastNoiseLite.h"
+struct FTerrainNoiseContext
+{
+	bool bInited = false;
+	FastNoiseLite Continent;
+	FastNoiseLite ContinentDetail;
+	FastNoiseLite Shelf;
+	FastNoiseLite RidgeA;
+	FastNoiseLite RidgeB;
+	FastNoiseLite RidgeMask;
+	FastNoiseLite Detail;
+	FastNoiseLite MicroDetail;
+	FastNoiseLite Valley;
+	FastNoiseLite FlowDir;
+	FastNoiseLite WarpLargeX, WarpLargeY;
+	FastNoiseLite WarpSmallX, WarpSmallY;
+	FastNoiseLite WarpMicroX, WarpMicroY;
+
+	void Init(int32 Seed)
+	{
+		if (bInited) return;
+		bInited = true;
+
+		auto SetupFBM = [](FastNoiseLite& N, int32 NoiseSeed, int32 Octaves, float Lacunarity, float Gain, float Frequency)
+		{
+			N.SetSeed(NoiseSeed);
+			N.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+			N.SetFractalType(FastNoiseLite::FractalType_FBm);
+			N.SetFractalOctaves(Octaves);
+			N.SetFractalLacunarity(Lacunarity);
+			N.SetFractalGain(Gain);
+			N.SetFractalWeightedStrength(0.0f);
+			N.SetFrequency(Frequency);
+		};
+
+		auto SetupRidged = [](FastNoiseLite& N, int32 NoiseSeed, int32 Octaves, float Lacunarity, float Gain, float Weighted, float Frequency)
+		{
+			N.SetSeed(NoiseSeed);
+			N.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+			N.SetFractalType(FastNoiseLite::FractalType_Ridged);
+			N.SetFractalOctaves(Octaves);
+			N.SetFractalLacunarity(Lacunarity);
+			N.SetFractalGain(Gain);
+			N.SetFractalWeightedStrength(Weighted);
+			N.SetFrequency(Frequency);
+		};
+
+		SetupFBM(Continent, Seed * 17 + 11, 5, 2.05f, 0.48f, 1.0f);
+		SetupFBM(ContinentDetail, Seed * 17 + 23, 6, 2.2f, 0.45f, 1.0f);
+		SetupRidged(Shelf, Seed * 17 + 31, 3, 2.1f, 0.6f, 0.15f, 1.0f);
+
+		SetupRidged(RidgeA, Seed * 41 + 1, 8, 2.25f, 0.5f, 0.25f, 1.0f);
+		SetupRidged(RidgeB, Seed * 41 + 7, 6, 2.3f, 0.52f, 0.2f, 1.0f);
+		SetupFBM(RidgeMask, Seed * 41 + 13, 4, 2.15f, 0.55f, 1.0f);
+
+		SetupFBM(Detail, Seed * 73 + 3, 5, 2.5f, 0.5f, 1.0f);
+		SetupFBM(MicroDetail, Seed * 73 + 9, 3, 2.8f, 0.6f, 1.0f);
+
+		SetupFBM(Valley, Seed * 61 + 5, 4, 2.05f, 0.5f, 1.0f);
+		SetupFBM(FlowDir, Seed * 83 + 17, 3, 2.4f, 0.65f, 1.0f);
+
+		SetupFBM(WarpLargeX, Seed * 97 + 2, 3, 2.1f, 0.5f, 1.0f);
+		SetupFBM(WarpLargeY, Seed * 97 + 7, 3, 2.1f, 0.5f, 1.0f);
+		SetupFBM(WarpSmallX, Seed * 97 + 13, 4, 2.3f, 0.55f, 1.0f);
+		SetupFBM(WarpSmallY, Seed * 97 + 19, 4, 2.3f, 0.55f, 1.0f);
+		SetupFBM(WarpMicroX, Seed * 97 + 29, 2, 2.6f, 0.6f, 1.0f);
+		SetupFBM(WarpMicroY, Seed * 97 + 37, 2, 2.6f, 0.6f, 1.0f);
+	}
+};
+
+static FTerrainNoiseContext GTerrainCtx;
+
+static FORCEINLINE float FNL01(float v) { return FMath::Clamp(0.5f + 0.5f * v, 0.f, 1.f); }
+static FORCEINLINE float SmoothStep01(float T)
+{
+	const float X = FMath::Clamp(T, 0.f, 1.f);
+	return X * X * (3.f - 2.f * X);
+}
 
 struct FPlanetPatch
 {
 	int32 Face = 0;
 	int32 Lod = 0;
-	int32 XIndex = 0; // quadtree grid index at Lod
+	int32 XIndex = 0;
 	int32 YIndex = 0;
-
-	float U0 = 0.f;   // derived
-	float V0 = 0.f;   // derived
-	float Size = 1.f; // derived
+	float U0 = 0.f;
+	float V0 = 0.f;
+	float Size = 1.f;
 };
-// ---------------------- ШУМ НА FASTNOISELITE ----------------------
 
-// fBm для континентов (можно оставить и старый FBm на FMath, но так всё в одном стиле)
-static float FNL_FBm(const FVector& P, int32 Seed, float BaseFreq, int32 Octaves,
-                     float Lacunarity = 2.f, float Gain = 0.5f)
+static void GetLocalMountainCoords(
+	const FVector& SphereDir,
+	const FVector& RegionDir,
+	float RadiusKm,
+	FVector2D& OutLocalKm,
+	float& OutArcKm)
 {
-    static FastNoiseLite Noise;
-    Noise.SetSeed(Seed * 911382323 + 1);
-    Noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    Noise.SetFractalType(FastNoiseLite::FractalType_FBm);
-    Noise.SetFractalOctaves(Octaves);
-    Noise.SetFractalLacunarity(Lacunarity);
-    Noise.SetFractalGain(Gain);
-    Noise.SetFrequency(BaseFreq);
+	const float dot = FMath::Clamp(FVector::DotProduct(RegionDir, SphereDir), -1.f, 1.f);
+	const float angle = FMath::Acos(dot);
+	const float arcKm = angle * RadiusKm;
+	OutArcKm = arcKm;
 
-    float v = Noise.GetNoise(P.X, P.Y, P.Z); // [-1;1]
-    return FMath::Clamp(v, -1.f, 1.f);
+	FVector tangent = SphereDir - RegionDir * dot;
+	if (!tangent.Normalize())
+	{
+		OutLocalKm = FVector2D::ZeroVector;
+		return;
+	}
+
+	FVector Tx, Ty;
+	RegionDir.FindBestAxisVectors(Tx, Ty);
+
+	const float dirX = FVector::DotProduct(tangent, Tx);
+	const float dirY = FVector::DotProduct(tangent, Ty);
+
+	OutLocalKm = FVector2D(dirX * arcKm, dirY * arcKm);
 }
 
-// Ridged multifractal (как в примерах FastNoise "Mountain")
-static float FNL_Ridged(const FVector& P, int32 Seed, float BaseFreq, int32 Octaves)
+static FVector2D ApplyLayeredWarp(const FVector2D& Pkm, float WarpKm, float WarpFreq)
 {
-    static FastNoiseLite Noise;
-    Noise.SetSeed(Seed * 16807 + 3);
-    Noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    Noise.SetFractalType(FastNoiseLite::FractalType_Ridged);
-    Noise.SetFractalOctaves(Octaves);
-    Noise.SetFractalLacunarity(2.0f);
-    Noise.SetFractalGain(0.5f);
-    Noise.SetFrequency(BaseFreq);
+	if (WarpKm <= KINDA_SMALL_NUMBER || WarpFreq <= KINDA_SMALL_NUMBER)
+		return Pkm;
 
-    float v = Noise.GetNoise(P.X, P.Y, P.Z); // [-1;1]
-    return FMath::Clamp(0.5f + 0.5f * v, 0.f, 1.f); // [0;1]
+	FVector2D P = Pkm;
+
+	const float LargeFreq = WarpFreq;
+	const float SmallFreq = WarpFreq * 2.35f;
+	const float MicroFreq = WarpFreq * 6.85f;
+
+	const float LargeAmp = WarpKm;
+	const float SmallAmp = WarpKm * 0.35f;
+	const float MicroAmp = WarpKm * 0.08f;
+
+	P.X += GTerrainCtx.WarpLargeX.GetNoise(P.X * LargeFreq, P.Y * LargeFreq) * LargeAmp;
+	P.Y += GTerrainCtx.WarpLargeY.GetNoise(P.X * LargeFreq + 131.7f, P.Y * LargeFreq + 131.7f) * LargeAmp;
+
+	P.X += GTerrainCtx.WarpSmallX.GetNoise(P.X * SmallFreq, P.Y * SmallFreq) * SmallAmp;
+	P.Y += GTerrainCtx.WarpSmallY.GetNoise(P.X * SmallFreq + 71.1f, P.Y * SmallFreq + 71.1f) * SmallAmp;
+
+	P.X += GTerrainCtx.WarpMicroX.GetNoise(P.X * MicroFreq, P.Y * MicroFreq) * MicroAmp;
+	P.Y += GTerrainCtx.WarpMicroY.GetNoise(P.X * MicroFreq + 17.7f, P.Y * MicroFreq + 17.7f) * MicroAmp;
+
+	return P;
 }
 
-// Domain warp для 3D, чтобы получить хребты и разломы
-static FVector FNL_DomainWarp3D(const FVector& P, int32 Seed, float Freq, float Strength)
+static float RidgeField(const FVector2D& P, float BaseFreq)
 {
-    static FastNoiseLite WarpX;
-    static FastNoiseLite WarpY;
-    static FastNoiseLite WarpZ;
+	const float r1 = 1.f - FMath::Abs(GTerrainCtx.RidgeA.GetNoise(P.X * BaseFreq, P.Y * BaseFreq));
+	const float r2 = 1.f - FMath::Abs(GTerrainCtx.RidgeB.GetNoise(P.X * BaseFreq * 0.65f, P.Y * BaseFreq * 0.65f));
+	const float r3 = 1.f - FMath::Abs(GTerrainCtx.RidgeA.GetNoise(P.X * BaseFreq * 1.85f, P.Y * BaseFreq * 1.85f));
 
-    WarpX.SetSeed(Seed * 101 + 11);
-    WarpY.SetSeed(Seed * 101 + 23);
-    WarpZ.SetSeed(Seed * 101 + 47);
+	float ridgeMask = FNL01(GTerrainCtx.RidgeMask.GetNoise(P.X * BaseFreq * 0.18f, P.Y * BaseFreq * 0.18f));
+	ridgeMask = SmoothStep01(ridgeMask);
 
-    WarpX.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    WarpY.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    WarpZ.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-
-    WarpX.SetFrequency(Freq);
-    WarpY.SetFrequency(Freq);
-    WarpZ.SetFrequency(Freq);
-
-    const float x = P.X;
-    const float y = P.Y;
-    const float z = P.Z;
-
-    FVector Offset(
-        WarpX.GetNoise(x, y, z),
-        WarpY.GetNoise(x + 37.f, y + 17.f, z + 13.f),
-        WarpZ.GetNoise(x - 11.f, y + 53.f, z + 7.f)
-    );
-
-    return P + Offset * Strength;
+	float ridge = r1 * 0.55f + r2 * 0.3f + r3 * 0.2f;
+	ridge *= (0.35f + 0.65f * ridgeMask);
+	return FMath::Clamp(ridge, 0.f, 1.f);
 }
 
-// -----------------------------------------------------
-// БАЗОВЫЕ ХЕЛПЕРЫ ШУМА
-// -----------------------------------------------------
-
-// ---------- ШУМ ----------
-
-// Базовый перлин. Сюда можно повесить FastNoise2/LibNoise.
-static float Perlin3(const FVector& P)
+static float ApplyValleyCarve(float HeightNorm, const FVector2D& P, float BaseFreq, float DepthMul)
 {
-    // TODO: заменить на внешний шум при желании.
-    return FMath::PerlinNoise3D(P);
+	const float valleyNoise = FNL01(GTerrainCtx.Valley.GetNoise(P.X * BaseFreq * 0.42f, P.Y * BaseFreq * 0.42f));
+	const float valleyMask = FMath::Pow(1.f - valleyNoise, 2.35f);
+	const float carve = valleyMask * DepthMul * (0.35f + 0.65f * HeightNorm);
+	return FMath::Clamp(HeightNorm - carve, 0.f, 1.f);
 }
 
-// fBm для континентов / общего рельефа
-static float FBm(const FVector& P, float BaseFreq, int32 Octaves, float Lacunarity = 2.f, float Gain = 0.5f)
+static float ApplyFlowErosion(float HeightNorm, const FVector2D& P, float BaseFreq, float Strength)
 {
-    float Sum = 0.f;
-    float Amp = 1.f;
-    float Freq = BaseFreq;
-    float AmpSum = 0.f;
+	if (Strength <= KINDA_SMALL_NUMBER)
+		return HeightNorm;
 
-    for (int32 i = 0; i < Octaves; ++i)
-    {
-        float N = Perlin3(P * Freq); // [-1;1]
-        Sum += N * Amp;
-        AmpSum += Amp;
+	const float dirNoise = GTerrainCtx.FlowDir.GetNoise(P.X * BaseFreq * 0.32f, P.Y * BaseFreq * 0.32f);
+	const float angle = dirNoise * PI;
+	const FVector2D dir(FMath::Cos(angle), FMath::Sin(angle));
+	const float sampleDist = FMath::Max(2.f, 0.4f / BaseFreq);
 
-        Freq *= Lacunarity;
-        Amp  *= Gain;
-    }
+	const float up = FNL01(GTerrainCtx.RidgeA.GetNoise((P.X + dir.X * sampleDist) * BaseFreq, (P.Y + dir.Y * sampleDist) * BaseFreq));
+	const float down = FNL01(GTerrainCtx.RidgeA.GetNoise((P.X - dir.X * sampleDist) * BaseFreq, (P.Y - dir.Y * sampleDist) * BaseFreq));
+	const float slope = FMath::Max(0.f, up - down);
 
-    if (AmpSum < KINDA_SMALL_NUMBER)
-        return 0.f;
-
-    float H = Sum / AmpSum;          // [-1;1]
-    return FMath::Clamp(H, -1.f, 1.f);
+	const float erosion = slope * Strength * (0.25f + 0.75f * HeightNorm);
+	return FMath::Clamp(HeightNorm - erosion, 0.f, 1.1f);
 }
 
-// Векторный шум – для доменного варпа
-static FVector NoiseVec3(const FVector& P, float Freq)
+static float AddSurfaceDetail(float HeightNorm, const FVector2D& P, float BaseFreq, float Strength)
 {
-    const FVector Off1(37.0f, 17.0f,  3.0f);
-    const FVector Off2(-11.0f, 53.0f, 7.0f);
-    const FVector Off3(19.0f, -29.0f, 31.0f);
+	if (Strength <= KINDA_SMALL_NUMBER)
+		return HeightNorm;
 
-    return FVector(
-        Perlin3(P * Freq + Off1),
-        Perlin3(P * Freq + Off2),
-        Perlin3(P * Freq + Off3)
-    );
+	const float detail = FNL01(GTerrainCtx.Detail.GetNoise(P.X * BaseFreq * 5.6f, P.Y * BaseFreq * 5.6f)) - 0.5f;
+	const float micro = FNL01(GTerrainCtx.MicroDetail.GetNoise(P.X * BaseFreq * 14.7f, P.Y * BaseFreq * 14.7f)) - 0.5f;
+	const float delta = (detail * 0.45f + micro * 0.16f) * Strength * (0.35f + 0.65f * HeightNorm);
+	return FMath::Clamp(HeightNorm + delta, 0.f, 1.2f);
 }
 
-// Ridged multifractal with domain warp: даёт хребты и пики
-static float RidgedMultiWarp(const FVector& P, float BaseFreq, int32 Octaves, float WarpFreq, float WarpStrength)
+static float ShapePeaks(float HeightNorm, float Sharpness)
 {
-    float Sum    = 0.f;
-    float Amp    = 1.f;
-    float Freq   = BaseFreq;
-    float AmpSum = 0.f;
+	float h = FMath::Clamp(HeightNorm, 0.f, 1.f);
+	h = FMath::Pow(h, FMath::Max(0.5f, Sharpness));
 
-    FVector AccWarp = FVector::ZeroVector;
+	if (h > 0.82f)
+	{
+		const float t = (h - 0.82f) / 0.18f;
+		h = 0.82f + FMath::Pow(t, 3.5f) * 0.18f;
+	}
 
-    for (int32 i = 0; i < Octaves; ++i)
-    {
-        // копим искажение – вытянутые хребты, изломы
-        FVector Warp = NoiseVec3(P, WarpFreq) * WarpStrength;
-        AccWarp += Warp;
-
-        float N = Perlin3(P * Freq + AccWarp); // [-1;1]
-        float R = 1.f - FMath::Abs(N);         // [0;1] гребни
-        R *= R;                                // острее пики
-
-        Sum += R * Amp;
-        AmpSum += Amp;
-
-        Freq       *= 2.f;
-        WarpFreq   *= 2.f;
-        WarpStrength *= 0.5f;
-        Amp        *= 0.5f;
-    }
-
-    if (AmpSum < KINDA_SMALL_NUMBER)
-        return 0.f;
-
-    float H = Sum / AmpSum;                   // [0;1]
-    return FMath::Clamp(H, 0.f, 1.f);
+	return FMath::Clamp(h, 0.f, 1.f);
 }
 
-// -----------------------------------------------------
+static float ApplyGlacialFlatten(float HeightKm, float GlacialKm, float BlendKm)
+{
+	if (GlacialKm <= KINDA_SMALL_NUMBER)
+		return HeightKm;
+
+	const float t = SmoothStep01((HeightKm - GlacialKm) / FMath::Max(0.001f, BlendKm));
+	const float flattened = GlacialKm + (HeightKm - GlacialKm) * 0.35f;
+	return FMath::Lerp(HeightKm, flattened, t);
+}
 
 AProceduralPlanetActor::AProceduralPlanetActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
-
 	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
 	SetRootComponent(SceneRoot);
-
 	Mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("PlanetMesh"));
 	Mesh->SetupAttachment(SceneRoot);
 	Mesh->bUseAsyncCooking = true;
@@ -206,38 +250,32 @@ void AProceduralPlanetActor::Tick(float DeltaSeconds)
 	{
 		const FVector CamPosWS = GetCameraPosition();
 		const FVector CamPosLS = CamPosWS - GetActorLocation();
-
 		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 		const bool bTimeOk = (LastBuildTime < 0.f) || (Now - LastBuildTime >= MinUpdateInterval);
 
-		// Distance along surface approximation (angle) in km
 		float DistKm = 0.f;
 		float AngleDeg = 0.f;
 		const float PrevLen = LastCameraPosLS.Size();
 		const float CurrLen = CamPosLS.Size();
 		float SpeedKmS = 0.f;
+
 		if (PrevLen > KINDA_SMALL_NUMBER && CurrLen > KINDA_SMALL_NUMBER)
 		{
 			const FVector PrevDir = LastCameraPosLS / PrevLen;
 			const FVector CurrDir = CamPosLS / CurrLen;
 			const float Dot = FVector::DotProduct(PrevDir, CurrDir);
 			AngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)));
-
 			const float RadiusCm = GetRadiusCm();
 			const float AngleRad = FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f));
 			DistKm = (RadiusCm * AngleRad) / 100000.f;
-
 			const float Dt = (LastBuildTime > 0.f) ? (Now - LastBuildTime) : 0.f;
 			if (Dt > SMALL_NUMBER)
-			{
 				SpeedKmS = DistKm / Dt;
-			}
 		}
 		else
 		{
 			DistKm = std::numeric_limits<float>::max();
 			AngleDeg = 180.f;
-			SpeedKmS = 0.f;
 		}
 
 		const bool bSpeedOk = SpeedKmS <= MaxUpdateSpeedKmPerSec || MaxUpdateSpeedKmPerSec <= KINDA_SMALL_NUMBER;
@@ -254,12 +292,6 @@ float AProceduralPlanetActor::GetRadiusCm() const
 	return FMath::Max(1.f, RadiusKm * 100000.f);
 }
 
-static float SmoothStep01(float T)
-{
-	const float X = FMath::Clamp(T, 0.f, 1.f);
-	return X * X * (3.f - 2.f * X);
-}
-
 FVector AProceduralPlanetActor::GetCameraPosition() const
 {
 	if (const UWorld* World = GetWorld())
@@ -272,14 +304,11 @@ FVector AProceduralPlanetActor::GetCameraPosition() const
 			}
 		}
 	}
-
-	// Fallback: some offset from actor so LOD can build in editor.
 	return GetActorLocation() + GetActorForwardVector() * GetRadiusCm();
 }
 
 FVector AProceduralPlanetActor::CubeToSphere(const FVector& P) const
 {
-	// Spherified cube to reduce pole stretching versus naive normalization.
 	const float X2 = P.X * P.X;
 	const float Y2 = P.Y * P.Y;
 	const float Z2 = P.Z * P.Z;
@@ -295,12 +324,12 @@ FVector AProceduralPlanetActor::FacePoint(int32 FaceIndex, float U, float V) con
 {
 	switch (FaceIndex)
 	{
-	case 0: return FVector( 1.f,    U,    V); // +X
-	case 1: return FVector(-1.f,    U,    V); // -X
-	case 2: return FVector(   U,  1.f,    V); // +Y
-	case 3: return FVector(   U, -1.f,    V); // -Y
-	case 4: return FVector(   U,    V,  1.f); // +Z
-	case 5: return FVector(   U,    V, -1.f); // -Z
+	case 0: return FVector(1.f, U, V);
+	case 1: return FVector(-1.f, U, V);
+	case 2: return FVector(U, 1.f, V);
+	case 3: return FVector(U, -1.f, V);
+	case 4: return FVector(U, V, 1.f);
+	case 5: return FVector(U, V, -1.f);
 	default: return FVector::ZeroVector;
 	}
 }
@@ -308,200 +337,100 @@ FVector AProceduralPlanetActor::FacePoint(int32 FaceIndex, float U, float V) con
 bool AProceduralPlanetActor::ShouldSplitPatch(int32 LodLevel, float PatchSize01, const FVector& CameraPosLS, const FVector& PatchCenterDir) const
 {
 	if (LodLevel >= MaxLOD)
-	{
 		return false;
-	}
 
 	const float RadiusCm = GetRadiusCm();
-	const float EdgeCm   = PatchSize01 * 2.f * RadiusCm; // planar approximation
-	const float EdgeKm   = EdgeCm / 100000.f;
-
+	const float EdgeCm = PatchSize01 * 2.f * RadiusCm;
+	const float EdgeKm = EdgeCm / 100000.f;
 	const float CamLen = CameraPosLS.Size();
+
 	if (CamLen < KINDA_SMALL_NUMBER)
-	{
 		return true;
-	}
 
 	const FVector CamDir = CameraPosLS / CamLen;
 	const float Facing = FVector::DotProduct(CamDir, PatchCenterDir);
-	const bool bFacingCamera = Facing > -0.1f; // keep backside coarse
 
-	if (!bFacingCamera)
-	{
+	if (Facing <= -0.1f)
 		return false;
-	}
 
 	const float AngleRad = FMath::Acos(FMath::Clamp(Facing, -1.f, 1.f));
 	const float TangentialDist = RadiusCm * AngleRad;
 	const float HeightAboveSurface = FMath::Max(0.f, CamLen - RadiusCm);
 	const float EffectiveDistance = HeightAboveSurface + TangentialDist;
 
-	if (MaxDetailDistanceKm > 0.f)
+	if (MaxDetailDistanceKm > 0.f && EffectiveDistance / 100000.f > MaxDetailDistanceKm)
+		return false;
+
+	return EdgeKm > TargetPatchEdgeKm && EffectiveDistance < EdgeCm * LodDistanceFactor;
+}
+
+float AProceduralPlanetActor::SampleHeightKm(
+	const FVector& SphereDir,
+	float RadiusKmLocal,
+	float& OutMountainMask) const
+{
+	GTerrainCtx.Init(NoiseSeed);
+
+	const FVector ContP = SphereDir * 1000.f;
+	const float ContBase = GTerrainCtx.Continent.GetNoise(ContP.X * ContinentFreq, ContP.Y * ContinentFreq, ContP.Z * ContinentFreq);
+	const float ContDetail = GTerrainCtx.ContinentDetail.GetNoise(ContP.X * ContinentFreq * 1.6f, ContP.Y * ContinentFreq * 1.6f, ContP.Z * ContinentFreq * 1.6f);
+	const float ShelfNoise = GTerrainCtx.Shelf.GetNoise(ContP.X * ContinentFreq * 0.7f, ContP.Y * ContinentFreq * 0.7f, ContP.Z * ContinentFreq * 0.7f);
+
+	const float ContCombined = ContBase * 0.7f + ContDetail * 0.28f + ShelfNoise * 0.08f;
+	const float Cont01 = FNL01(ContCombined);
+	const float LandMask = SmoothStep01((Cont01 - 0.4f) / 0.2f);       // шире плато суши
+	const float ShelfMask = SmoothStep01((Cont01 - 0.32f) / 0.12f);    // шире отмели
+	float BaseKm = BaseHeightKm * LandMask + ShelfHeightKm * ShelfMask * (1.f - LandMask);
+
+	float RegionMask = 1.f;
+	FVector RegionDir = MountainRegionDir.GetSafeNormal();
+
+	if (MountainRegionRadiusKm > KINDA_SMALL_NUMBER)
 	{
-		if (EffectiveDistance / 100000.f > MaxDetailDistanceKm)
-		{
-			return false;
-		}
+		const float Dot = FVector::DotProduct(RegionDir, SphereDir);
+		const float Angle = FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f));
+		const float ArcKm = Angle * RadiusKmLocal;
+		const float Outer = MountainRegionRadiusKm;
+		const float Fade = Outer * 0.15f;
+		const float Inner = FMath::Max(0.f, Outer - Fade);
+
+		if (ArcKm >= Outer)
+			RegionMask = 0.f;
+		else if (ArcKm > Inner)
+			RegionMask = SmoothStep01((Outer - ArcKm) / Fade);
 	}
 
-	const bool bLargeEnough = EdgeKm > TargetPatchEdgeKm;
-	const bool bCloseEnough = EffectiveDistance < EdgeCm * LodDistanceFactor;
-	return bLargeEnough && bCloseEnough;
+	if (RegionMask < 0.01f || LandMask < 0.01f)
+	{
+		OutMountainMask = 0.f;
+		return BaseKm;
+	}
+
+	FVector2D LocalKm;
+	float ArcKm = 0.f;
+	GetLocalMountainCoords(SphereDir, RegionDir, RadiusKmLocal, LocalKm, ArcKm);
+	LocalKm += FVector2D(NoiseSeed * 13.37f, NoiseSeed * 91.17f);
+
+	const FVector2D Warped = ApplyLayeredWarp(LocalKm, WarpKm, WarpFreq);
+	const float BaseFreq = (MountainFreq > 0.f) ? MountainFreq : 0.02f;
+
+	float MountainShape = RidgeField(Warped, BaseFreq);
+	MountainShape = ApplyValleyCarve(MountainShape, Warped, BaseFreq, ValleyDepthMultiplier);
+	MountainShape = ApplyFlowErosion(MountainShape, Warped, BaseFreq, ErosionStrength);
+	MountainShape = AddSurfaceDetail(MountainShape, Warped, BaseFreq, MountainDetailStrength);
+	MountainShape = ShapePeaks(MountainShape, PeakSharpness);
+
+	// не гасим горы до нуля: даём минимум 0.25 даже над водой, чтобы не получать «кашу» нулевой амплитуды
+	const float LandBoost = FMath::Clamp(LandMask + 0.25f, 0.f, 1.f);
+	const float MountainMask = FMath::Clamp(RegionMask * LandBoost, 0.f, 1.f);
+	MountainShape *= MountainMask;
+	OutMountainMask = FMath::Clamp(MountainShape, 0.f, 1.f);
+
+	float MountainsKm = MountainHeightKm * MountainShape;
+	MountainsKm = ApplyGlacialFlatten(MountainsKm, GlacialHeightKm, GlacialBlendKm);
+
+	return BaseKm + MountainsKm;
 }
-
-// -----------------------------------------------------
-// ОСНОВНОЙ АЛГОРИТМ ВЫСОТЫ
-// -----------------------------------------------------
-float AProceduralPlanetActor::SampleHeightKm(
-    const FVector& SphereDir,
-    float RadiusKmLocal,
-    float& OutMountainMask) const
-{
-    // Базовые координаты на сфере в "километровом" пространстве шума
-    const float SeedOffset = static_cast<float>(NoiseSeed) * 13.37f;
-    const FVector PBase = SphereDir * 1000.f + FVector(SeedOffset);
-
-    // ---------------- 1) Континенты / базовая высота ----------------
-
-    const int32 ContOctaves = 4;
-    float ContN  = FBm(PBase, ContinentFreq, ContOctaves); // [-1;1]
-    float Cont01 = 0.5f + 0.5f * ContN;                    // [0;1]
-
-    // Маска суши
-    float LandMask = SmoothStep01((Cont01 - 0.35f) / 0.35f);
-
-    float BaseKm = BaseHeightKm * LandMask;
-
-    // ---------------- 2) Маска горного региона по дуге ----------------
-    //
-    // ДЕЛАЕМ НЕ КУПОЛ, А ПО ПРАКТИКЕ:
-    // внутри радиуса ~1, с тонкой полосой плавного перехода по краю.
-
-    float RegionMask = 1.f;
-    if (MountainRegionRadiusKm > KINDA_SMALL_NUMBER)
-    {
-        const FVector RegionDir = MountainRegionDir.GetSafeNormal();
-        const float Dot   = FVector::DotProduct(RegionDir, SphereDir);
-        const float Angle = FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)); // рад
-        const float ArcKm = Angle * RadiusKmLocal;                     // дуга по поверхности
-
-        const float Outer = MountainRegionRadiusKm;
-        const float Fade  = Outer * 0.05f; // 5% радиуса – зона сглаживания
-        const float Inner = FMath::Max(0.f, Outer - Fade);
-
-        if (ArcKm >= Outer)
-        {
-            RegionMask = 0.f;
-        }
-        else if (ArcKm <= Inner)
-        {
-            RegionMask = 1.f;
-        }
-        else
-        {
-            // от 1 до 0 только в узкой полосе по краю
-            const float T = (Outer - ArcKm) / (Outer - Inner); // [0..1]
-            RegionMask = SmoothStep01(T);
-        }
-    }
-
-    // ---------------- 3) Горы с "shape-scale" по высоте ----------------
-    //
-    // Хотим, чтобы при 80 км форма нам нравилась.
-    // При меньших высотах СИЛЬНО сжимаем шум по горизонтали,
-    // чтобы уклон склонов оставался визуально крутым.
-
-    const float HeightRefKm = 80.f;                       // под эту высоту мы "калибруемся"
-    const float SafeHeight  = FMath::Max(0.5f, MountainHeightKm);
-
-    // Чем меньше высота, тем больше ShapeScale.
-    // Квадрат специально, чтобы при 6–8 км реально были резкие пики.
-    float ShapeScale = FMath::Square(HeightRefKm / SafeHeight);
-    ShapeScale = FMath::Clamp(ShapeScale, 1.f, 150.f);    // не даём совсем уйти в безумие
-
-    // Координаты для горного шума
-    const FVector PMountain = PBase * ShapeScale;
-
-    // Базовая частота гор (MountainFreq понимаем как частоту при 80 км)
-    const float BaseFreqRaw = (MountainFreq > 0.f) ? MountainFreq : 0.02f;
-    float BaseMountainFreq  = BaseFreqRaw * ShapeScale;
-
-    // Параметры варпа – тоже зависят от ShapeScale
-    float WarpFreqLocal = (WarpFreq > 0.f)
-        ? WarpFreq * ShapeScale
-        : BaseMountainFreq * 0.5f;
-
-    float WarpStrengthLocal = (WarpKm > 0.f)
-        ? (WarpKm / 8.f)               // 5–15 км дадут нормальное искажение
-        : 4.f;
-
-    const int32 MountainOctavesLarge = 5;
-    const int32 MountainOctavesMid   = 4;
-    const int32 MountainOctavesSmall = 3;
-
-    // Крупные хребты
-    float Large = RidgedMultiWarp(
-        PMountain,
-        BaseMountainFreq,
-        MountainOctavesLarge,
-        WarpFreqLocal,
-        WarpStrengthLocal
-    );
-
-    // Средние детали
-    float Mid = RidgedMultiWarp(
-        PMountain * 2.f,
-        BaseMountainFreq * 2.f,
-        MountainOctavesMid,
-        WarpFreqLocal * 2.f,
-        WarpStrengthLocal * 0.5f
-    );
-
-    // Мелкие скальные детали
-    float Small = RidgedMultiWarp(
-        PMountain * 4.f,
-        BaseMountainFreq * 4.f,
-        MountainOctavesSmall,
-        WarpFreqLocal * 4.f,
-        WarpStrengthLocal * 0.25f
-    );
-
-    float MountainShape =
-        Large * 0.6f +
-        Mid   * 0.3f +
-        Small * 0.1f;
-
-    // Немного усиливаем пики
-    MountainShape = FMath::Pow(MountainShape, 1.35f);
-
-    // Лёгкий террасинг – скальные стены
-    const float TerraceStrength = 0.2f;
-    const int32 TerraceCount    = 7;
-    if (TerraceStrength > KINDA_SMALL_NUMBER && TerraceCount > 1)
-    {
-        const float Step = 1.f / static_cast<float>(TerraceCount);
-        const float Level = FMath::FloorToFloat(MountainShape / Step) * Step;
-        MountainShape = FMath::Lerp(MountainShape, Level, TerraceStrength);
-    }
-
-    // Горы только на суше
-    MountainShape *= LandMask;
-
-    // Итоговая маска гор
-    float MountainMask = MountainShape * RegionMask;
-
-    // ТЕПЕРЬ: при MountainHeightKm = 6–8 форма такая же "злая",
-    // как при 80, просто всё ниже по вертикали.
-    float MountainsKm = MountainHeightKm * MountainMask;
-
-    OutMountainMask = MountainMask;
-
-    return BaseKm + MountainsKm;
-}
-
-
-
-// -----------------------------------------------------
 
 void AProceduralPlanetActor::BuildLODForFace(int32 Face, int32 LodLevel, int32 XIndex, int32 YIndex, const FVector& CameraPosLS, TArray<FPlanetPatch>& OutPatches) const
 {
@@ -520,30 +449,28 @@ void AProceduralPlanetActor::BuildLODForFace(int32 Face, int32 LodLevel, int32 X
 		const int32 NextLOD = LodLevel + 1;
 		const int32 X2 = XIndex * 2;
 		const int32 Y2 = YIndex * 2;
-		BuildLODForFace(Face, NextLOD, X2,     Y2,     CameraPosLS, OutPatches);
-		BuildLODForFace(Face, NextLOD, X2 + 1, Y2,     CameraPosLS, OutPatches);
-		BuildLODForFace(Face, NextLOD, X2,     Y2 + 1, CameraPosLS, OutPatches);
+		BuildLODForFace(Face, NextLOD, X2, Y2, CameraPosLS, OutPatches);
+		BuildLODForFace(Face, NextLOD, X2 + 1, Y2, CameraPosLS, OutPatches);
+		BuildLODForFace(Face, NextLOD, X2, Y2 + 1, CameraPosLS, OutPatches);
 		BuildLODForFace(Face, NextLOD, X2 + 1, Y2 + 1, CameraPosLS, OutPatches);
 		return;
 	}
 
 	FPlanetPatch Patch;
 	Patch.Face = Face;
-	Patch.Lod  = LodLevel;
+	Patch.Lod = LodLevel;
 	Patch.XIndex = XIndex;
 	Patch.YIndex = YIndex;
 	Patch.Size = Size;
-	Patch.U0   = U0;
-	Patch.V0   = V0;
+	Patch.U0 = U0;
+	Patch.V0 = V0;
 	OutPatches.Add(Patch);
 }
 
 void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 SectionIndex)
 {
 	if (!Mesh || PatchResolution < 2)
-	{
 		return;
-	}
 
 	const int32 VertsPerEdge = PatchResolution + 1;
 	TArray<FVector> Vertices;
@@ -571,19 +498,20 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 			const float U = Patch.U0 + Patch.Size * (static_cast<float>(X) / PatchResolution);
 			const float UFace = U * 2.f - 1.f;
 
-			const FVector Cube      = FacePoint(Patch.Face, UFace, VFace);
+			const FVector Cube = FacePoint(Patch.Face, UFace, VFace);
 			const FVector SphereDir = CubeToSphere(Cube);
 			float MountainMask = 0.f;
-			const float HeightKm    = SampleHeightKm(SphereDir, RadiusKmLocal, MountainMask);
-			const FVector Pos       = SphereDir * (RadiusCm + HeightKm * 100000.f);
+			const float HeightKm = SampleHeightKm(SphereDir, RadiusKmLocal, MountainMask);
+			const FVector Pos = SphereDir * (RadiusCm + HeightKm * 100000.f);
 
 			Vertices.Add(Pos);
-			Normals.Add(SphereDir); // placeholder, will recompute with height
+			Normals.Add(SphereDir);
 			UVs.Add(FVector2D(static_cast<float>(X) / PatchResolution, static_cast<float>(Y) / PatchResolution));
+
 			if (bDebugMountainMask)
 			{
 				const float M = FMath::Clamp(MountainMask, 0.f, 1.f);
-				Colors.Add(FLinearColor(M, 0.f, 1.f - M, 1.f)); // red=mountain, blue=flat
+				Colors.Add(FLinearColor(M, 0.f, 1.f - M, 1.f));
 			}
 			else
 			{
@@ -592,7 +520,7 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 		}
 	}
 
-	// Recompute normals using neighboring vertices (finite differences)
+	// Recompute normals
 	for (int32 Y = 0; Y < VertsPerEdge; ++Y)
 	{
 		for (int32 X = 0; X < VertsPerEdge; ++X)
@@ -628,78 +556,49 @@ void AProceduralPlanetActor::BuildPatchSection(const FPlanetPatch& Patch, int32 
 			const bool bFlip = (Patch.Face == 1 || Patch.Face == 2 || Patch.Face == 5);
 			if (bFlip)
 			{
-				Triangles.Add(I0);
-				Triangles.Add(I1);
-				Triangles.Add(I2);
-
-				Triangles.Add(I1);
-				Triangles.Add(I3);
-				Triangles.Add(I2);
+				Triangles.Add(I0); Triangles.Add(I1); Triangles.Add(I2);
+				Triangles.Add(I1); Triangles.Add(I3); Triangles.Add(I2);
 			}
 			else
 			{
-				Triangles.Add(I0);
-				Triangles.Add(I2);
-				Triangles.Add(I1);
-
-				Triangles.Add(I1);
-				Triangles.Add(I2);
-				Triangles.Add(I3);
+				Triangles.Add(I0); Triangles.Add(I2); Triangles.Add(I1);
+				Triangles.Add(I1); Triangles.Add(I2); Triangles.Add(I3);
 			}
 		}
 	}
 
-	Mesh->CreateMeshSection_LinearColor(
-		SectionIndex,
-		Vertices,
-		Triangles,
-		Normals,
-		UVs,
-		Colors,
-		TArray<FProcMeshTangent>(),
-		bGenerateCollision);
+	Mesh->CreateMeshSection_LinearColor(SectionIndex, Vertices, Triangles, Normals, UVs, Colors, TArray<FProcMeshTangent>(), bGenerateCollision);
 
 	if (PlanetMaterial)
-	{
 		Mesh->SetMaterial(SectionIndex, PlanetMaterial);
-	}
 }
 
 void AProceduralPlanetActor::BuildPlanetMesh(const FVector& CameraPosWS, bool bForceRebuild)
 {
 	if (!Mesh || PatchResolution < 2)
-	{
 		return;
-	}
 
 	const FVector CameraPosLS = CameraPosWS - GetActorLocation();
-
 	TArray<FPlanetPatch> Patches;
 	Patches.Reserve(256);
 
 	for (int32 Face = 0; Face < 6; ++Face)
-	{
 		BuildLODForFace(Face, 0, 0, 0, CameraPosLS, Patches);
-	}
 
-	// Diff patches to avoid rebuilding everything.
 	TSet<uint64> NewKeys;
 	NewKeys.Reserve(Patches.Num());
 
 	auto MakeKey = [](const FPlanetPatch& Patch) -> uint64
 	{
-		// Face: 3 bits, Lod: 6 bits (0-63), X/Y: up to Lod<=30 -> 30 bits each fits in 64-bit if Lod small.
 		const uint64 Face = static_cast<uint64>(Patch.Face) & 0x7;
-		const uint64 Lod  = static_cast<uint64>(Patch.Lod) & 0x3F;
-		const uint64 X    = static_cast<uint64>(Patch.XIndex) & 0x1FFFFF; // 21 bits
-		const uint64 Y    = static_cast<uint64>(Patch.YIndex) & 0x1FFFFF; // 21 bits
+		const uint64 Lod = static_cast<uint64>(Patch.Lod) & 0x3F;
+		const uint64 X = static_cast<uint64>(Patch.XIndex) & 0x1FFFFF;
+		const uint64 Y = static_cast<uint64>(Patch.YIndex) & 0x1FFFFF;
 		return (Face << 61) | (Lod << 55) | (X << 27) | Y;
 	};
 
 	for (const FPlanetPatch& Patch : Patches)
-	{
 		NewKeys.Add(MakeKey(Patch));
-	}
 
 	if (bForceRebuild)
 	{
@@ -709,7 +608,6 @@ void AProceduralPlanetActor::BuildPlanetMesh(const FVector& CameraPosWS, bool bF
 	}
 	else
 	{
-		// Remove sections that are no longer needed
 		for (auto It = PatchKeyToSection.CreateIterator(); It; ++It)
 		{
 			if (!NewKeys.Contains(It.Key()))
@@ -721,25 +619,18 @@ void AProceduralPlanetActor::BuildPlanetMesh(const FVector& CameraPosWS, bool bF
 		}
 	}
 
-	// Reuse existing sections or create new ones (if force rebuild, map is empty so all will be rebuilt)
 	for (const FPlanetPatch& Patch : Patches)
 	{
 		const uint64 Key = MakeKey(Patch);
 		int32* ExistingSection = PatchKeyToSection.Find(Key);
 		if (ExistingSection && !bForceRebuild)
-		{
-			continue; // keep existing
-		}
+			continue;
 
 		int32 NewSection = INDEX_NONE;
 		if (FreeSectionIndices.Num() > 0)
-		{
 			NewSection = FreeSectionIndices.Pop(EAllowShrinking::No);
-		}
 		else
-		{
 			NewSection = Mesh->GetNumSections();
-		}
 
 		BuildPatchSection(Patch, NewSection);
 		PatchKeyToSection.Add(Key, NewSection);
