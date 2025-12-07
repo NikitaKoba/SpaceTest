@@ -17,12 +17,12 @@ public class SpaceTest : ModuleRules
 			"ReplicationGraph",
 			"IrisCore",
 			"Renderer",
-			"PhysicsCore"
+			"PhysicsCore",
+			"ProceduralMeshComponent"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] {
-			"NetCore",
-			"ProceduralMeshComponent"
+			"NetCore"
 		});
 
 		// Uncomment if you are using Slate UI
