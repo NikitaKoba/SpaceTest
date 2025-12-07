@@ -1,3 +1,4 @@
+// ProceduralPlanetActor.h
 #pragma once
 
 #include "CoreMinimal.h"
@@ -7,10 +8,6 @@
 class UProceduralMeshComponent;
 class USceneComponent;
 
-/**
- * Процедурная генерация кубосферы без LOD.
- * Высота формируется стэком шумов (континенты → хребты → впадины → слоистость → микро).
- */
 UCLASS()
 class SPACETEST_API AProceduralPlanetActor : public AActor
 {
@@ -18,50 +15,60 @@ class SPACETEST_API AProceduralPlanetActor : public AActor
 
 public:
 	AProceduralPlanetActor();
-	
-	/** Базовый радиус планеты в километрах. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet", meta=(ClampMin="10.0", UIMin="10.0"))
-	float PlanetRadiusKm = 3000.f;
 
-	/** Количество сегментов на грань куба (итого (N+1)^2 вершин на грань). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet", meta=(ClampMin="4", ClampMax="512", UIMin="8", UIMax="256"))
-	int32 FaceResolution = 128;
+	virtual void BeginPlay() override;
+	virtual void OnConstruction(const FTransform& Transform) override;
 
-	/** Общий seed шума. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet|Noise")
-	int32 NoiseSeed = 1337;
-
-	/** Амплитуда континентов (км). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet|Noise", meta=(ClampMin="0.0", UIMin="0.0"))
-	float ContinentHeightKm = 2.0f;
-
-	/** Масштаб амплитуд шума (быстрое управление “дикостью” рельефа). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Planet|Noise", meta=(ClampMin="0.1", UIMin="0.1"))
-	float AmplitudeScale = 1.0f;
-
-	/** Перегенерация из редактора. */
-	UFUNCTION(CallInEditor, Category="Planet")
+	UFUNCTION(BlueprintCallable, Category = "Procedural Planet")
 	void RegeneratePlanet();
 
+	// --- Основные параметры планеты ---
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "1.0", ClampMax = "100000.0"))
+	float PlanetRadiusKm = 6371.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "4", ClampMax = "512"))
+	int32 FaceResolution = 128;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float AmplitudeScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
+	int32 NoiseSeed = 12345;
+
+	// --- Параметры континентов ---
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continents", meta = (ClampMin = "0.0", ClampMax = "20.0"))
+	float ContinentHeightKm = 8.0f;
+
+	// --- Параметры гор (НОВОЕ) ---
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.0", ClampMax = "15.0"))
+	float MountainHeightKm = 5.0f;
+
 protected:
-	virtual void OnConstruction(const FTransform& Transform) override;
-	virtual void BeginPlay() override;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	USceneComponent* SceneRoot;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UProceduralMeshComponent* PlanetMesh;
 
 private:
-	// --- Компоненты ---
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	USceneComponent* SceneRoot = nullptr;
-
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	UProceduralMeshComponent* PlanetMesh = nullptr;
-
-	// --- Генерация ---
 	void GeneratePlanet();
 	void BuildFace(int32 FaceIndex, float BaseRadiusCm, int32 SectionIndex);
 
-	float SampleHeightKm(const FVector3f& PositionKm) const;
-	FVector3f DomainWarp(const FVector3f& P, float Freq, float AmpKm, int32 Octaves) const;
+	// --- Noise функции ---
+	
 	float Fbm(const FVector3f& P, int32 Octaves, float Gain, float Lacunarity) const;
 	float RidgedFbm(const FVector3f& P, int32 Octaves, float Gain, float Lacunarity) const;
 	float BillowFbm(const FVector3f& P, int32 Octaves, float Gain, float Lacunarity) const;
+	FVector3f DomainWarp(const FVector3f& P, float Freq, float AmpKm, int32 Octaves) const;
+
+	// --- Генерация рельефа ---
+	
+	float SampleHeightKm(const FVector3f& PositionKm) const;
+	
+	// Новые функции для гор
+	float SampleMountainsMask(const FVector3f& PositionKm, float LandMask) const;
+	float SampleMountainsHeight(const FVector3f& PositionKm, float MountainMask) const;
 };

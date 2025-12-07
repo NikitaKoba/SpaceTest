@@ -183,7 +183,32 @@ float AProceduralPlanetActor::Fbm(const FVector3f& P, const int32 Octaves, const
 	return Sum;
 }
 
-// RidgedFbm полностью удалён — он использовался только для гор.
+float AProceduralPlanetActor::RidgedFbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity) const
+{
+	float Sum = 0.0f;
+	float Amp = 1.0f;
+	float PrevValue = 1.0f;
+	FVector3f Q = P;
+
+	for (int32 I = 0; I < Octaves; ++I)
+	{
+		float N = FMath::PerlinNoise3D(static_cast<FVector>(Q));
+		
+		// Создаём острые пики через инверсию и возведение в степень
+		N = 1.0f - FMath::Abs(N);
+		N = N * N;
+		
+		// Усиление деталей на основе предыдущей октавы (эрозия)
+		N *= PrevValue;
+		PrevValue = N;
+		
+		Sum += N * Amp;
+		Q *= Lacunarity;
+		Amp *= Gain;
+	}
+
+	return Sum;
+}
 
 float AProceduralPlanetActor::BillowFbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity) const
 {
@@ -217,6 +242,98 @@ FVector3f AProceduralPlanetActor::DomainWarp(const FVector3f& P, const float Fre
 	return P + WarpA * AmpKm;
 }
 
+float AProceduralPlanetActor::SampleMountainsMask(const FVector3f& PositionKm, const float LandMask) const
+{
+	// Если нет суши — нет гор
+	if (LandMask < 0.1f)
+		return 0.0f;
+
+	const float SeedMul = static_cast<float>(NoiseSeed);
+	const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
+	const FVector3f P = PositionKm + SeedShift;
+
+	// Частоты для размещения горных областей
+	const float PlacementFreq = 1.0f / 1200.0f;
+	
+	// Где будут горы (большие регионы)
+	const float MountainRegions = Fbm(P * PlacementFreq, 3, 0.55f, 1.8f);
+	
+	// Пороговая функция — горы появляются там, где шум превышает порог
+	const float Threshold = -0.15f;
+	float RegionMask = FMath::SmoothStep(Threshold - 0.1f, Threshold + 0.2f, MountainRegions);
+	
+	// Дополнительная вариация — разбиваем на отдельные хребты
+	const float RidgeVariation = Fbm(P * PlacementFreq * 2.3f, 2, 0.6f, 2.1f);
+	RegionMask *= FMath::SmoothStep(-0.3f, 0.4f, RidgeVariation);
+	
+	// Умножаем на LandMask, чтобы горы были только на суше
+	return FMath::Clamp(RegionMask * LandMask, 0.0f, 1.0f);
+}
+
+float AProceduralPlanetActor::SampleMountainsHeight(const FVector3f& PositionKm, const float MountainMask) const
+{
+	if (MountainMask < 0.01f)
+		return 0.0f;
+
+	const float SeedMul = static_cast<float>(NoiseSeed);
+	const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
+	const FVector3f P = PositionKm + SeedShift;
+
+	// Частоты для гор
+	const float MountainFreq = 1.0f / 180.0f;  // Основной масштаб гор
+	const float DetailFreq   = 1.0f / 45.0f;   // Детали на склонах
+	const float RidgeFreq    = 1.0f / 90.0f;   // Хребты
+
+	// Domain warping для гор — создаёт изогнутые хребты
+	const FVector3f MountainOffsetA(541.7f, 329.4f, 197.8f);
+	const FVector3f MountainOffsetB(883.2f, 617.9f, 421.5f);
+	
+	const FVector3f MountainWarp = FVector3f(
+		Fbm((P + MountainOffsetA) * (1.0f / 350.0f), 2, 0.5f, 2.0f),
+		Fbm((P + MountainOffsetB) * (1.0f / 350.0f), 2, 0.5f, 2.0f),
+		Fbm((P + MountainOffsetA + MountainOffsetB) * (1.0f / 350.0f), 2, 0.5f, 2.0f)
+	);
+	
+	const FVector3f PWarp = P + MountainWarp * 120.0f;
+
+	// --- Основные пики (ridged multifractal) ---
+	// Много октав для детализации на разных масштабах
+	float Peaks = RidgedFbm(PWarp * MountainFreq, 8, 0.5f, 2.2f);
+	
+	// Усиление высоты пиков — делаем их более выраженными
+	Peaks = FMath::Pow(Peaks, 0.85f);
+
+	// --- Хребты (второй слой ridged noise с другой ориентацией) ---
+	const FVector3f RidgeOffset(7721.3f, 4419.7f, 2837.1f);
+	float Ridges = RidgedFbm((PWarp + RidgeOffset) * RidgeFreq, 6, 0.55f, 2.0f);
+	
+	// Комбинируем пики и хребты — max даёт острые пересечения
+	float Mountains = FMath::Max(Peaks * 1.0f, Ridges * 0.65f);
+
+	// --- Склоновые детали (мелкомасштабный fbm) ---
+	const float SlopeDetails = Fbm(P * DetailFreq, 5, 0.6f, 2.1f) * 0.15f;
+	Mountains += SlopeDetails;
+
+	// --- Эрозия (смягчение нижних частей, сохранение пиков) ---
+	// Создаём градиент высоты — низкие части сильнее размываются
+	const float ErosionFactor = FMath::Pow(FMath::Clamp(Mountains, 0.0f, 1.0f), 1.3f);
+	Mountains *= ErosionFactor;
+
+	// --- Вариация высоты гор ---
+	// Добавляем шум для разной высоты разных горных массивов
+	const float HeightVariation = Fbm(P * (1.0f / 800.0f), 3, 0.5f, 2.0f);
+	const float HeightMultiplier = FMath::Clamp(0.6f + HeightVariation * 0.5f, 0.3f, 1.2f);
+	
+	Mountains *= HeightMultiplier;
+
+	// --- Финальный масштаб ---
+	// MountainMask плавно включает/выключает горы
+	// MountainHeightKm — настраиваемая максимальная высота
+	const float FinalHeight = Mountains * MountainMask * MountainHeightKm;
+	
+	return FMath::Clamp(FinalHeight, 0.0f, MountainHeightKm * 1.5f);
+}
+
 float AProceduralPlanetActor::SampleHeightKm(const FVector3f& PositionKm) const
 {
 	const float SeedMul = static_cast<float>(NoiseSeed);
@@ -227,29 +344,36 @@ float AProceduralPlanetActor::SampleHeightKm(const FVector3f& PositionKm) const
 	const float WarpFreq      = 1.0f / 1400.0f;
 	const float ValleyFreq    = 1.0f / 600.0f;
 
-
-	// --- Континенты ---
+	// --- Континенты (БЕЗ ИЗМЕНЕНИЙ) ---
 	const FVector3f PWarp = DomainWarp(P * ContinentFreq, WarpFreq, 0.55f, 2);
 	const float Continents = Fbm(PWarp, 6, 0.45f, 1.9f);
 	const float LandMask   = FMath::SmoothStep(-0.08f, 0.12f, Continents); // 0..1
 
-	// Вместо сырого фрактала делаем гладкую “базу” континентов
-	const float BaseLand = (LandMask - 0.5f) * 2.0f; // примерно -1..1, но без мелкого шума
+	const float BaseLand = (LandMask - 0.5f) * 2.0f;
 
-	// --- Впадины / плато ---
+	// --- Впадины / плато (БЕЗ ИЗМЕНЕНИЙ) ---
 	const float Valleys = 1.0f - FMath::Abs(BillowFbm(P * ValleyFreq, 4, 0.5f, 2.1f));
 
-	// --- Слоистость ---
+	// --- Слоистость (БЕЗ ИЗМЕНЕНИЙ) ---
 	const float Strata = FMath::Sin(P.Z * 0.011f + Fbm(P * 0.018f, 2, 0.6f, 2.0f)) * 0.06f;
 	
-
 	const float ContinentsAmp = FMath::Max(0.0f, ContinentHeightKm);
 
-	const float HeightKm =
-		BaseLand * ContinentsAmp +         // гладкие континенты
-		Valleys * 1.1f * LandMask +        // впадины/плато только на суше
-		Strata;                            // слоистость
+	// Базовая высота континентов
+	float HeightKm =
+		BaseLand * ContinentsAmp +
+		Valleys * 1.1f * LandMask +
+		Strata;
+
+	// --- ГОРЫ (НОВОЕ) — добавляются ПОВЕРХ континентов ---
+	const float MountainMask = SampleMountainsMask(PositionKm, LandMask);
+	const float MountainsHeight = SampleMountainsHeight(PositionKm, MountainMask);
+	
+	// Просто прибавляем горы к существующей высоте
+	HeightKm += MountainsHeight;
 
 	const float MinDepthKm = -0.2f * ContinentsAmp;
-	return FMath::Clamp(HeightKm, MinDepthKm, ContinentsAmp * 4.0f);
+	const float MaxHeightKm = ContinentsAmp * 4.0f + MountainHeightKm;
+	
+	return FMath::Clamp(HeightKm, MinDepthKm, MaxHeightKm);
 }
