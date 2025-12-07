@@ -226,7 +226,6 @@ float AProceduralPlanetActor::SampleHeightKm(const FVector3f& PositionKm) const
 	const float ContinentFreq = 1.0f / 900.0f;
 	const float WarpFreq      = 1.0f / 1400.0f;
 
-
 	// --- Континенты ---
 	const FVector3f PWarp = DomainWarp(P * ContinentFreq, WarpFreq, 0.55f, 2);
 	const float Continents = Fbm(PWarp, 6, 0.45f, 1.9f);
