@@ -7,6 +7,7 @@
 
 class UProceduralMeshComponent;
 class USceneComponent;
+struct FStaticBuffers;
 
 struct FPlanetGenerationConfig
 {
@@ -25,9 +26,11 @@ class SPACETEST_API AProceduralPlanetActor : public AActor
 
 public:
 	AProceduralPlanetActor();
+	virtual ~AProceduralPlanetActor();
 
 	virtual void BeginPlay() override;
 	virtual void OnConstruction(const FTransform& Transform) override;
+	void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent);
 
 	UFUNCTION(BlueprintCallable, Category = "Procedural Planet")
 	void RegeneratePlanet();
@@ -35,7 +38,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "1.0", ClampMax = "100000.0"))
 	float PlanetRadiusKm = 6371.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "4", ClampMax = "512"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "4", ClampMax = "1024"))
 	int32 FaceResolution = 128;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "0.0", ClampMax = "10.0"))
@@ -59,6 +62,9 @@ protected:
 
 private:
 	uint64 ActiveGenerationId = 0;
+	int32 CachedResolution = 0;
+	bool bSectionsCreated = false;
+	TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> CurrentStaticBuffers;
 
 	void GeneratePlanet();
 	void LaunchFaceBuildTask(int32 FaceIndex, float BaseRadiusCm, int32 SectionIndex, FPlanetGenerationConfig Config, uint64 GenerationId);

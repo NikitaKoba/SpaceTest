@@ -5,6 +5,20 @@
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/CollisionProfile.h"
+#include "UObject/UnrealType.h" // FPropertyChangedEvent, EPropertyChangeType, GET_MEMBER_NAME_CHECKED
+
+struct FStaticFaceData
+{
+	TArray<int32> Indices;
+	TArray<FVector2D> UVs;
+	TArray<FProcMeshTangent> Tangents;
+};
+
+struct FStaticBuffers
+{
+	int32 Resolution = 0;
+	TArray<FStaticFaceData> Faces; // 6 faces
+};
 
 namespace
 {
@@ -31,10 +45,10 @@ namespace
 	{
 		int32 SectionIndex = 0;
 		TArray<FVector> Vertices;
-		TArray<int32> Indices;
-		TArray<FVector2D> UVs;
 		TArray<FVector> Normals;
-		TArray<FProcMeshTangent> Tangents;
+		const TArray<int32>* Indices = nullptr;
+		const TArray<FVector2D>* UVs = nullptr;
+		const TArray<FProcMeshTangent>* Tangents = nullptr;
 	};
 
 	void AccumulateNormals(const TArray<FVector>& Vertices, const TArray<int32>& Indices, TArray<FVector>& OutNormals)
@@ -248,7 +262,45 @@ namespace
 		return FMath::Clamp(HeightKm, MinDepthKm, MaxHeightKm);
 	}
 
-	void BuildFaceMesh(const FPlanetConfig& Config, const int32 FaceIndex, const float BaseRadiusCm, const int32 SectionIndex, FFaceMeshData& OutMesh)
+	void BuildStaticFaceData(const int32 Res, const FFaceBasis& Basis, FStaticFaceData& OutStaticData)
+	{
+		const int32 VertPerSide = Res + 1;
+
+		OutStaticData.UVs.Reset();
+		OutStaticData.Indices.Reset();
+		OutStaticData.Tangents.Reset();
+
+		OutStaticData.UVs.Reserve(VertPerSide * VertPerSide);
+		OutStaticData.Indices.Reserve(Res * Res * 6);
+		OutStaticData.Tangents.Reserve(VertPerSide * VertPerSide);
+
+		for (int32 Y = 0; Y < VertPerSide; ++Y)
+		{
+			const float V = static_cast<float>(Y) / Res;
+			for (int32 X = 0; X < VertPerSide; ++X)
+			{
+				const float U = static_cast<float>(X) / Res;
+				OutStaticData.UVs.Add(FVector2D(U, V));
+				OutStaticData.Tangents.Add(FProcMeshTangent(FVector(Basis.AxisA), false));
+			}
+		}
+
+		for (int32 Y = 0; Y < Res; ++Y)
+		{
+			for (int32 X = 0; X < Res; ++X)
+			{
+				const int32 I0 = (Y) * VertPerSide + (X);
+				const int32 I1 = (Y) * VertPerSide + (X + 1);
+				const int32 I2 = (Y + 1) * VertPerSide + (X);
+				const int32 I3 = (Y + 1) * VertPerSide + (X + 1);
+
+				OutStaticData.Indices.Add(I0); OutStaticData.Indices.Add(I2); OutStaticData.Indices.Add(I1);
+				OutStaticData.Indices.Add(I1); OutStaticData.Indices.Add(I2); OutStaticData.Indices.Add(I3);
+			}
+		}
+	}
+
+	void BuildFaceMesh(const FPlanetConfig& Config, const FStaticFaceData& StaticData, const int32 FaceIndex, const float BaseRadiusCm, const int32 SectionIndex, FFaceMeshData& OutMesh)
 	{
 		const FFaceBasis Basis = CubeFaces[FaceIndex];
 		const int32 Res = FMath::Clamp(Config.FaceResolution, 4, 512);
@@ -256,9 +308,9 @@ namespace
 
 		OutMesh.SectionIndex = SectionIndex;
 		OutMesh.Vertices.Reserve(VertPerSide * VertPerSide);
-		OutMesh.UVs.Reserve(VertPerSide * VertPerSide);
-		OutMesh.Indices.Reserve(Res * Res * 6);
-		OutMesh.Tangents.Reserve(VertPerSide * VertPerSide);
+		OutMesh.Indices = &StaticData.Indices;
+		OutMesh.UVs = &StaticData.UVs;
+		OutMesh.Tangents = &StaticData.Tangents;
 
 		const float BaseRadiusKm = BaseRadiusCm / 100000.f;
 
@@ -280,32 +332,17 @@ namespace
 				const float RadiusCm = BaseRadiusCm + HeightKm * 100000.f;
 
 				OutMesh.Vertices.Add(static_cast<FVector>(SphereDir * RadiusCm));
-				OutMesh.UVs.Add(FVector2D(U, V));
-				OutMesh.Tangents.Add(FProcMeshTangent(FVector(Basis.AxisA), false));
 			}
 		}
 
-		for (int32 Y = 0; Y < Res; ++Y)
-		{
-			for (int32 X = 0; X < Res; ++X)
-			{
-				const int32 I0 = (Y) * VertPerSide + (X);
-				const int32 I1 = (Y) * VertPerSide + (X + 1);
-				const int32 I2 = (Y + 1) * VertPerSide + (X);
-				const int32 I3 = (Y + 1) * VertPerSide + (X + 1);
-
-				OutMesh.Indices.Add(I0); OutMesh.Indices.Add(I2); OutMesh.Indices.Add(I1);
-				OutMesh.Indices.Add(I1); OutMesh.Indices.Add(I2); OutMesh.Indices.Add(I3);
-			}
-		}
-
-		AccumulateNormals(OutMesh.Vertices, OutMesh.Indices, OutMesh.Normals);
+		AccumulateNormals(OutMesh.Vertices, *OutMesh.Indices, OutMesh.Normals);
 	}
 }
 
 AProceduralPlanetActor::AProceduralPlanetActor()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	bRunConstructionScriptOnDrag = false;
 
 	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
 	SetRootComponent(SceneRoot);
@@ -316,17 +353,59 @@ AProceduralPlanetActor::AProceduralPlanetActor()
 	PlanetMesh->bUseAsyncCooking = true;
 }
 
+AProceduralPlanetActor::~AProceduralPlanetActor() = default;
+
 void AProceduralPlanetActor::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// В игре генерируем автоматически
 	GeneratePlanet();
 }
 
 void AProceduralPlanetActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
-	GeneratePlanet();
+
+#if WITH_EDITOR
+	// В редакторе (не в игре) — если меш ещё не создан, генерим один раз,
+	// чтобы в вьюпорте сразу была ЦЕЛАЯ планета.
+	if (GIsEditor && GetWorld() && !GetWorld()->IsGameWorld())
+	{
+		if (PlanetMesh && PlanetMesh->GetNumSections() == 0)
+		{
+			GeneratePlanet();
+		}
+	}
+#endif
 }
+
+#if WITH_EDITOR
+void AProceduralPlanetActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	// Не спамим генерацию, пока юзер тянет слайдер (Interactive).
+	if (PropertyChangedEvent.ChangeType == EPropertyChangeType::Interactive)
+	{
+		return;
+	}
+
+	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
+
+	// Автогенерация только при изменении параметров генерации,
+	// а не, например, при смене материала.
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(AProceduralPlanetActor, PlanetRadiusKm) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(AProceduralPlanetActor, FaceResolution) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(AProceduralPlanetActor, AmplitudeScale) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(AProceduralPlanetActor, ContinentHeightKm) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(AProceduralPlanetActor, MountainHeightKm) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(AProceduralPlanetActor, NoiseSeed))
+	{
+		RegeneratePlanet();
+	}
+}
+#endif // WITH_EDITOR
 
 void AProceduralPlanetActor::RegeneratePlanet()
 {
@@ -335,6 +414,11 @@ void AProceduralPlanetActor::RegeneratePlanet()
 
 void AProceduralPlanetActor::GeneratePlanet()
 {
+	if (!PlanetMesh)
+	{
+		return;
+	}
+
 	FPlanetGenerationConfig Config;
 	Config.PlanetRadiusKm = PlanetRadiusKm;
 	Config.FaceResolution = FMath::Clamp(FaceResolution, 4, 512);
@@ -347,11 +431,38 @@ void AProceduralPlanetActor::GeneratePlanet()
 
 	const uint64 GenerationId = ++ActiveGenerationId;
 
-	if (PlanetMesh)
+	// Build static buffers (indices/UV/tangents) once per resolution and share across tasks.
+	bool bRebuildStatic = !CurrentStaticBuffers.IsValid() ||
+		CachedResolution != Config.FaceResolution ||
+		CurrentStaticBuffers->Resolution != Config.FaceResolution;
+
+	if (bRebuildStatic)
 	{
+		TSharedRef<FStaticBuffers, ESPMode::ThreadSafe> StaticBuffers = MakeShared<FStaticBuffers, ESPMode::ThreadSafe>();
+		StaticBuffers->Resolution = Config.FaceResolution;
+		StaticBuffers->Faces.SetNum(6);
+
+		for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+		{
+			BuildStaticFaceData(Config.FaceResolution, CubeFaces[FaceIdx], StaticBuffers->Faces[FaceIdx]);
+		}
+
+		CurrentStaticBuffers = StaticBuffers;
+		CachedResolution = Config.FaceResolution;
+		bSectionsCreated = false;
+
 		PlanetMesh->ClearAllMeshSections();
 	}
+	else
+	{
+		// Topology unchanged; keep sections to allow UpdateMeshSection.
+		bSectionsCreated = PlanetMesh->GetNumSections() > 0;
+	}
 
+	PlanetMesh->SetCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);
+
+	// Везде (и в редакторе, и в игре) считаем асинхронно,
+	// но в редакторе важно просто дать задачам закончиться.
 	for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
 	{
 		LaunchFaceBuildTask(FaceIdx, BaseRadiusCm, FaceIdx, Config, GenerationId);
@@ -362,10 +473,17 @@ void AProceduralPlanetActor::LaunchFaceBuildTask(const int32 FaceIndex, const fl
 {
 	TWeakObjectPtr<AProceduralPlanetActor> WeakThis(this);
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, Config, BaseRadiusCm, FaceIndex, SectionIndex, GenerationId]()
+	TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> StaticBuffers = CurrentStaticBuffers;
+
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Config, BaseRadiusCm, FaceIndex, SectionIndex, GenerationId, StaticBuffers]()
 	{
+		if (!StaticBuffers.IsValid() || StaticBuffers->Faces.Num() <= FaceIndex)
+		{
+			return;
+		}
+
 		FFaceMeshData MeshData;
-		BuildFaceMesh(Config, FaceIndex, BaseRadiusCm, SectionIndex, MeshData);
+		BuildFaceMesh(Config, StaticBuffers->Faces[FaceIndex], FaceIndex, BaseRadiusCm, SectionIndex, MeshData);
 
 		AsyncTask(ENamedThreads::GameThread, [WeakThis, GenerationId, MeshData = MoveTemp(MeshData)]() mutable
 		{
@@ -379,18 +497,50 @@ void AProceduralPlanetActor::LaunchFaceBuildTask(const int32 FaceIndex, const fl
 				return;
 			}
 
-			if (WeakThis->PlanetMesh)
+			if (!WeakThis->PlanetMesh || !MeshData.Indices || !MeshData.UVs || !MeshData.Tangents)
 			{
+				return;
+			}
+
+			const bool bHasSection = WeakThis->PlanetMesh->GetNumSections() > MeshData.SectionIndex;
+			int32 PrevVertCount = 0;
+
+			if (bHasSection)
+			{
+				if (const FProcMeshSection* Section = WeakThis->PlanetMesh->GetProcMeshSection(MeshData.SectionIndex))
+				{
+					PrevVertCount = Section->ProcVertexBuffer.Num();
+				}
+			}
+
+			const bool bSameVertexCount = bHasSection && PrevVertCount == MeshData.Vertices.Num();
+			const bool bNeedCreate = !bSameVertexCount;
+
+			if (bNeedCreate)
+			{
+				WeakThis->PlanetMesh->ClearMeshSection(MeshData.SectionIndex);
 				WeakThis->PlanetMesh->CreateMeshSection_LinearColor(
 					MeshData.SectionIndex,
 					MeshData.Vertices,
-					MeshData.Indices,
+					*MeshData.Indices,
 					MeshData.Normals,
-					MeshData.UVs,
+					*MeshData.UVs,
 					TArray<FLinearColor>(),
-					MeshData.Tangents,
+					*MeshData.Tangents,
 					true);
 			}
+			else
+			{
+				WeakThis->PlanetMesh->UpdateMeshSection_LinearColor(
+					MeshData.SectionIndex,
+					MeshData.Vertices,
+					MeshData.Normals,
+					*MeshData.UVs,
+					TArray<FLinearColor>(),
+					*MeshData.Tangents);
+			}
+
+			WeakThis->bSectionsCreated = true;
 		});
 	});
 }
