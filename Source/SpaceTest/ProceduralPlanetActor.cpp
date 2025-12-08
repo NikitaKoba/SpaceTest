@@ -1,11 +1,15 @@
 #include "ProceduralPlanetActor.h"
 
+#include "Async/Async.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/SceneComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/CollisionProfile.h"
 
 namespace
 {
+	using FPlanetConfig = FPlanetGenerationConfig;
+
 	struct FFaceBasis
 	{
 		FVector3f Normal;
@@ -13,9 +17,7 @@ namespace
 		FVector3f AxisB;
 	};
 
-	// Ортонормированные базисы для граней куба (X+/X-, Y+/Y-, Z+/Z-).
-	// AxisA x AxisB должно давать Normal (праворукая система) — иначе триангуляция будет перевёрнута.
-	// Не constexpr: FVector3f конструкторы не constexpr в UE.
+	// Cube faces (+/-X, +/-Y, +/-Z).
 	const FFaceBasis CubeFaces[6] = {
 		{ FVector3f( 1,  0,  0), FVector3f(0,  1,  0), FVector3f(0,  0,  1) }, // +X
 		{ FVector3f(-1,  0,  0), FVector3f(0,  1,  0), FVector3f(0,  0, -1) }, // -X
@@ -25,7 +27,16 @@ namespace
 		{ FVector3f( 0,  0, -1), FVector3f(1,  0,  0), FVector3f(0, -1,  0) }  // -Z
 	};
 
-	// Утилита для накопления нормалей по треугольникам.
+	struct FFaceMeshData
+	{
+		int32 SectionIndex = 0;
+		TArray<FVector> Vertices;
+		TArray<int32> Indices;
+		TArray<FVector2D> UVs;
+		TArray<FVector> Normals;
+		TArray<FProcMeshTangent> Tangents;
+	};
+
 	void AccumulateNormals(const TArray<FVector>& Vertices, const TArray<int32>& Indices, TArray<FVector>& OutNormals)
 	{
 		OutNormals.SetNumZeroed(Vertices.Num());
@@ -51,6 +62,244 @@ namespace
 		{
 			N.Normalize();
 		}
+	}
+
+	float Fbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity)
+	{
+		float Sum = 0.0f;
+		float Amp = 1.0f;
+		FVector3f Q = P;
+
+		for (int32 I = 0; I < Octaves; ++I)
+		{
+			Sum += Amp * FMath::PerlinNoise3D(static_cast<FVector>(Q));
+			Q *= Lacunarity;
+			Amp *= Gain;
+		}
+
+		return Sum;
+	}
+
+	float RidgedFbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity)
+	{
+		float Sum = 0.0f;
+		float Amp = 1.0f;
+		float PrevValue = 1.0f;
+		FVector3f Q = P;
+
+		for (int32 I = 0; I < Octaves; ++I)
+		{
+			float N = FMath::PerlinNoise3D(static_cast<FVector>(Q));
+
+			// Emphasize peaks.
+			N = 1.0f - FMath::Abs(N);
+			N = N * N;
+
+			// Ridged modulation.
+			N *= PrevValue;
+			PrevValue = N;
+
+			Sum += N * Amp;
+			Q *= Lacunarity;
+			Amp *= Gain;
+		}
+
+		return Sum;
+	}
+
+	float BillowFbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity)
+	{
+		float Sum = 0.0f;
+		float Amp = 1.0f;
+		FVector3f Q = P;
+
+		for (int32 I = 0; I < Octaves; ++I)
+		{
+			const float N = FMath::Abs(FMath::PerlinNoise3D(static_cast<FVector>(Q)));
+			Sum += (N * 2.0f - 1.0f) * Amp;
+			Q *= Lacunarity;
+			Amp *= Gain;
+		}
+
+		return Sum;
+	}
+
+	FVector3f DomainWarp(const FVector3f& P, const float Freq, const float AmpKm, const int32 Octaves)
+	{
+		const FVector3f OffsetA(37.2f, 11.8f, 19.7f);
+		const FVector3f OffsetB(113.5f, 91.1f, 53.9f);
+		const FVector3f OffsetC(227.3f, 167.0f, 131.3f);
+
+		const FVector3f WarpA = FVector3f(
+			Fbm((P + OffsetA) * Freq, Octaves, 0.5f, 2.0f),
+			Fbm((P + OffsetB) * Freq, Octaves, 0.5f, 2.0f),
+			Fbm((P + OffsetC) * Freq, Octaves, 0.5f, 2.0f));
+
+		return P + WarpA * AmpKm;
+	}
+
+	float SampleMountainsMask(const FVector3f& PositionKm, const float LandMask, const FPlanetConfig& Config)
+	{
+		if (LandMask < 0.1f)
+		{
+			return 0.0f;
+		}
+
+		const float SeedMul = static_cast<float>(Config.NoiseSeed);
+		const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
+		const FVector3f P = PositionKm + SeedShift;
+
+		const float PlacementFreq = 1.0f / 1200.0f;
+		const float MountainRegions = Fbm(P * PlacementFreq, 3, 0.55f, 1.8f);
+		const float Threshold = -0.15f;
+		float RegionMask = FMath::SmoothStep(Threshold - 0.1f, Threshold + 0.2f, MountainRegions);
+
+		const float RidgeVariation = Fbm(P * PlacementFreq * 2.3f, 2, 0.6f, 2.1f);
+		RegionMask *= FMath::SmoothStep(-0.3f, 0.4f, RidgeVariation);
+
+		return FMath::Clamp(RegionMask * LandMask, 0.0f, 1.0f);
+	}
+
+	float SampleMountainsHeight(const FVector3f& PositionKm, const float MountainMask, const FPlanetConfig& Config)
+	{
+		if (MountainMask < 0.01f)
+		{
+			return 0.0f;
+		}
+
+		const float SeedMul = static_cast<float>(Config.NoiseSeed);
+		const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
+		const FVector3f P = PositionKm + SeedShift;
+
+		const float MountainFreq = 1.0f / 180.0f;
+		const float DetailFreq = 1.0f / 45.0f;
+		const float RidgeFreq = 1.0f / 90.0f;
+
+		const FVector3f MountainOffsetA(541.7f, 329.4f, 197.8f);
+		const FVector3f MountainOffsetB(883.2f, 617.9f, 421.5f);
+
+		const FVector3f MountainWarp = FVector3f(
+			Fbm((P + MountainOffsetA) * (1.0f / 350.0f), 2, 0.5f, 2.0f),
+			Fbm((P + MountainOffsetB) * (1.0f / 350.0f), 2, 0.5f, 2.0f),
+			Fbm((P + MountainOffsetA + MountainOffsetB) * (1.0f / 350.0f), 2, 0.5f, 2.0f)
+		);
+
+		const FVector3f PWarp = P + MountainWarp * 120.0f;
+
+		float Peaks = RidgedFbm(PWarp * MountainFreq, 8, 0.5f, 2.2f);
+		Peaks = FMath::Pow(Peaks, 0.85f);
+
+		const FVector3f RidgeOffset(7721.3f, 4419.7f, 2837.1f);
+		float Ridges = RidgedFbm((PWarp + RidgeOffset) * RidgeFreq, 6, 0.55f, 2.0f);
+
+		float Mountains = FMath::Max(Peaks * 1.0f, Ridges * 0.65f);
+
+		const float SlopeDetails = Fbm(P * DetailFreq, 5, 0.6f, 2.1f) * 0.15f;
+		Mountains += SlopeDetails;
+
+		const float ErosionFactor = FMath::Pow(FMath::Clamp(Mountains, 0.0f, 1.0f), 1.3f);
+		Mountains *= ErosionFactor;
+
+		const float HeightVariation = Fbm(P * (1.0f / 800.0f), 3, 0.5f, 2.0f);
+		const float HeightMultiplier = FMath::Clamp(0.6f + HeightVariation * 0.5f, 0.3f, 1.2f);
+
+		Mountains *= HeightMultiplier;
+
+		const float FinalHeight = Mountains * MountainMask * Config.MountainHeightKm;
+
+		return FMath::Clamp(FinalHeight, 0.0f, Config.MountainHeightKm * 1.5f);
+	}
+
+	float SampleHeightKm(const FVector3f& PositionKm, const FPlanetConfig& Config)
+	{
+		const float SeedMul = static_cast<float>(Config.NoiseSeed);
+		const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
+		const FVector3f P = PositionKm + SeedShift;
+
+		const float ContinentFreq = 1.0f / 900.0f;
+		const float WarpFreq = 1.0f / 1400.0f;
+		const float ValleyFreq = 1.0f / 600.0f;
+
+		const FVector3f PWarp = DomainWarp(P * ContinentFreq, WarpFreq, 0.55f, 2);
+		const float Continents = Fbm(PWarp, 6, 0.45f, 1.9f);
+		const float LandMask = FMath::SmoothStep(-0.08f, 0.12f, Continents);
+
+		const float BaseLand = (LandMask - 0.5f) * 2.0f;
+
+		const float Valleys = 1.0f - FMath::Abs(BillowFbm(P * ValleyFreq, 4, 0.5f, 2.1f));
+
+		const float Strata = FMath::Sin(P.Z * 0.011f + Fbm(P * 0.018f, 2, 0.6f, 2.0f)) * 0.06f;
+
+		const float ContinentsAmp = FMath::Max(0.0f, Config.ContinentHeightKm);
+
+		float HeightKm =
+			BaseLand * ContinentsAmp +
+			Valleys * 1.1f * LandMask +
+			Strata;
+
+		const float MountainMask = SampleMountainsMask(PositionKm, LandMask, Config);
+		const float MountainsHeight = SampleMountainsHeight(PositionKm, MountainMask, Config);
+
+		HeightKm += MountainsHeight;
+
+		const float MinDepthKm = -0.2f * ContinentsAmp;
+		const float MaxHeightKm = ContinentsAmp * 4.0f + Config.MountainHeightKm;
+
+		return FMath::Clamp(HeightKm, MinDepthKm, MaxHeightKm);
+	}
+
+	void BuildFaceMesh(const FPlanetConfig& Config, const int32 FaceIndex, const float BaseRadiusCm, const int32 SectionIndex, FFaceMeshData& OutMesh)
+	{
+		const FFaceBasis Basis = CubeFaces[FaceIndex];
+		const int32 Res = FMath::Clamp(Config.FaceResolution, 4, 512);
+		const int32 VertPerSide = Res + 1;
+
+		OutMesh.SectionIndex = SectionIndex;
+		OutMesh.Vertices.Reserve(VertPerSide * VertPerSide);
+		OutMesh.UVs.Reserve(VertPerSide * VertPerSide);
+		OutMesh.Indices.Reserve(Res * Res * 6);
+		OutMesh.Tangents.Reserve(VertPerSide * VertPerSide);
+
+		const float BaseRadiusKm = BaseRadiusCm / 100000.f;
+
+		for (int32 Y = 0; Y < VertPerSide; ++Y)
+		{
+			const float V = static_cast<float>(Y) / Res;
+			for (int32 X = 0; X < VertPerSide; ++X)
+			{
+				const float U = static_cast<float>(X) / Res;
+
+				const FVector3f CubeDir =
+					Basis.Normal +
+					(Basis.AxisA * (U * 2.f - 1.f)) +
+					(Basis.AxisB * (V * 2.f - 1.f));
+
+				const FVector3f SphereDir = CubeDir.GetSafeNormal();
+				const FVector3f PositionKm = SphereDir * BaseRadiusKm;
+				const float HeightKm = SampleHeightKm(PositionKm, Config) * Config.AmplitudeScale;
+				const float RadiusCm = BaseRadiusCm + HeightKm * 100000.f;
+
+				OutMesh.Vertices.Add(static_cast<FVector>(SphereDir * RadiusCm));
+				OutMesh.UVs.Add(FVector2D(U, V));
+				OutMesh.Tangents.Add(FProcMeshTangent(FVector(Basis.AxisA), false));
+			}
+		}
+
+		for (int32 Y = 0; Y < Res; ++Y)
+		{
+			for (int32 X = 0; X < Res; ++X)
+			{
+				const int32 I0 = (Y) * VertPerSide + (X);
+				const int32 I1 = (Y) * VertPerSide + (X + 1);
+				const int32 I2 = (Y + 1) * VertPerSide + (X);
+				const int32 I3 = (Y + 1) * VertPerSide + (X + 1);
+
+				OutMesh.Indices.Add(I0); OutMesh.Indices.Add(I2); OutMesh.Indices.Add(I1);
+				OutMesh.Indices.Add(I1); OutMesh.Indices.Add(I2); OutMesh.Indices.Add(I3);
+			}
+		}
+
+		AccumulateNormals(OutMesh.Vertices, OutMesh.Indices, OutMesh.Normals);
 	}
 }
 
@@ -86,294 +335,62 @@ void AProceduralPlanetActor::RegeneratePlanet()
 
 void AProceduralPlanetActor::GeneratePlanet()
 {
-	const float BaseRadiusCm = FMath::Max(1000.f, PlanetRadiusKm * 100000.f); // km → cm
-	const int32 Res = FMath::Clamp(FaceResolution, 4, 512);
+	FPlanetGenerationConfig Config;
+	Config.PlanetRadiusKm = PlanetRadiusKm;
+	Config.FaceResolution = FMath::Clamp(FaceResolution, 4, 512);
+	Config.AmplitudeScale = AmplitudeScale;
+	Config.ContinentHeightKm = ContinentHeightKm;
+	Config.MountainHeightKm = MountainHeightKm;
+	Config.NoiseSeed = NoiseSeed;
 
-	PlanetMesh->ClearAllMeshSections();
+	const float BaseRadiusCm = FMath::Max(1000.f, Config.PlanetRadiusKm * 100000.f);
+
+	const uint64 GenerationId = ++ActiveGenerationId;
+
+	if (PlanetMesh)
+	{
+		PlanetMesh->ClearAllMeshSections();
+	}
 
 	for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
 	{
-		BuildFace(FaceIdx, BaseRadiusCm, FaceIdx);
+		LaunchFaceBuildTask(FaceIdx, BaseRadiusCm, FaceIdx, Config, GenerationId);
 	}
 }
 
-void AProceduralPlanetActor::BuildFace(const int32 FaceIndex, const float BaseRadiusCm, const int32 SectionIndex)
+void AProceduralPlanetActor::LaunchFaceBuildTask(const int32 FaceIndex, const float BaseRadiusCm, const int32 SectionIndex, FPlanetGenerationConfig Config, const uint64 GenerationId)
 {
-	const FFaceBasis Basis = CubeFaces[FaceIndex];
-	const int32 Res = FMath::Clamp(FaceResolution, 4, 512);
-	const int32 VertPerSide = Res + 1;
+	TWeakObjectPtr<AProceduralPlanetActor> WeakThis(this);
 
-	TArray<FVector> Vertices;
-	TArray<int32> Indices;
-	TArray<FVector2D> UVs;
-	TArray<FVector> Normals;
-	TArray<FProcMeshTangent> Tangents;
-
-	Vertices.Reserve(VertPerSide * VertPerSide);
-	UVs.Reserve(VertPerSide * VertPerSide);
-	Indices.Reserve(Res * Res * 6);
-
-	const float BaseRadiusKm = BaseRadiusCm / 100000.f;
-
-	for (int32 Y = 0; Y < VertPerSide; ++Y)
+	Async(EAsyncExecution::ThreadPool, [WeakThis, Config, BaseRadiusCm, FaceIndex, SectionIndex, GenerationId]()
 	{
-		const float V = static_cast<float>(Y) / Res; // 0..1
-		for (int32 X = 0; X < VertPerSide; ++X)
+		FFaceMeshData MeshData;
+		BuildFaceMesh(Config, FaceIndex, BaseRadiusCm, SectionIndex, MeshData);
+
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, GenerationId, MeshData = MoveTemp(MeshData)]() mutable
 		{
-			const float U = static_cast<float>(X) / Res; // 0..1
+			if (!WeakThis.IsValid())
+			{
+				return;
+			}
 
-			// Точка на кубе в диапазоне [-1,1].
-			const FVector3f CubeDir =
-				Basis.Normal +
-				(Basis.AxisA * (U * 2.f - 1.f)) +
-				(Basis.AxisB * (V * 2.f - 1.f));
+			if (GenerationId != WeakThis->ActiveGenerationId)
+			{
+				return;
+			}
 
-			const FVector3f SphereDir = CubeDir.GetSafeNormal();
-			const FVector3f PositionKm = SphereDir * BaseRadiusKm;
-			const float HeightKm = SampleHeightKm(PositionKm) * AmplitudeScale;
-			const float RadiusCm = BaseRadiusCm + HeightKm * 100000.f;
-
-			Vertices.Add(static_cast<FVector>(SphereDir * RadiusCm));
-			UVs.Add(FVector2D(U, V));
-			Tangents.Add(FProcMeshTangent(FVector(Basis.AxisA), false));
-		}
-	}
-
-	for (int32 Y = 0; Y < Res; ++Y)
-	{
-		for (int32 X = 0; X < Res; ++X)
-		{
-			const int32 I0 = (Y    ) * VertPerSide + (X    );
-			const int32 I1 = (Y    ) * VertPerSide + (X + 1);
-			const int32 I2 = (Y + 1) * VertPerSide + (X    );
-			const int32 I3 = (Y + 1) * VertPerSide + (X + 1);
-
-			Indices.Add(I0); Indices.Add(I2); Indices.Add(I1);
-			Indices.Add(I1); Indices.Add(I2); Indices.Add(I3);
-		}
-	}
-
-	AccumulateNormals(Vertices, Indices, Normals);
-
-	PlanetMesh->CreateMeshSection_LinearColor(
-		SectionIndex,
-		Vertices,
-		Indices,
-		Normals,
-		UVs,
-		TArray<FLinearColor>(),
-		Tangents,
-		true);
-}
-
-float AProceduralPlanetActor::Fbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity) const
-{
-	float Sum = 0.0f;
-	float Amp = 1.0f;
-	float Freq = 1.0f;
-	FVector3f Q = P;
-
-	for (int32 I = 0; I < Octaves; ++I)
-	{
-		Sum += Amp * FMath::PerlinNoise3D(static_cast<FVector>(Q));
-		Q *= Lacunarity;
-		Amp *= Gain;
-	}
-
-	return Sum;
-}
-
-float AProceduralPlanetActor::RidgedFbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity) const
-{
-	float Sum = 0.0f;
-	float Amp = 1.0f;
-	float PrevValue = 1.0f;
-	FVector3f Q = P;
-
-	for (int32 I = 0; I < Octaves; ++I)
-	{
-		float N = FMath::PerlinNoise3D(static_cast<FVector>(Q));
-		
-		// Создаём острые пики через инверсию и возведение в степень
-		N = 1.0f - FMath::Abs(N);
-		N = N * N;
-		
-		// Усиление деталей на основе предыдущей октавы (эрозия)
-		N *= PrevValue;
-		PrevValue = N;
-		
-		Sum += N * Amp;
-		Q *= Lacunarity;
-		Amp *= Gain;
-	}
-
-	return Sum;
-}
-
-float AProceduralPlanetActor::BillowFbm(const FVector3f& P, const int32 Octaves, const float Gain, const float Lacunarity) const
-{
-	float Sum = 0.0f;
-	float Amp = 1.0f;
-	float Freq = 1.0f;
-	FVector3f Q = P;
-
-	for (int32 I = 0; I < Octaves; ++I)
-	{
-		const float N = FMath::Abs(FMath::PerlinNoise3D(static_cast<FVector>(Q)));
-		Sum += (N * 2.0f - 1.0f) * Amp;
-		Q *= Lacunarity;
-		Amp *= Gain;
-	}
-
-	return Sum;
-}
-
-FVector3f AProceduralPlanetActor::DomainWarp(const FVector3f& P, const float Freq, const float AmpKm, const int32 Octaves) const
-{
-	const FVector3f OffsetA(37.2f, 11.8f, 19.7f);
-	const FVector3f OffsetB(113.5f, 91.1f, 53.9f);
-	const FVector3f OffsetC(227.3f, 167.0f, 131.3f);
-
-	const FVector3f WarpA = FVector3f(
-		Fbm((P + OffsetA) * Freq, Octaves, 0.5f, 2.0f),
-		Fbm((P + OffsetB) * Freq, Octaves, 0.5f, 2.0f),
-		Fbm((P + OffsetC) * Freq, Octaves, 0.5f, 2.0f));
-
-	return P + WarpA * AmpKm;
-}
-
-float AProceduralPlanetActor::SampleMountainsMask(const FVector3f& PositionKm, const float LandMask) const
-{
-	// Если нет суши — нет гор
-	if (LandMask < 0.1f)
-		return 0.0f;
-
-	const float SeedMul = static_cast<float>(NoiseSeed);
-	const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
-	const FVector3f P = PositionKm + SeedShift;
-
-	// Частоты для размещения горных областей
-	const float PlacementFreq = 1.0f / 1200.0f;
-	
-	// Где будут горы (большие регионы)
-	const float MountainRegions = Fbm(P * PlacementFreq, 3, 0.55f, 1.8f);
-	
-	// Пороговая функция — горы появляются там, где шум превышает порог
-	const float Threshold = -0.15f;
-	float RegionMask = FMath::SmoothStep(Threshold - 0.1f, Threshold + 0.2f, MountainRegions);
-	
-	// Дополнительная вариация — разбиваем на отдельные хребты
-	const float RidgeVariation = Fbm(P * PlacementFreq * 2.3f, 2, 0.6f, 2.1f);
-	RegionMask *= FMath::SmoothStep(-0.3f, 0.4f, RidgeVariation);
-	
-	// Умножаем на LandMask, чтобы горы были только на суше
-	return FMath::Clamp(RegionMask * LandMask, 0.0f, 1.0f);
-}
-
-float AProceduralPlanetActor::SampleMountainsHeight(const FVector3f& PositionKm, const float MountainMask) const
-{
-	if (MountainMask < 0.01f)
-		return 0.0f;
-
-	const float SeedMul = static_cast<float>(NoiseSeed);
-	const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
-	const FVector3f P = PositionKm + SeedShift;
-
-	// Частоты для гор
-	const float MountainFreq = 1.0f / 180.0f;  // Основной масштаб гор
-	const float DetailFreq   = 1.0f / 45.0f;   // Детали на склонах
-	const float RidgeFreq    = 1.0f / 90.0f;   // Хребты
-
-	// Domain warping для гор — создаёт изогнутые хребты
-	const FVector3f MountainOffsetA(541.7f, 329.4f, 197.8f);
-	const FVector3f MountainOffsetB(883.2f, 617.9f, 421.5f);
-	
-	const FVector3f MountainWarp = FVector3f(
-		Fbm((P + MountainOffsetA) * (1.0f / 350.0f), 2, 0.5f, 2.0f),
-		Fbm((P + MountainOffsetB) * (1.0f / 350.0f), 2, 0.5f, 2.0f),
-		Fbm((P + MountainOffsetA + MountainOffsetB) * (1.0f / 350.0f), 2, 0.5f, 2.0f)
-	);
-	
-	const FVector3f PWarp = P + MountainWarp * 120.0f;
-
-	// --- Основные пики (ridged multifractal) ---
-	// Много октав для детализации на разных масштабах
-	float Peaks = RidgedFbm(PWarp * MountainFreq, 8, 0.5f, 2.2f);
-	
-	// Усиление высоты пиков — делаем их более выраженными
-	Peaks = FMath::Pow(Peaks, 0.85f);
-
-	// --- Хребты (второй слой ridged noise с другой ориентацией) ---
-	const FVector3f RidgeOffset(7721.3f, 4419.7f, 2837.1f);
-	float Ridges = RidgedFbm((PWarp + RidgeOffset) * RidgeFreq, 6, 0.55f, 2.0f);
-	
-	// Комбинируем пики и хребты — max даёт острые пересечения
-	float Mountains = FMath::Max(Peaks * 1.0f, Ridges * 0.65f);
-
-	// --- Склоновые детали (мелкомасштабный fbm) ---
-	const float SlopeDetails = Fbm(P * DetailFreq, 5, 0.6f, 2.1f) * 0.15f;
-	Mountains += SlopeDetails;
-
-	// --- Эрозия (смягчение нижних частей, сохранение пиков) ---
-	// Создаём градиент высоты — низкие части сильнее размываются
-	const float ErosionFactor = FMath::Pow(FMath::Clamp(Mountains, 0.0f, 1.0f), 1.3f);
-	Mountains *= ErosionFactor;
-
-	// --- Вариация высоты гор ---
-	// Добавляем шум для разной высоты разных горных массивов
-	const float HeightVariation = Fbm(P * (1.0f / 800.0f), 3, 0.5f, 2.0f);
-	const float HeightMultiplier = FMath::Clamp(0.6f + HeightVariation * 0.5f, 0.3f, 1.2f);
-	
-	Mountains *= HeightMultiplier;
-
-	// --- Финальный масштаб ---
-	// MountainMask плавно включает/выключает горы
-	// MountainHeightKm — настраиваемая максимальная высота
-	const float FinalHeight = Mountains * MountainMask * MountainHeightKm;
-	
-	return FMath::Clamp(FinalHeight, 0.0f, MountainHeightKm * 1.5f);
-}
-
-float AProceduralPlanetActor::SampleHeightKm(const FVector3f& PositionKm) const
-{
-	const float SeedMul = static_cast<float>(NoiseSeed);
-	const FVector3f SeedShift(SeedMul * 0.173f, SeedMul * 0.417f, SeedMul * 0.739f);
-	const FVector3f P = PositionKm + SeedShift;
-
-	const float ContinentFreq = 1.0f / 900.0f;
-	const float WarpFreq      = 1.0f / 1400.0f;
-	const float ValleyFreq    = 1.0f / 600.0f;
-
-	// --- Континенты (БЕЗ ИЗМЕНЕНИЙ) ---
-	const FVector3f PWarp = DomainWarp(P * ContinentFreq, WarpFreq, 0.55f, 2);
-	const float Continents = Fbm(PWarp, 6, 0.45f, 1.9f);
-	const float LandMask   = FMath::SmoothStep(-0.08f, 0.12f, Continents); // 0..1
-
-	const float BaseLand = (LandMask - 0.5f) * 2.0f;
-
-	// --- Впадины / плато (БЕЗ ИЗМЕНЕНИЙ) ---
-	const float Valleys = 1.0f - FMath::Abs(BillowFbm(P * ValleyFreq, 4, 0.5f, 2.1f));
-
-	// --- Слоистость (БЕЗ ИЗМЕНЕНИЙ) ---
-	const float Strata = FMath::Sin(P.Z * 0.011f + Fbm(P * 0.018f, 2, 0.6f, 2.0f)) * 0.06f;
-	
-	const float ContinentsAmp = FMath::Max(0.0f, ContinentHeightKm);
-
-	// Базовая высота континентов
-	float HeightKm =
-		BaseLand * ContinentsAmp +
-		Valleys * 1.1f * LandMask +
-		Strata;
-
-	// --- ГОРЫ (НОВОЕ) — добавляются ПОВЕРХ континентов ---
-	const float MountainMask = SampleMountainsMask(PositionKm, LandMask);
-	const float MountainsHeight = SampleMountainsHeight(PositionKm, MountainMask);
-	
-	// Просто прибавляем горы к существующей высоте
-	HeightKm += MountainsHeight;
-
-	const float MinDepthKm = -0.2f * ContinentsAmp;
-	const float MaxHeightKm = ContinentsAmp * 4.0f + MountainHeightKm;
-	
-	return FMath::Clamp(HeightKm, MinDepthKm, MaxHeightKm);
+			if (WeakThis->PlanetMesh)
+			{
+				WeakThis->PlanetMesh->CreateMeshSection_LinearColor(
+					MeshData.SectionIndex,
+					MeshData.Vertices,
+					MeshData.Indices,
+					MeshData.Normals,
+					MeshData.UVs,
+					TArray<FLinearColor>(),
+					MeshData.Tangents,
+					true);
+			}
+		});
+	});
 }

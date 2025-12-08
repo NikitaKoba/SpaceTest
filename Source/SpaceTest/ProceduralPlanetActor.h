@@ -8,6 +8,16 @@
 class UProceduralMeshComponent;
 class USceneComponent;
 
+struct FPlanetGenerationConfig
+{
+	float PlanetRadiusKm = 6371.0f;
+	int32 FaceResolution = 128;
+	float AmplitudeScale = 1.0f;
+	float ContinentHeightKm = 8.0f;
+	float MountainHeightKm = 5.0f;
+	int32 NoiseSeed = 12345;
+};
+
 UCLASS()
 class SPACETEST_API AProceduralPlanetActor : public AActor
 {
@@ -22,8 +32,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Procedural Planet")
 	void RegeneratePlanet();
 
-	// --- Основные параметры планеты ---
-	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "1.0", ClampMax = "100000.0"))
 	float PlanetRadiusKm = 6371.0f;
 
@@ -36,13 +44,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
 	int32 NoiseSeed = 12345;
 
-	// --- Параметры континентов ---
-	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continents", meta = (ClampMin = "0.0", ClampMax = "20.0"))
 	float ContinentHeightKm = 8.0f;
 
-	// --- Параметры гор (НОВОЕ) ---
-	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.0", ClampMax = "15.0"))
 	float MountainHeightKm = 5.0f;
 
@@ -54,21 +58,8 @@ protected:
 	UProceduralMeshComponent* PlanetMesh;
 
 private:
+	uint64 ActiveGenerationId = 0;
+
 	void GeneratePlanet();
-	void BuildFace(int32 FaceIndex, float BaseRadiusCm, int32 SectionIndex);
-
-	// --- Noise функции ---
-	
-	float Fbm(const FVector3f& P, int32 Octaves, float Gain, float Lacunarity) const;
-	float RidgedFbm(const FVector3f& P, int32 Octaves, float Gain, float Lacunarity) const;
-	float BillowFbm(const FVector3f& P, int32 Octaves, float Gain, float Lacunarity) const;
-	FVector3f DomainWarp(const FVector3f& P, float Freq, float AmpKm, int32 Octaves) const;
-
-	// --- Генерация рельефа ---
-	
-	float SampleHeightKm(const FVector3f& PositionKm) const;
-	
-	// Новые функции для гор
-	float SampleMountainsMask(const FVector3f& PositionKm, float LandMask) const;
-	float SampleMountainsHeight(const FVector3f& PositionKm, float MountainMask) const;
+	void LaunchFaceBuildTask(int32 FaceIndex, float BaseRadiusCm, int32 SectionIndex, FPlanetGenerationConfig Config, uint64 GenerationId);
 };
