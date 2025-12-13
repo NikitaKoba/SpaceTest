@@ -27,7 +27,7 @@ struct FStaticBuffers
 	TArray<FStaticFaceData> Faces;
 };
 
-// ---------------- Cube faces basis (как у тебя) ----------------
+// ---------------- Cube faces basis ----------------
 namespace
 {
 	struct FFaceBasis
@@ -117,6 +117,7 @@ namespace
 			for (int32 X = 0; X < VertPerSide; ++X)
 			{
 				const float U = (float)X / Res;
+
 				const FVector3f CubeDir =
 					Basis.Normal +
 					Basis.AxisA * (U * 2.f - 1.f) +
@@ -131,7 +132,7 @@ namespace
 }
 
 // ============================================================
-// Compute shaders
+// Global compute shaders
 // ============================================================
 
 class FPlanetHeightCS : public FGlobalShader
@@ -252,7 +253,6 @@ void AProceduralPlanetGPUActor::GeneratePlanet_Internal()
 	const float BaseRadiusCm = FMath::Max(1000.f, Config.PlanetRadiusKm * 100000.f);
 	const uint64 GenerationId = ++ActiveGenerationId;
 
-	// ---- static buffers (indices/uv/tangents) ----
 	const bool bRebuildStatic = !CurrentStaticBuffers.IsValid() ||
 		CachedResolution != Config.FaceResolution ||
 		CurrentStaticBuffers->Resolution != Config.FaceResolution;
@@ -274,10 +274,8 @@ void AProceduralPlanetGPUActor::GeneratePlanet_Internal()
 		PlanetMesh->ClearAllMeshSections();
 	}
 
-	// ---- Height cubemap on GPU ----
 	EnsureHeightCubeAndDispatch(Config);
 
-	// ---- Material MID ----
 	if (PlanetMaterial)
 	{
 		PlanetMID = UMaterialInstanceDynamic::Create(PlanetMaterial, this);
@@ -288,7 +286,6 @@ void AProceduralPlanetGPUActor::GeneratePlanet_Internal()
 		}
 	}
 
-	// ---- Build 6 faces (sphere only) ----
 	for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
 	{
 		LaunchFaceBuildTask_NoNoise(FaceIdx, BaseRadiusCm, FaceIdx, Config, GenerationId);
@@ -302,7 +299,7 @@ void AProceduralPlanetGPUActor::EnsureHeightCubeAndDispatch(const FPlanetGenerat
 		HeightCubeRT = NewObject<UTextureRenderTargetCube>(this, NAME_None, RF_Transient);
 		HeightCubeRT->ClearColor = FLinearColor(0, 0, 0, 0);
 		HeightCubeRT->bSupportsUAV = true;
-		HeightCubeRT->bAutoGenerateMips = true;
+		HeightCubeRT->bAutoGenerateMips = true; // выделяем mip chain
 		HeightCubeRT->OverrideFormat = PF_R32_FLOAT;
 		HeightCubeRT->Init((uint32)HeightCubeSize, PF_R32_FLOAT);
 		HeightCubeRT->UpdateResourceImmediate(true);
@@ -312,10 +309,9 @@ void AProceduralPlanetGPUActor::EnsureHeightCubeAndDispatch(const FPlanetGenerat
 	if (!RTRes) return;
 
 	const uint32 FaceSize = (uint32)HeightCubeRT->SizeX;
-	const int32 NumMips = HeightCubeRT->GetNumMips();
 
 	ENQUEUE_RENDER_COMMAND(PlanetHeight_Dispatch)(
-		[RTRes, FaceSize, NumMips, Config](FRHICommandListImmediate& RHICmdList)
+		[RTRes, FaceSize, Config](FRHICommandListImmediate& RHICmdList)
 	{
 		FRDGBuilder GraphBuilder(RHICmdList);
 
@@ -330,7 +326,7 @@ void AProceduralPlanetGPUActor::EnsureHeightCubeAndDispatch(const FPlanetGenerat
 			CreateRenderTarget(RHITexture, TEXT("PlanetHeightCubeRT"))
 		);
 
-		// mip0
+		// -------- mip0 --------
 		{
 			TShaderMapRef<FPlanetHeightCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 			auto* P = GraphBuilder.AllocParameters<FPlanetHeightCS::FParameters>();
@@ -349,11 +345,19 @@ void AProceduralPlanetGPUActor::EnsureHeightCubeAndDispatch(const FPlanetGenerat
 				FMath::DivideAndRoundUp((int32)FaceSize, 8),
 				6
 			);
-			FComputeShaderUtils::Dispatch(GraphBuilder, CS, *P, Groups);
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("PlanetHeightMip0"),
+				CS,
+				P,
+				Groups
+			);
 		}
 
-		// mips
-		for (int32 Mip = 1; Mip < NumMips; ++Mip)
+		// -------- mips --------
+		const int32 MaxMips = 1 + FMath::FloorLog2((int32)FaceSize);
+		for (int32 Mip = 1; Mip < MaxMips; ++Mip)
 		{
 			const uint32 SrcSize = FaceSize >> (Mip - 1);
 			const uint32 DstSize = FaceSize >> (Mip);
@@ -364,6 +368,7 @@ void AProceduralPlanetGPUActor::EnsureHeightCubeAndDispatch(const FPlanetGenerat
 
 			P->SrcSize = SrcSize;
 			P->DstSize = DstSize;
+
 			P->InHeight = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::CreateForMipLevel(HeightTex, Mip - 1));
 			P->OutHeight = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(HeightTex, Mip));
 
@@ -372,7 +377,14 @@ void AProceduralPlanetGPUActor::EnsureHeightCubeAndDispatch(const FPlanetGenerat
 				FMath::DivideAndRoundUp((int32)DstSize, 8),
 				6
 			);
-			FComputeShaderUtils::Dispatch(GraphBuilder, CS, *P, Groups);
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("PlanetHeightMip"),
+				CS,
+				P,
+				Groups
+			);
 		}
 
 		GraphBuilder.Execute();
