@@ -1,0 +1,311 @@
+﻿// /Project/PlanetHeightCS.usf
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+
+RWTexture2DArray<float> OutHeight; // heightKm, array slice=face(0..5)
+
+cbuffer PlanetParams
+{
+    uint  FaceSize;
+    float BaseRadiusKm;
+    float AmplitudeScale;
+    float ContinentHeightKm;
+    float MountainHeightKm;
+    int   NoiseSeed;
+};
+
+// ---------------- Perlin (Improved) ----------------
+// ВАЖНО: если твой CPU FMath::PerlinNoise3D даёт другой рисунок,
+// замени PERM/алгоритм на UE-версию из исходников движка.
+// Часто оно совпадает 1:1 с этим классическим вариантом.
+static const int PERM[256] =
+{
+    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
+    140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
+    247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,
+    57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,
+    74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,
+    60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,
+    65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,
+    200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,
+    52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,
+    207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,
+    119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,
+    129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,
+    218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,
+    81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,
+    184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,
+    222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
+};
+
+int P(int i) { return PERM[i & 255]; }
+float Fade(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+float Grad(int hash, float x, float y, float z)
+{
+    int h = hash & 15;
+    float u = (h < 8) ? x : y;
+    float v = (h < 4) ? y : ((h == 12 || h == 14) ? x : z);
+    return (((h & 1) == 0) ? u : -u) + (((h & 2) == 0) ? v : -v);
+}
+
+float PerlinNoise3D(float3 p)
+{
+    float3 pf = floor(p);
+    int X = (int)pf.x & 255;
+    int Y = (int)pf.y & 255;
+    int Z = (int)pf.z & 255;
+
+    float x = p.x - pf.x;
+    float y = p.y - pf.y;
+    float z = p.z - pf.z;
+
+    float u = Fade(x);
+    float v = Fade(y);
+    float w = Fade(z);
+
+    int A  = P(X) + Y;
+    int AA = P(A) + Z;
+    int AB = P(A + 1) + Z;
+    int B  = P(X + 1) + Y;
+    int BA = P(B) + Z;
+    int BB = P(B + 1) + Z;
+
+    return lerp(
+        lerp(
+            lerp(Grad(P(AA), x, y, z),     Grad(P(BA), x - 1, y, z),     u),
+            lerp(Grad(P(AB), x, y - 1, z), Grad(P(BB), x - 1, y - 1, z), u),
+            v
+        ),
+        lerp(
+            lerp(Grad(P(AA + 1), x, y, z - 1),     Grad(P(BA + 1), x - 1, y, z - 1),     u),
+            lerp(Grad(P(AB + 1), x, y - 1, z - 1), Grad(P(BB + 1), x - 1, y - 1, z - 1), u),
+            v
+        ),
+        w
+    );
+}
+
+float SmoothStep(float a, float b, float x)
+{
+    float t = saturate((x - a) / (b - a));
+    return t * t * (3.0 - 2.0 * t);
+}
+
+float Fbm(float3 P0, int Octaves, float Gain, float Lacunarity)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+    float3 Q = P0;
+    [loop] for (int i = 0; i < Octaves; ++i)
+    {
+        sum += amp * PerlinNoise3D(Q);
+        Q *= Lacunarity;
+        amp *= Gain;
+    }
+    return sum;
+}
+
+float RidgedFbm(float3 P0, int Octaves, float Gain, float Lacunarity)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+    float prev = 1.0;
+    float3 Q = P0;
+    [loop] for (int i = 0; i < Octaves; ++i)
+    {
+        float n = PerlinNoise3D(Q);
+        n = 1.0 - abs(n);
+        n = n * n;
+        n *= prev;
+        prev = n;
+        sum += n * amp;
+        Q *= Lacunarity;
+        amp *= Gain;
+    }
+    return sum;
+}
+
+float BillowFbm(float3 P0, int Octaves, float Gain, float Lacunarity)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+    float3 Q = P0;
+    [loop] for (int i = 0; i < Octaves; ++i)
+    {
+        float n = abs(PerlinNoise3D(Q));
+        sum += (n * 2.0 - 1.0) * amp;
+        Q *= Lacunarity;
+        amp *= Gain;
+    }
+    return sum;
+}
+
+float3 DomainWarp(float3 P, float Freq, float AmpKm, int Octaves)
+{
+    const float3 OffsetA = float3(37.2, 11.8, 19.7);
+    const float3 OffsetB = float3(113.5, 91.1, 53.9);
+    const float3 OffsetC = float3(227.3, 167.0, 131.3);
+
+    float3 WarpA = float3(
+        Fbm((P + OffsetA) * Freq, Octaves, 0.5, 2.0),
+        Fbm((P + OffsetB) * Freq, Octaves, 0.5, 2.0),
+        Fbm((P + OffsetC) * Freq, Octaves, 0.5, 2.0)
+    );
+
+    return P + WarpA * AmpKm;
+}
+
+float SampleMountainsMask(float3 PositionKm, float LandMask)
+{
+    if (LandMask < 0.1) return 0.0;
+
+    float seedMul = (float)NoiseSeed;
+    float3 SeedShift = float3(seedMul * 0.173, seedMul * 0.417, seedMul * 0.739);
+    float3 Pp = PositionKm + SeedShift;
+
+    float PlacementFreq = 1.0 / 1200.0;
+    float MountainRegions = Fbm(Pp * PlacementFreq, 3, 0.55, 1.8);
+
+    float Threshold = -0.15;
+    float RegionMask = SmoothStep(Threshold - 0.1, Threshold + 0.2, MountainRegions);
+
+    float RidgeVariation = Fbm(Pp * PlacementFreq * 2.3, 2, 0.6, 2.1);
+    RegionMask *= SmoothStep(-0.3, 0.4, RidgeVariation);
+
+    return saturate(RegionMask * LandMask);
+}
+
+float SampleMountainsHeight(float3 PositionKm, float MountainMask)
+{
+    if (MountainMask < 0.01) return 0.0;
+
+    float seedMul = (float)NoiseSeed;
+    float3 SeedShift = float3(seedMul * 0.173, seedMul * 0.417, seedMul * 0.739);
+    float3 Pp = PositionKm + SeedShift;
+
+    float MountainFreq = 1.0 / 180.0;
+    float DetailFreq   = 1.0 / 45.0;
+    float RidgeFreq    = 1.0 / 90.0;
+
+    float3 MountainOffsetA = float3(541.7, 329.4, 197.8);
+    float3 MountainOffsetB = float3(883.2, 617.9, 421.5);
+
+    float3 MountainWarp = float3(
+        Fbm((Pp + MountainOffsetA) * (1.0 / 350.0), 2, 0.5, 2.0),
+        Fbm((Pp + MountainOffsetB) * (1.0 / 350.0), 2, 0.5, 2.0),
+        Fbm((Pp + MountainOffsetA + MountainOffsetB) * (1.0 / 350.0), 2, 0.5, 2.0)
+    );
+
+    float3 PWarp = Pp + MountainWarp * 120.0;
+
+    float Peaks = RidgedFbm(PWarp * MountainFreq, 8, 0.5, 2.2);
+    Peaks = pow(Peaks, 0.85);
+
+    float3 RidgeOffset = float3(7721.3, 4419.7, 2837.1);
+    float Ridges = RidgedFbm((PWarp + RidgeOffset) * RidgeFreq, 6, 0.55, 2.0);
+
+    float Mountains = max(Peaks * 1.0, Ridges * 0.65);
+
+    float SlopeDetails = Fbm(Pp * DetailFreq, 5, 0.6, 2.1) * 0.15;
+    Mountains += SlopeDetails;
+
+    float ErosionFactor = pow(saturate(Mountains), 1.3);
+    Mountains *= ErosionFactor;
+
+    float HeightVariation = Fbm(Pp * (1.0 / 800.0), 3, 0.5, 2.0);
+    float HeightMultiplier = clamp(0.6 + HeightVariation * 0.5, 0.3, 1.2);
+
+    Mountains *= HeightMultiplier;
+
+    float FinalHeight = Mountains * MountainMask * MountainHeightKm;
+    return clamp(FinalHeight, 0.0, MountainHeightKm * 1.5);
+}
+
+float SampleHeightKm(float3 PositionKm)
+{
+    float seedMul = (float)NoiseSeed;
+    float3 SeedShift = float3(seedMul * 0.173, seedMul * 0.417, seedMul * 0.739);
+    float3 Pp = PositionKm + SeedShift;
+
+    float ContinentFreq = 1.0 / 900.0;
+    float WarpFreq      = 1.0 / 1400.0;
+    float ValleyFreq    = 1.0 / 600.0;
+
+    float3 PWarp = DomainWarp(Pp * ContinentFreq, WarpFreq, 0.55, 2);
+    float Continents = Fbm(PWarp, 6, 0.45, 1.9);
+    float LandMask = SmoothStep(-0.08, 0.12, Continents);
+
+    float BaseLand = (LandMask - 0.5) * 2.0;
+    float Valleys = 1.0 - abs(BillowFbm(Pp * ValleyFreq, 4, 0.5, 2.1));
+    float Strata = sin(Pp.z * 0.011 + Fbm(Pp * 0.018, 2, 0.6, 2.0)) * 0.06;
+
+    float ContinentsAmp = max(0.0, ContinentHeightKm);
+
+    float HeightKm =
+        BaseLand * ContinentsAmp +
+        Valleys * 1.1 * LandMask +
+        Strata;
+
+    float MountainMask = SampleMountainsMask(PositionKm, LandMask);
+    float MountainsHeight = SampleMountainsHeight(PositionKm, MountainMask);
+    HeightKm += MountainsHeight;
+
+    float MinDepthKm = -0.2 * ContinentsAmp;
+    float MaxHeightKm = ContinentsAmp * 4.0 + MountainHeightKm;
+
+    return clamp(HeightKm, MinDepthKm, MaxHeightKm);
+}
+
+// 0:+X 1:-X 2:+Y 3:-Y 4:+Z 5:-Z  (как в твоём C++)
+static const float3 FaceN[6] =
+{
+    float3( 1, 0, 0),
+    float3(-1, 0, 0),
+    float3( 0, 1, 0),
+    float3( 0,-1, 0),
+    float3( 0, 0, 1),
+    float3( 0, 0,-1)
+};
+static const float3 FaceA[6] =
+{
+    float3(0, 1, 0),
+    float3(0, 1, 0),
+    float3(0, 0,-1),
+    float3(0, 0, 1),
+    float3(1, 0, 0),
+    float3(1, 0, 0)
+};
+static const float3 FaceB[6] =
+{
+    float3(0, 0, 1),
+    float3(0, 0,-1),
+    float3(-1,0, 0),
+    float3(-1,0, 0),
+    float3(0, 1, 0),
+    float3(0,-1, 0)
+};
+
+[numthreads(8,8,1)]
+void MainCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint x = DTid.x;
+    uint y = DTid.y;
+    uint face = DTid.z;
+
+    if (x >= FaceSize || y >= FaceSize || face >= 6) return;
+
+    float u = ((float)x + 0.5) / (float)FaceSize;
+    float v = ((float)y + 0.5) / (float)FaceSize;
+
+    float3 cubeDir =
+        FaceN[face] +
+        FaceA[face] * (u * 2.0 - 1.0) +
+        FaceB[face] * (v * 2.0 - 1.0);
+
+    float3 dir = normalize(cubeDir);
+    float3 posKm = dir * BaseRadiusKm;
+
+    float hKm = SampleHeightKm(posKm) * AmplitudeScale;
+    OutHeight[uint3(x, y, face)] = hKm;
+}

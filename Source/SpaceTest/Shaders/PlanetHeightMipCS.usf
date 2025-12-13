@@ -1,0 +1,32 @@
+﻿// /Project/PlanetHeightMipCS.usf
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+
+Texture2DArray<float> InHeight;
+RWTexture2DArray<float> OutHeight;
+
+cbuffer MipParams
+{
+	uint SrcSize;
+	uint DstSize;
+};
+
+[numthreads(8,8,1)]
+void MainCS(uint3 DTid : SV_DispatchThreadID)
+{
+	uint x = DTid.x;
+	uint y = DTid.y;
+	uint face = DTid.z;
+
+	if (x >= DstSize || y >= DstSize || face >= 6) return;
+
+	uint sx = x * 2;
+	uint sy = y * 2;
+
+	float h00 = InHeight.Load(int4(sx + 0, sy + 0, face, 0));
+	float h10 = InHeight.Load(int4(sx + 1, sy + 0, face, 0));
+	float h01 = InHeight.Load(int4(sx + 0, sy + 1, face, 0));
+	float h11 = InHeight.Load(int4(sx + 1, sy + 1, face, 0));
+
+	OutHeight[uint3(x, y, face)] = 0.25 * (h00 + h10 + h01 + h11);
+}
