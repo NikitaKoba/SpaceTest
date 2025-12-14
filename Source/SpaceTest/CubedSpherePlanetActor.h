@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "CubedSpherePlanetActor.generated.h"
 
+class FastNoiseLite;
 class URealtimeMeshComponent;
 class URealtimeMeshSimple;
 class UMaterialInterface;
@@ -36,6 +37,76 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet")
 	bool bGenerateCollision = false;
 
+	// --- Continents noise ---
+
+	/** Enable displacement for large-scale continents. */
+	UPROPERTY(EditAnywhere, Category="Continents")
+	bool bEnableContinents = true;
+
+	/** Max height added by continent noise (km). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentHeightKm = 6.0f;
+
+	/** Base frequency for continent noise in spherical space. Higher = more, smaller continents. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.001", UIMin="0.001"))
+	float ContinentFrequency = 0.6f;
+
+	/** Octave count for FBM continents. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
+	int32 ContinentOctaves = 4;
+
+	/** Frequency multiplier per octave. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1.0", UIMin="1.0"))
+	float ContinentLacunarity = 2.0f;
+
+	/** Amplitude multiplier per octave. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentGain = 0.45f;
+
+	/** Power curve applied to noise ( >1 sharpens landmasses ). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentExponent = 1.3f;
+
+	/** Seed for continent noise. */
+	UPROPERTY(EditAnywhere, Category="Continents")
+	int32 ContinentSeed = 1337;
+
+	/** Mask threshold: lower = больше суши, выше = меньше суши. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ContinentMaskThreshold = 0.48f;
+
+	/** Доп. контраст границ континентов. 1=линейно, >1 = резче. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentMaskSharpness = 2.0f;
+
+	/** Амплитуда domain-warp (сколько шум изгибает континенты). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentWarpStrength = 0.25f;
+
+	/** Частота domain-warp. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentWarpFrequency = 0.8f;
+
+	/** Сила мелких деталей в высоту (км), умножается на маску суши. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentDetailHeightKm = 1.5f;
+
+	/** Частота мелких деталей. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentDetailFrequency = 3.0f;
+
+	/** Октавы для деталей. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
+	int32 ContinentDetailOctaves = 3;
+
+	/** Gain для деталей. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentDetailGain = 0.5f;
+
+	/** Lacunarity для деталей. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1.0", UIMin="1.0"))
+	float ContinentDetailLacunarity = 2.3f;
+
 	/** Optional material applied per chunk section. */
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
@@ -56,4 +127,10 @@ private:
 	void BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm);
 	static FVector3f CubeToSphere(const FVector3f& P);
 	float GetPlanetRadiusCm() const;
+	float GetContinentHeightCm(const FVector3f& SphereDir) const;
+
+private:
+	FastNoiseLite* ContinentBaseNoise = nullptr;
+	FastNoiseLite* ContinentWarpNoise = nullptr;
+	FastNoiseLite* ContinentDetailNoise = nullptr;
 };

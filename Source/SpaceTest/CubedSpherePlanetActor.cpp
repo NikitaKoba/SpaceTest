@@ -4,6 +4,7 @@
 #include "Materials/MaterialInterface.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
+#include "FastNoiseLite.h"
 
 namespace
 {
@@ -69,6 +70,80 @@ FVector3f ACubedSpherePlanetActor::CubeToSphere(const FVector3f& P)
 	return FVector3f(fx, fy, fz);
 }
 
+float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) const
+{
+	if (!bEnableContinents || !ContinentBaseNoise || ContinentHeightKm <= 0.f)
+	{
+		return 0.f;
+	}
+
+	// Domain-warped base position
+	const FVector3f BasePos = SphereDir * ContinentFrequency;
+
+	FVector3f WarpOffset = FVector3f::ZeroVector;
+	if (ContinentWarpStrength > 0.f && ContinentWarpNoise)
+	{
+		const float WarpFreq = ContinentWarpFrequency;
+		const float wx = ContinentWarpNoise->GetNoise(BasePos.X * WarpFreq, BasePos.Y * WarpFreq, BasePos.Z * WarpFreq);
+		const float wy = ContinentWarpNoise->GetNoise(BasePos.Y * WarpFreq + 13.37f, BasePos.Z * WarpFreq + 13.37f, BasePos.X * WarpFreq + 13.37f);
+		const float wz = ContinentWarpNoise->GetNoise(BasePos.Z * WarpFreq + 27.11f, BasePos.X * WarpFreq + 27.11f, BasePos.Y * WarpFreq + 27.11f);
+		WarpOffset = FVector3f(wx, wy, wz) * ContinentWarpStrength;
+	}
+
+	const FVector3f WarpedPos = BasePos + WarpOffset;
+
+	// FBM for land mask
+	float amplitude = 1.0f;
+	float frequency = 1.0f;
+	float mask = 0.0f;
+
+	for (int32 octave = 0; octave < ContinentOctaves; ++octave)
+	{
+		const FVector3f samplePos = WarpedPos * frequency;
+		mask += amplitude * ContinentBaseNoise->GetNoise(samplePos.X, samplePos.Y, samplePos.Z);
+
+		frequency *= ContinentLacunarity;
+		amplitude *= ContinentGain;
+	}
+
+	mask = FMath::Clamp(mask * 0.5f + 0.5f, 0.0f, 1.0f);
+
+	// Threshold & sharpen to get separated landmasses
+	const float threshold = FMath::Clamp(ContinentMaskThreshold, 0.0f, 1.0f);
+	const float denom = FMath::Max(KINDA_SMALL_NUMBER, 1.0f - threshold);
+	mask = FMath::Clamp((mask - threshold) / denom, 0.0f, 1.0f);
+	mask = FMath::Pow(mask, ContinentMaskSharpness);
+	mask = FMath::Pow(mask, ContinentExponent);
+
+	if (mask <= KINDA_SMALL_NUMBER)
+	{
+		return 0.f;
+	}
+
+	// Detail modulation inside land
+	float detail = 0.0f;
+	if (ContinentDetailHeightKm > 0.f && ContinentDetailNoise)
+	{
+		float dAmp = 1.0f;
+		float dFreq = ContinentDetailFrequency;
+		for (int32 octave = 0; octave < ContinentDetailOctaves; ++octave)
+		{
+			const FVector3f dPos = WarpedPos * dFreq;
+			detail += dAmp * ContinentDetailNoise->GetNoise(dPos.X, dPos.Y, dPos.Z);
+
+			dFreq *= ContinentDetailLacunarity;
+			dAmp *= ContinentDetailGain;
+		}
+
+		detail = FMath::Clamp(detail * 0.5f + 0.5f, 0.0f, 1.0f);
+	}
+
+	const float BaseHeightCm = ContinentHeightKm * 100000.0f;
+	const float DetailHeightCm = ContinentDetailHeightKm * 100000.0f;
+
+	return mask * (BaseHeightCm + detail * DetailHeightCm);
+}
+
 void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm)
 {
 	const int32 VertEdge = FMath::Max(2, VerticesPerChunkEdge);
@@ -93,8 +168,13 @@ void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 Sectio
 			const FVector3f CubePoint = FVector3f(FaceNormal) + FVector3f(FaceRight) * U + FVector3f(FaceUp) * V;
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
 
-			Builder.AddVertex(FVector3f(SphereDir * RadiusCm))
-				.SetNormalAndTangent(SphereDir, FVector3f(TangentDir))
+			const float HeightOffsetCm = GetContinentHeightCm(SphereDir);
+
+			const FVector3f DisplacedPos = SphereDir * (RadiusCm + HeightOffsetCm);
+			const FVector3f DisplacedNormal = FVector3f(DisplacedPos.GetSafeNormal());
+
+			Builder.AddVertex(DisplacedPos)
+				.SetNormalAndTangent(DisplacedNormal, FVector3f(TangentDir))
 				.SetTexCoord(FVector2f((U + HalfExtent) / (HalfExtent * 2.0f), (V + HalfExtent) / (HalfExtent * 2.0f)));
 		}
 	}
@@ -126,6 +206,30 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	{
 		return;
 	}
+
+	// Setup noise instance
+	static FastNoiseLite NoiseInstance;
+	static FastNoiseLite BaseInstance;
+	static FastNoiseLite WarpInstance;
+	static FastNoiseLite DetailInstance;
+
+	ContinentBaseNoise = &BaseInstance;
+	ContinentBaseNoise->SetSeed(ContinentSeed);
+	ContinentBaseNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	ContinentBaseNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	ContinentBaseNoise->SetFrequency(1.0f); // frequency handled manually
+
+	ContinentWarpNoise = &WarpInstance;
+	ContinentWarpNoise->SetSeed(ContinentSeed + 101);
+	ContinentWarpNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	ContinentWarpNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	ContinentWarpNoise->SetFrequency(1.0f);
+
+	ContinentDetailNoise = &DetailInstance;
+	ContinentDetailNoise->SetSeed(ContinentSeed + 202);
+	ContinentDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	ContinentDetailNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	ContinentDetailNoise->SetFrequency(1.0f);
 
 	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
 	{
