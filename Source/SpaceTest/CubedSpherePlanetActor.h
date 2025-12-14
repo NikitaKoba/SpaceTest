@@ -141,11 +141,12 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShoreNoiseFrequency = 1.6f;
-
+	
 	/** Полка/шельф у берега (км, умножается на s*(1-s)). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentShelfHeightKm = 1.0f;
-
+	FastNoiseLite* CoastalVariationNoise = nullptr;
+	FastNoiseLite* CoastalDetailNoise = nullptr;
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShelfFrequency = 1.2f;
 
@@ -166,7 +167,35 @@ public:
 	UMaterialInterface* PlanetMaterial = nullptr;
 
 	virtual void OnConstruction(const FTransform& Transform) override;
+	// --- Coastal variation (береговая вариация) ---
 
+	/** Включить вариацию береговой линии. */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation")
+	bool bEnableCoastalVariation = true;
+
+	/** Частота шума для вариации берега (крупные заливы/полуострова). */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.1", UIMin="0.1"))
+	float CoastalVariationFrequency = 1.2f;
+
+	/** Насколько сильно варьируется ширина берега (0-1). */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float CoastalVariationStrength = 0.6f;
+
+	/** Частота мелких деталей береговой линии (фьорды, мелкие заливы). */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.1", UIMin="0.1"))
+	float CoastalDetailFrequency = 4.0f;
+
+	/** Сила мелких деталей береговой линии. */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float CoastalDetailStrength = 0.3f;
+
+	/** Резкость краёв континентов (0.5=мягко, 2.0=средне, 5.0=резко). */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.1", UIMin="0.1"))
+	float CoastalEdgeSharpness = 1.5f;
+
+	/** Seed для вариации берега. */
+	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation")
+	int32 CoastalVariationSeed = 7777;
 protected:
 	virtual void BeginPlay() override;
 

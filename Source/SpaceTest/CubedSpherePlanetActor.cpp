@@ -125,28 +125,69 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 		mask = FMath::Lerp(mask, mask * coast, FMath::Clamp(ContinentCoastInfluence, 0.0f, 1.0f));
 	}
 
-	// Threshold with smooth shoreline
+	// === НОВОЕ: Вариация береговой линии ===
+	float localShoreWidth = ContinentShoreWidth;
+	float localEdgeSharpness = ContinentMaskSharpness;
+
+	if (bEnableCoastalVariation && CoastalVariationNoise && CoastalDetailNoise)
+	{
+		// Крупная вариация (заливы, полуострова)
+		const float cvFreq = CoastalVariationFrequency;
+		const float coastalVar = CoastalVariationNoise->GetNoise(
+			WarpedPos.X * cvFreq, 
+			WarpedPos.Y * cvFreq, 
+			WarpedPos.Z * cvFreq
+		);
+		const float coastalVarNorm = coastalVar * 0.5f + 0.5f; // [0..1]
+
+		// Мелкие детали (фьорды, мелкие заливы)
+		const float cdFreq = CoastalDetailFrequency;
+		const float coastalDetail = CoastalDetailNoise->GetNoise(
+			WarpedPos.X * cdFreq,
+			WarpedPos.Y * cdFreq,
+			WarpedPos.Z * cdFreq
+		);
+		const float coastalDetailNorm = coastalDetail * 0.5f + 0.5f; // [0..1]
+
+		// Модуляция ширины берега (смешиваем крупную и мелкую вариацию)
+		const float combinedVariation = FMath::Lerp(coastalVarNorm, coastalDetailNorm, 0.3f);
+		const float widthMod = FMath::Lerp(
+			1.0f - CoastalVariationStrength,
+			1.0f + CoastalVariationStrength,
+			combinedVariation
+		);
+		localShoreWidth *= widthMod;
+
+		// Мелкие детали также влияют на резкость краёв
+		const float detailMod = FMath::Lerp(
+			1.0f - CoastalDetailStrength,
+			1.0f + CoastalDetailStrength,
+			coastalDetailNorm
+		);
+		
+		// Применяем локальные "вмятины" к маске через мелкие детали
+		mask *= FMath::Lerp(1.0f, detailMod, 0.5f);
+		
+		// Варьируем резкость края
+		localEdgeSharpness *= FMath::Lerp(0.7f, 1.3f, coastalVarNorm);
+	}
+
+	// Threshold with smooth shoreline (используем локальные параметры)
 	const float threshold = FMath::Clamp(ContinentMaskThreshold, 0.0f, 1.0f);
-	const float shoreWidth = FMath::Clamp(ContinentShoreWidth, 0.0f, 1.0f);
+	const float shoreWidth = FMath::Clamp(localShoreWidth, 0.0f, 1.0f);
 	const bool bHasLowOverride = ContinentLowMaskOverride >= 0.0f;
 	const float tLowRaw = bHasLowOverride ? ContinentLowMaskOverride : threshold - shoreWidth * 0.5f;
-	float tLow = FMath::Clamp(tLowRaw, 0.0f, 1.0f);
-	float tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
-
-	// Local shoreline noise shifts threshold
-	if (ContinentShoreNoiseStrength > 0.f && ContinentShoreNoise)
-	{
-		const float sn = ContinentShoreNoise->GetNoise(WarpedPos.X * ContinentShoreNoiseFrequency, WarpedPos.Y * ContinentShoreNoiseFrequency, WarpedPos.Z * ContinentShoreNoiseFrequency);
-		const float shift = sn * ContinentShoreNoiseStrength;
-		tLow = FMath::Clamp(tLow + shift, 0.0f, 1.0f);
-		tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
-	}
+	const float tLow = FMath::Clamp(tLowRaw, 0.0f, 1.0f);
+	const float tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
 	const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, tHigh - tLow);
 	float s = FMath::Clamp((mask - tLow) * invRange, 0.0f, 1.0f);
+	
+	// Smoothstep с учётом локальной резкости
+	s = FMath::Pow(s, CoastalEdgeSharpness);
 	s = s * s * (3.0f - 2.0f * s); // smoothstep
 	mask = s;
 
-	mask = FMath::Pow(mask, ContinentMaskSharpness);
+	mask = FMath::Pow(mask, localEdgeSharpness);
 	mask = FMath::Pow(mask, ContinentExponent);
 
 	if (mask <= KINDA_SMALL_NUMBER)
@@ -175,27 +216,7 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	const float BaseHeightCm = ContinentHeightKm * 100000.0f;
 	const float DetailHeightCm = ContinentDetailHeightKm * 100000.0f;
 
-	// Continental shelf near coasts
-	float shelf = 0.0f;
-	if (ContinentShelfHeightKm > 0.f && ContinentShelfNoise)
-	{
-		float sAmp = 1.0f;
-		float sFreq = ContinentShelfFrequency;
-		for (int32 octave = 0; octave < ContinentShelfOctaves; ++octave)
-		{
-			const FVector3f sPos = WarpedPos * sFreq;
-			shelf += sAmp * ContinentShelfNoise->GetNoise(sPos.X, sPos.Y, sPos.Z);
-			sFreq *= ContinentShelfLacunarity;
-			sAmp *= ContinentShelfGain;
-		}
-		shelf = FMath::Clamp(shelf * 0.5f + 0.5f, 0.0f, 1.0f);
-		shelf = FMath::Pow(shelf, ContinentShelfPower);
-	}
-
-	const float ShelfHeightCm = ContinentShelfHeightKm * 100000.0f;
-	const float shoreFactor = s * (1.0f - s); // peaks at shoreline
-
-	return mask * (BaseHeightCm + detail * DetailHeightCm) + shoreFactor * ShelfHeightCm * shelf;
+	return mask * (BaseHeightCm + detail * DetailHeightCm);
 }
 
 void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm)
@@ -266,12 +287,14 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	static FastNoiseLite WarpInstance;
 	static FastNoiseLite DetailInstance;
 	static FastNoiseLite CoastInstance;
+	static FastNoiseLite CoastalVarInstance;      // NEW
+	static FastNoiseLite CoastalDetailInstance;    // NEW
 
 	ContinentBaseNoise = &BaseInstance;
 	ContinentBaseNoise->SetSeed(ContinentSeed);
 	ContinentBaseNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
 	ContinentBaseNoise->SetFractalType(FastNoiseLite::FractalType_None);
-	ContinentBaseNoise->SetFrequency(1.0f); // frequency handled manually
+	ContinentBaseNoise->SetFrequency(1.0f);
 
 	ContinentWarpNoise = &WarpInstance;
 	ContinentWarpNoise->SetSeed(ContinentSeed + 101);
@@ -293,19 +316,22 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	ContinentCoastNoise->SetCellularJitter(FMath::Clamp(ContinentCoastJitter, 0.0f, 1.0f));
 	ContinentCoastNoise->SetFrequency(1.0f);
 
-	static FastNoiseLite ShoreInstance;
-	ContinentShoreNoise = &ShoreInstance;
-	ContinentShoreNoise->SetSeed(ContinentSeed + 404);
-	ContinentShoreNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	ContinentShoreNoise->SetFractalType(FastNoiseLite::FractalType_None);
-	ContinentShoreNoise->SetFrequency(1.0f);
+	// NEW: Coastal variation noises
+	CoastalVariationNoise = &CoastalVarInstance;
+	CoastalVariationNoise->SetSeed(CoastalVariationSeed);
+	CoastalVariationNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	CoastalVariationNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+	CoastalVariationNoise->SetFractalOctaves(2);
+	CoastalVariationNoise->SetFrequency(1.0f);
 
-	static FastNoiseLite ShelfInstance;
-	ContinentShelfNoise = &ShelfInstance;
-	ContinentShelfNoise->SetSeed(ContinentSeed + 505);
-	ContinentShelfNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	ContinentShelfNoise->SetFractalType(FastNoiseLite::FractalType_None);
-	ContinentShelfNoise->SetFrequency(1.0f);
+	CoastalDetailNoise = &CoastalDetailInstance;
+	CoastalDetailNoise->SetSeed(CoastalVariationSeed + 111);
+	CoastalDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	CoastalDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+	CoastalDetailNoise->SetFractalOctaves(3);
+	CoastalDetailNoise->SetFrequency(1.0f);
+
+	// ... остальной код без изменений
 
 	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
 	{
@@ -316,6 +342,12 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	if (!Mesh)
 	{
 		return;
+	}
+
+	// Disable RMC ray tracing instances to avoid invalid geometry asserts while we iterate on generation.
+	if (GEngine && RuntimeMesh->GetWorld())
+	{
+		GEngine->Exec(RuntimeMesh->GetWorld(), TEXT("r.RayTracing.Geometry.RealtimeMeshes 0"));
 	}
 
 	if (PlanetMaterial)
