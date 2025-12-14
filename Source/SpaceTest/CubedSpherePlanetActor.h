@@ -135,6 +135,32 @@ public:
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentCoastJitter = 0.35f;
 
+	/** Шум локального сдвига берега (порог маски). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentShoreNoiseStrength = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentShoreNoiseFrequency = 1.6f;
+
+	/** Полка/шельф у берега (км, умножается на s*(1-s)). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentShelfHeightKm = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentShelfFrequency = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
+	int32 ContinentShelfOctaves = 2;
+
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ContinentShelfGain = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1.0", UIMin="1.0"))
+	float ContinentShelfLacunarity = 2.1f;
+
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentShelfPower = 1.2f;
+
 	/** Optional material applied per chunk section. */
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
@@ -162,4 +188,6 @@ private:
 	FastNoiseLite* ContinentWarpNoise = nullptr;
 	FastNoiseLite* ContinentDetailNoise = nullptr;
 	FastNoiseLite* ContinentCoastNoise = nullptr;
+	FastNoiseLite* ContinentShoreNoise = nullptr;
+	FastNoiseLite* ContinentShelfNoise = nullptr;
 };

@@ -130,8 +130,17 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	const float shoreWidth = FMath::Clamp(ContinentShoreWidth, 0.0f, 1.0f);
 	const bool bHasLowOverride = ContinentLowMaskOverride >= 0.0f;
 	const float tLowRaw = bHasLowOverride ? ContinentLowMaskOverride : threshold - shoreWidth * 0.5f;
-	const float tLow = FMath::Clamp(tLowRaw, 0.0f, 1.0f);
-	const float tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
+	float tLow = FMath::Clamp(tLowRaw, 0.0f, 1.0f);
+	float tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
+
+	// Local shoreline noise shifts threshold
+	if (ContinentShoreNoiseStrength > 0.f && ContinentShoreNoise)
+	{
+		const float sn = ContinentShoreNoise->GetNoise(WarpedPos.X * ContinentShoreNoiseFrequency, WarpedPos.Y * ContinentShoreNoiseFrequency, WarpedPos.Z * ContinentShoreNoiseFrequency);
+		const float shift = sn * ContinentShoreNoiseStrength;
+		tLow = FMath::Clamp(tLow + shift, 0.0f, 1.0f);
+		tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
+	}
 	const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, tHigh - tLow);
 	float s = FMath::Clamp((mask - tLow) * invRange, 0.0f, 1.0f);
 	s = s * s * (3.0f - 2.0f * s); // smoothstep
@@ -166,7 +175,27 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	const float BaseHeightCm = ContinentHeightKm * 100000.0f;
 	const float DetailHeightCm = ContinentDetailHeightKm * 100000.0f;
 
-	return mask * (BaseHeightCm + detail * DetailHeightCm);
+	// Continental shelf near coasts
+	float shelf = 0.0f;
+	if (ContinentShelfHeightKm > 0.f && ContinentShelfNoise)
+	{
+		float sAmp = 1.0f;
+		float sFreq = ContinentShelfFrequency;
+		for (int32 octave = 0; octave < ContinentShelfOctaves; ++octave)
+		{
+			const FVector3f sPos = WarpedPos * sFreq;
+			shelf += sAmp * ContinentShelfNoise->GetNoise(sPos.X, sPos.Y, sPos.Z);
+			sFreq *= ContinentShelfLacunarity;
+			sAmp *= ContinentShelfGain;
+		}
+		shelf = FMath::Clamp(shelf * 0.5f + 0.5f, 0.0f, 1.0f);
+		shelf = FMath::Pow(shelf, ContinentShelfPower);
+	}
+
+	const float ShelfHeightCm = ContinentShelfHeightKm * 100000.0f;
+	const float shoreFactor = s * (1.0f - s); // peaks at shoreline
+
+	return mask * (BaseHeightCm + detail * DetailHeightCm) + shoreFactor * ShelfHeightCm * shelf;
 }
 
 void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm)
@@ -263,6 +292,20 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	ContinentCoastNoise->SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
 	ContinentCoastNoise->SetCellularJitter(FMath::Clamp(ContinentCoastJitter, 0.0f, 1.0f));
 	ContinentCoastNoise->SetFrequency(1.0f);
+
+	static FastNoiseLite ShoreInstance;
+	ContinentShoreNoise = &ShoreInstance;
+	ContinentShoreNoise->SetSeed(ContinentSeed + 404);
+	ContinentShoreNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	ContinentShoreNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	ContinentShoreNoise->SetFrequency(1.0f);
+
+	static FastNoiseLite ShelfInstance;
+	ContinentShelfNoise = &ShelfInstance;
+	ContinentShelfNoise->SetSeed(ContinentSeed + 505);
+	ContinentShelfNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	ContinentShelfNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	ContinentShelfNoise->SetFrequency(1.0f);
 
 	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
 	{
