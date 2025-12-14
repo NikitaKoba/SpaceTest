@@ -31,7 +31,7 @@ public:
 
 	/** Vertex grid resolution per chunk edge (number of vertices, not quads). */
 	UPROPERTY(EditAnywhere, Category="Planet", meta=(ClampMin="2", UIMin="2"))
-	int32 VerticesPerChunkEdge = 17;
+	int32 VerticesPerChunkEdge = 33;
 
 	/** Build collision for generated sections. */
 	UPROPERTY(EditAnywhere, Category="Planet")
@@ -83,6 +83,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentShoreWidth = 0.08f;
 
+	/** Нижний порог маски (если <0 — вычисляется от Threshold). */
+	UPROPERTY(EditAnywhere, Category="Continents")
+	float ContinentLowMaskOverride = -1.f;
+
 	/** Амплитуда domain-warp (сколько шум изгибает континенты). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentWarpStrength = 0.25f;
@@ -127,6 +131,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentCoastInfluence = 0.6f;
 
+	/** Jitter для cellular-шума берегов. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ContinentCoastJitter = 0.35f;
+
 	/** Optional material applied per chunk section. */
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
@@ -153,4 +161,5 @@ private:
 	FastNoiseLite* ContinentBaseNoise = nullptr;
 	FastNoiseLite* ContinentWarpNoise = nullptr;
 	FastNoiseLite* ContinentDetailNoise = nullptr;
+	FastNoiseLite* ContinentCoastNoise = nullptr;
 };

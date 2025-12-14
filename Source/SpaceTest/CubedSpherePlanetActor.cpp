@@ -115,11 +115,11 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 
 	mask = FMath::Clamp(mask * 0.5f + 0.5f, 0.0f, 1.0f);
 
-	// Coastline breakup (ridged)
-	if (ContinentCoastInfluence > 0.f && ContinentDetailNoise)
+	// Coastline breakup (ridged cellular)
+	if (ContinentCoastInfluence > 0.f && ContinentCoastNoise)
 	{
 		const float cFreq = ContinentCoastFrequency;
-		const float coastN = ContinentDetailNoise->GetNoise(WarpedPos.X * cFreq, WarpedPos.Y * cFreq, WarpedPos.Z * cFreq);
+		const float coastN = ContinentCoastNoise->GetNoise(WarpedPos.X * cFreq, WarpedPos.Y * cFreq, WarpedPos.Z * cFreq);
 		float coast = 1.0f - FMath::Abs(coastN); // ridged
 		coast = FMath::Pow(FMath::Clamp(coast, 0.0f, 1.0f), ContinentCoastSharpness);
 		mask = FMath::Lerp(mask, mask * coast, FMath::Clamp(ContinentCoastInfluence, 0.0f, 1.0f));
@@ -128,8 +128,10 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	// Threshold with smooth shoreline
 	const float threshold = FMath::Clamp(ContinentMaskThreshold, 0.0f, 1.0f);
 	const float shoreWidth = FMath::Clamp(ContinentShoreWidth, 0.0f, 1.0f);
-	const float tLow = FMath::Clamp(threshold - shoreWidth * 0.5f, 0.0f, 1.0f);
-	const float tHigh = FMath::Clamp(threshold + shoreWidth * 0.5f, 0.0f, 1.0f);
+	const bool bHasLowOverride = ContinentLowMaskOverride >= 0.0f;
+	const float tLowRaw = bHasLowOverride ? ContinentLowMaskOverride : threshold - shoreWidth * 0.5f;
+	const float tLow = FMath::Clamp(tLowRaw, 0.0f, 1.0f);
+	const float tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
 	const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, tHigh - tLow);
 	float s = FMath::Clamp((mask - tLow) * invRange, 0.0f, 1.0f);
 	s = s * s * (3.0f - 2.0f * s); // smoothstep
@@ -230,11 +232,11 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 		return;
 	}
 
-	// Setup noise instance
-	static FastNoiseLite NoiseInstance;
+	// Setup noise instances
 	static FastNoiseLite BaseInstance;
 	static FastNoiseLite WarpInstance;
 	static FastNoiseLite DetailInstance;
+	static FastNoiseLite CoastInstance;
 
 	ContinentBaseNoise = &BaseInstance;
 	ContinentBaseNoise->SetSeed(ContinentSeed);
@@ -253,6 +255,14 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	ContinentDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
 	ContinentDetailNoise->SetFractalType(FastNoiseLite::FractalType_None);
 	ContinentDetailNoise->SetFrequency(1.0f);
+
+	ContinentCoastNoise = &CoastInstance;
+	ContinentCoastNoise->SetSeed(ContinentSeed + 303);
+	ContinentCoastNoise->SetNoiseType(FastNoiseLite::NoiseType_Cellular);
+	ContinentCoastNoise->SetCellularReturnType(FastNoiseLite::CellularReturnType_Distance2Sub);
+	ContinentCoastNoise->SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
+	ContinentCoastNoise->SetCellularJitter(FMath::Clamp(ContinentCoastJitter, 0.0f, 1.0f));
+	ContinentCoastNoise->SetFrequency(1.0f);
 
 	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
 	{
