@@ -18,7 +18,8 @@ public class SpaceTest : ModuleRules
 			"IrisCore",
 			"Renderer",
 			"PhysicsCore",
-			"ProceduralMeshComponent"
+			"ProceduralMeshComponent",
+			"RealtimeMeshComponent"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] {
