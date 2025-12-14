@@ -26,15 +26,15 @@ namespace SpaceGlobal
         const double SYd = FMath::FloorToDouble(G.Y * Inv);
         const double SZd = FMath::FloorToDouble(G.Z * Inv);
 
-        const int32 SX = static_cast<int32>(SXd);
-        const int32 SY = static_cast<int32>(SYd);
-        const int32 SZ = static_cast<int32>(SZd);
+        const int64 SX = static_cast<int64>(SXd);
+        const int64 SY = static_cast<int64>(SYd);
+        const int64 SZ = static_cast<int64>(SZd);
 
         const double BaseX = static_cast<double>(SX) * SectorUU;
         const double BaseY = static_cast<double>(SY) * SectorUU;
         const double BaseZ = static_cast<double>(SZ) * SectorUU;
 
-        Out.Sector = FIntVector(SX, SY, SZ);
+        Out.Sector = FIntVector64(SX, SY, SZ);
         Out.Offset.X = static_cast<float>(G.X - BaseX);
         Out.Offset.Y = static_cast<float>(G.Y - BaseY);
         Out.Offset.Z = static_cast<float>(G.Z - BaseZ);

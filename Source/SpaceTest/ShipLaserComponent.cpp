@@ -395,7 +395,7 @@ void UShipLaserComponent::Multicast_SpawnBolt_Implementation(
 
 	// ДИАГНОСТИКА: Логируем позицию спавна
 	UE_LOG(LogTemp, Verbose,
-		TEXT("[BOLT SPAWN] %s | GlobalPos=Sector(%d,%d,%d) Offset(%s) | WorldLoc=%s | Owner=%s"),
+		TEXT("[BOLT SPAWN] %s | GlobalPos=Sector(%lld,%lld,%lld) Offset(%s) | WorldLoc=%s | Owner=%s"),
 		*GetNameSafe(Bolt),
 		GlobalPos.Sector.X, GlobalPos.Sector.Y, GlobalPos.Sector.Z,
 		*GlobalPos.Offset.ToString(),
@@ -436,7 +436,7 @@ void UShipLaserComponent::Multicast_SpawnBeam_Implementation(
 	Beam->ConfigureBeam(BeamLengthUU, BeamDurationSec);
 
 	UE_LOG(LogTemp, Verbose,
-		TEXT("[BEAM SPAWN] %s | GlobalPos=Sector(%d,%d,%d) Offset(%s) | WorldLoc=%s | Owner=%s | Length=%.1f"),
+		TEXT("[BEAM SPAWN] %s | GlobalPos=Sector(%lld,%lld,%lld) Offset(%s) | WorldLoc=%s | Owner=%s | Length=%.1f"),
 		*GetNameSafe(Beam),
 		GlobalPos.Sector.X, GlobalPos.Sector.Y, GlobalPos.Sector.Z,
 		*GlobalPos.Offset.ToString(),
@@ -592,7 +592,6 @@ bool UShipLaserComponent::ValidateShot(const FVector& Origin, const FVector& Dir
 	PrevValidateDir  = DirNorm;
 	return true;
 }
-
 
 
 
