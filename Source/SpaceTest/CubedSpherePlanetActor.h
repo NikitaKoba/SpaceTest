@@ -79,6 +79,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentMaskSharpness = 2.0f;
 
+	/** Ширина берега для плавного перехода суша-вода (0-1 от маски). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ContinentShoreWidth = 0.08f;
+
 	/** Амплитуда domain-warp (сколько шум изгибает континенты). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentWarpStrength = 0.25f;
@@ -86,6 +90,10 @@ public:
 	/** Частота domain-warp. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentWarpFrequency = 0.8f;
+
+	/** Кол-во итераций warp (каждая уменьшает силу, увеличивает частоту). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
+	int32 ContinentWarpOctaves = 2;
 
 	/** Сила мелких деталей в высоту (км), умножается на маску суши. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
@@ -106,6 +114,18 @@ public:
 	/** Lacunarity для деталей. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1.0", UIMin="1.0"))
 	float ContinentDetailLacunarity = 2.3f;
+
+	/** Частота шума берега/завихрений. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentCoastFrequency = 2.4f;
+
+	/** Резкость шума берега/завихрений. */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
+	float ContinentCoastSharpness = 1.5f;
+
+	/** Насколько береговой шум влияет на маску (0-1). */
+	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ContinentCoastInfluence = 0.6f;
 
 	/** Optional material applied per chunk section. */
 	UPROPERTY(EditAnywhere, Category="Planet")

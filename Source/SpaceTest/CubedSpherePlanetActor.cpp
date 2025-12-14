@@ -79,18 +79,25 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 
 	// Domain-warped base position
 	const FVector3f BasePos = SphereDir * ContinentFrequency;
+	FVector3f WarpedPos = BasePos;
 
-	FVector3f WarpOffset = FVector3f::ZeroVector;
 	if (ContinentWarpStrength > 0.f && ContinentWarpNoise)
 	{
-		const float WarpFreq = ContinentWarpFrequency;
-		const float wx = ContinentWarpNoise->GetNoise(BasePos.X * WarpFreq, BasePos.Y * WarpFreq, BasePos.Z * WarpFreq);
-		const float wy = ContinentWarpNoise->GetNoise(BasePos.Y * WarpFreq + 13.37f, BasePos.Z * WarpFreq + 13.37f, BasePos.X * WarpFreq + 13.37f);
-		const float wz = ContinentWarpNoise->GetNoise(BasePos.Z * WarpFreq + 27.11f, BasePos.X * WarpFreq + 27.11f, BasePos.Y * WarpFreq + 27.11f);
-		WarpOffset = FVector3f(wx, wy, wz) * ContinentWarpStrength;
-	}
+		float warpAmp = ContinentWarpStrength;
+		float warpFreq = ContinentWarpFrequency;
+		const int32 WarpOct = FMath::Max(1, ContinentWarpOctaves);
 
-	const FVector3f WarpedPos = BasePos + WarpOffset;
+		for (int32 i = 0; i < WarpOct; ++i)
+		{
+			const float wx = ContinentWarpNoise->GetNoise(WarpedPos.X * warpFreq, WarpedPos.Y * warpFreq, WarpedPos.Z * warpFreq);
+			const float wy = ContinentWarpNoise->GetNoise(WarpedPos.Y * warpFreq + 13.37f, WarpedPos.Z * warpFreq + 13.37f, WarpedPos.X * warpFreq + 13.37f);
+			const float wz = ContinentWarpNoise->GetNoise(WarpedPos.Z * warpFreq + 27.11f, WarpedPos.X * warpFreq + 27.11f, WarpedPos.Y * warpFreq + 27.11f);
+
+			WarpedPos += FVector3f(wx, wy, wz) * warpAmp;
+			warpAmp *= 0.5f;
+			warpFreq *= 2.0f;
+		}
+	}
 
 	// FBM for land mask
 	float amplitude = 1.0f;
@@ -108,10 +115,26 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 
 	mask = FMath::Clamp(mask * 0.5f + 0.5f, 0.0f, 1.0f);
 
-	// Threshold & sharpen to get separated landmasses
+	// Coastline breakup (ridged)
+	if (ContinentCoastInfluence > 0.f && ContinentDetailNoise)
+	{
+		const float cFreq = ContinentCoastFrequency;
+		const float coastN = ContinentDetailNoise->GetNoise(WarpedPos.X * cFreq, WarpedPos.Y * cFreq, WarpedPos.Z * cFreq);
+		float coast = 1.0f - FMath::Abs(coastN); // ridged
+		coast = FMath::Pow(FMath::Clamp(coast, 0.0f, 1.0f), ContinentCoastSharpness);
+		mask = FMath::Lerp(mask, mask * coast, FMath::Clamp(ContinentCoastInfluence, 0.0f, 1.0f));
+	}
+
+	// Threshold with smooth shoreline
 	const float threshold = FMath::Clamp(ContinentMaskThreshold, 0.0f, 1.0f);
-	const float denom = FMath::Max(KINDA_SMALL_NUMBER, 1.0f - threshold);
-	mask = FMath::Clamp((mask - threshold) / denom, 0.0f, 1.0f);
+	const float shoreWidth = FMath::Clamp(ContinentShoreWidth, 0.0f, 1.0f);
+	const float tLow = FMath::Clamp(threshold - shoreWidth * 0.5f, 0.0f, 1.0f);
+	const float tHigh = FMath::Clamp(threshold + shoreWidth * 0.5f, 0.0f, 1.0f);
+	const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, tHigh - tLow);
+	float s = FMath::Clamp((mask - tLow) * invRange, 0.0f, 1.0f);
+	s = s * s * (3.0f - 2.0f * s); // smoothstep
+	mask = s;
+
 	mask = FMath::Pow(mask, ContinentMaskSharpness);
 	mask = FMath::Pow(mask, ContinentExponent);
 
