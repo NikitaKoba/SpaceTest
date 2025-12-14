@@ -436,13 +436,6 @@ void AProceduralPlanetActor::Tick(float DeltaSeconds)
 		return;
 	}
 
-	const float MoveKm = bHasLastFocus ? FVector::Dist(FocusWorld, LastFocusWorld) / 100000.0f : BIG_NUMBER;
-	if (bHasLastFocus && MoveKm < UpdateThresholdKm)
-	{
-		TimeSinceUpdate = 0.0f;
-		return;
-	}
-
 	LastFocusWorld = FocusWorld;
 	bHasLastFocus = true;
 	TimeSinceUpdate = 0.0f;
@@ -504,6 +497,7 @@ void AProceduralPlanetActor::GeneratePlanet()
 	BuildQueue.Empty();
 	ActiveBuilds = 0;
 	NextSectionIndex = 0;
+	QueueSequence = 0;
 	FreeSections.Empty();
 	bHasLastFocus = false;
 
@@ -602,7 +596,8 @@ void AProceduralPlanetActor::UpdateStreaming(const FVector& FocusWorld)
 
 	TSet<FPlanetChunkId> DesiredChunks;
 	TSet<FPlanetChunkId> Fallback;
-	CollectDesiredChunks(FocusWorld, BaseRadiusCm, Config, DesiredChunks, Fallback);
+	TMap<FPlanetChunkId, float> ChunkDistances;
+	CollectDesiredChunks(FocusWorld, BaseRadiusCm, Config, DesiredChunks, Fallback, ChunkDistances);
 
 #if WITH_EDITOR
 	if (GIsEditor && bShowGlobalLowLODInEditor && GetWorld() && !GetWorld()->IsGameWorld())
@@ -616,20 +611,21 @@ void AProceduralPlanetActor::UpdateStreaming(const FVector& FocusWorld)
 			Id.X = 0;
 			Id.Y = 0;
 			DesiredChunks.Add(Id);
+			ChunkDistances.Add(Id, 0.0f);
 		}
 	}
 #endif
 
 	FallbackChunks = Fallback;
-	TrimAndQueueChunks(DesiredChunks, Fallback);
+	TrimAndQueueChunks(DesiredChunks, Fallback, ChunkDistances);
 	KickBuilds();
 }
 
-void AProceduralPlanetActor::CollectDesiredChunks(const FVector& FocusWorld, const float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback) const
+void AProceduralPlanetActor::CollectDesiredChunks(const FVector& FocusWorld, const float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback, TMap<FPlanetChunkId, float>& OutDistances) const
 {
 	for (uint8 Face = 0; Face < 6; ++Face)
 	{
-		TraverseFace(Face, 0, 0, 0, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback);
+		TraverseFace(Face, 0, 0, 0, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback, OutDistances);
 	}
 }
 
@@ -647,7 +643,7 @@ int32 AProceduralPlanetActor::DesiredDepthForDistance(const float DistanceToSurf
 	return FMath::Clamp(Depth, 0, LODLevels.Num() - 1);
 }
 
-void AProceduralPlanetActor::TraverseFace(const uint8 Face, const uint8 Lod, const uint16 X, const uint16 Y, const FVector& FocusWorld, const float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback) const
+void AProceduralPlanetActor::TraverseFace(const uint8 Face, const uint8 Lod, const uint16 X, const uint16 Y, const FVector& FocusWorld, const float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback, TMap<FPlanetChunkId, float>& OutDistances) const
 {
 	const int32 Div = 1 << Lod;
 	const float U0 = -1.f + 2.f * (static_cast<float>(X) / Div);
@@ -692,15 +688,16 @@ void AProceduralPlanetActor::TraverseFace(const uint8 Face, const uint8 Lod, con
 		ParentId.X = X;
 		ParentId.Y = Y;
 		OutFallback.Add(ParentId);
+		OutDistances.FindOrAdd(ParentId) = DistanceToSurfaceKm;
 
 		const uint8 ChildLod = Lod + 1;
 		const uint16 ChildX = X * 2;
 		const uint16 ChildY = Y * 2;
 
-		TraverseFace(Face, ChildLod, ChildX, ChildY, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback);
-		TraverseFace(Face, ChildLod, ChildX + 1, ChildY, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback);
-		TraverseFace(Face, ChildLod, ChildX, ChildY + 1, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback);
-		TraverseFace(Face, ChildLod, ChildX + 1, ChildY + 1, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback);
+		TraverseFace(Face, ChildLod, ChildX, ChildY, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback, OutDistances);
+		TraverseFace(Face, ChildLod, ChildX + 1, ChildY, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback, OutDistances);
+		TraverseFace(Face, ChildLod, ChildX, ChildY + 1, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback, OutDistances);
+		TraverseFace(Face, ChildLod, ChildX + 1, ChildY + 1, FocusWorld, BaseRadiusCm, Config, OutDesired, OutFallback, OutDistances);
 		return;
 	}
 
@@ -710,16 +707,44 @@ void AProceduralPlanetActor::TraverseFace(const uint8 Face, const uint8 Lod, con
 	Id.X = X;
 	Id.Y = Y;
 	OutDesired.Add(Id);
+	OutDistances.FindOrAdd(Id) = DistanceToSurfaceKm;
 }
 
-void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desired, const TSet<FPlanetChunkId>& Fallback)
+void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desired, const TSet<FPlanetChunkId>& Fallback, const TMap<FPlanetChunkId, float>& ChunkDistances)
 {
+	auto GetPriority = [&ChunkDistances](const FPlanetChunkId& Id)
+	{
+		if (const float* Found = ChunkDistances.Find(Id))
+		{
+			return *Found;
+		}
+
+		return TNumericLimits<float>::Max();
+	};
+
+	const auto SortQueue = [this]()
+	{
+		BuildQueue.Sort([](const FQueuedChunk& A, const FQueuedChunk& B)
+		{
+			if (!FMath::IsNearlyEqual(A.Priority, B.Priority))
+			{
+				return A.Priority < B.Priority;
+			}
+
+			if (A.Id.Lod != B.Id.Lod)
+			{
+				return A.Id.Lod < B.Id.Lod;
+			}
+
+			return A.Sequence < B.Sequence;
+		});
+	};
+
 	for (auto It = ChunkStates.CreateIterator(); It; ++It)
 	{
 		const FPlanetChunkId& Id = It.Key();
 		const bool bStillNeeded = Desired.Contains(Id);
 		const bool bFallback = Fallback.Contains(Id);
-		const int32 TargetRes = GetLODResolution(Id.Lod);
 
 		if (!bStillNeeded && !bFallback)
 		{
@@ -745,10 +770,20 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 
 	}
 
-	BuildQueue.RemoveAll([this](const FPlanetChunkId& Id)
+	BuildQueue.RemoveAll([this](const FQueuedChunk& Entry)
 	{
-		return !ChunkStates.Contains(Id);
+		return !ChunkStates.Contains(Entry.Id);
 	});
+
+	for (FQueuedChunk& Entry : BuildQueue)
+	{
+		Entry.Priority = GetPriority(Entry.Id);
+	}
+
+	SortQueue();
+
+	int32 NewQueuedThisUpdate = 0;
+	const int32 MaxNew = FMath::Clamp(MaxNewChunksPerUpdate, 1, MaxQueuedBuilds);
 
 	for (const FPlanetChunkId& Id : Desired)
 	{
@@ -784,40 +819,80 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 			State->Resolution = TargetRes;
 		}
 
-		if (!State->bPending)
+		if (!State->bPending && NewQueuedThisUpdate < MaxNew)
 		{
-			EnqueueChunkBuild(Id);
+			const float Priority = GetPriority(Id);
+			if (EnqueueChunkBuild(Id, Priority))
+			{
+				++NewQueuedThisUpdate;
+			}
 		}
 	}
+
+	SortQueue();
 }
 
-void AProceduralPlanetActor::EnqueueChunkBuild(const FPlanetChunkId& Id)
+bool AProceduralPlanetActor::EnqueueChunkBuild(const FPlanetChunkId& Id, const float Priority)
 {
-	if (BuildQueue.Num() >= MaxQueuedBuilds)
-	{
-		return;
-	}
-
-	if (BuildQueue.Contains(Id))
-	{
-		return;
-	}
-
 	FChunkState* State = ChunkStates.Find(Id);
 	if (!State)
 	{
-		return;
+		return false;
 	}
 
+	for (FQueuedChunk& Entry : BuildQueue)
+	{
+		if (Entry.Id == Id)
+		{
+			Entry.Priority = FMath::Min(Entry.Priority, Priority);
+			State->bPending = true;
+			return false;
+		}
+	}
+
+	if (BuildQueue.Num() >= MaxQueuedBuilds)
+	{
+		int32 WorstIndex = INDEX_NONE;
+		float WorstPriority = TNumericLimits<float>::Lowest();
+
+		for (int32 Index = 0; Index < BuildQueue.Num(); ++Index)
+		{
+			if (BuildQueue[Index].Priority > WorstPriority)
+			{
+				WorstPriority = BuildQueue[Index].Priority;
+				WorstIndex = Index;
+			}
+		}
+
+		if (WorstIndex == INDEX_NONE || Priority >= WorstPriority)
+		{
+			return false;
+		}
+
+		if (FChunkState* DroppedState = ChunkStates.Find(BuildQueue[WorstIndex].Id))
+		{
+			DroppedState->bPending = false;
+		}
+
+		BuildQueue.RemoveAt(WorstIndex);
+	}
+
+	FQueuedChunk Entry;
+	Entry.Id = Id;
+	Entry.Priority = Priority;
+	Entry.Sequence = QueueSequence++;
+	BuildQueue.Add(Entry);
 	State->bPending = true;
-	BuildQueue.Add(Id);
+	return true;
 }
 
 void AProceduralPlanetActor::KickBuilds()
 {
-	while (ActiveBuilds < MaxConcurrentBuilds && BuildQueue.Num() > 0)
+	const int32 MaxBuilds = FMath::Max(1, MaxConcurrentBuilds);
+
+	while (ActiveBuilds < MaxBuilds && BuildQueue.Num() > 0)
 	{
-		const FPlanetChunkId Id = BuildQueue[0];
+		const FPlanetChunkId Id = BuildQueue[0].Id;
 		BuildQueue.RemoveAt(0);
 
 		FChunkState* State = ChunkStates.Find(Id);
@@ -826,10 +901,10 @@ void AProceduralPlanetActor::KickBuilds()
 			continue;
 		}
 
-	const int32 Res = State->Resolution;
-	const int32 SectionIndex = State->SectionIndex;
-	const uint64 GenerationId = ActiveGenerationId;
-	const TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> StaticBuffers = GetStaticBuffersForRes(Res);
+		const int32 Res = State->Resolution;
+		const int32 SectionIndex = State->SectionIndex;
+		const uint64 GenerationId = ActiveGenerationId;
+		const TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> StaticBuffers = GetStaticBuffersForRes(Res);
 
 		FPlanetGenerationConfig Config;
 		Config.PlanetRadiusKm = PlanetRadiusKm;

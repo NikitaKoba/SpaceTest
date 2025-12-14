@@ -106,7 +106,7 @@ public:
 
 	/** Радиус детальной подгрузки (км) от поверхности: внутри строятся мелкие LOD, снаружи берётся более грубый. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1.0", ClampMax = "200.0"))
-	float StreamingRadiusKm = 12.0f;
+	float StreamingRadiusKm = 7.0f;
 	bool IsRegionCoveredByAttached(const FPlanetChunkId& Region, uint8 MaxLod) const;
 	bool IsFallbackRemovable(const FPlanetChunkId& Parent) const;
 	void TryRemoveFallbackAncestors(const FPlanetChunkId& FromChild);
@@ -116,12 +116,12 @@ public:
 	float UpdateInterval = 0.2f;
 
 	/** Максимальное число асинхронных генераций чанков одновременно. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1", ClampMax = "16"))
-	int32 MaxConcurrentBuilds = 3;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 MaxConcurrentBuilds = 6;
 
 	/** Максимальное число заявок в очереди. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "4", ClampMax = "64"))
-	int32 MaxQueuedBuilds = 64;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "4", ClampMax = "256"))
+	int32 MaxQueuedBuilds = 128;
 
 	/** Включать ли коллизию для сгенерированных секций. По умолчанию выключено для скорости. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
@@ -130,6 +130,9 @@ public:
 	/** Кого считать фокусом (если не задано — первый pawn). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	TWeakObjectPtr<AActor> FocusActorOverride;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1", ClampMax = "256"))
+	int32 MaxNewChunksPerUpdate = 32;
 
 	/** Показывать предпросмотр в редакторе даже без Pawn (используется виртуальная камера перед актёром). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Editor Preview")
@@ -166,14 +169,22 @@ private:
 		bool bAttached = false;
 	};
 
+	struct FQueuedChunk
+	{
+		FPlanetChunkId Id;
+		float Priority = 0.0f;
+		uint64 Sequence = 0;
+	};
+
 	TMap<FPlanetChunkId, FChunkState> ChunkStates;
-	TArray<FPlanetChunkId> BuildQueue;
+	TArray<FQueuedChunk> BuildQueue;
 	TSet<FPlanetChunkId> FallbackChunks;
 	int32 ActiveBuilds = 0;
 	float TimeSinceUpdate = 0.0f;
 	FVector LastFocusWorld = FVector::ZeroVector;
 	bool bHasLastFocus = false;
 	int32 NextSectionIndex = 0;
+	uint64 QueueSequence = 0;
 	TArray<int32> FreeSections;
 	TMap<int32, TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe>> StaticCache;
 
@@ -184,11 +195,11 @@ private:
 	int32 GetLODResolution(uint8 Lod) const;
 	void UpdateStreaming(const FVector& FocusWorld);
 	bool GetFocusLocation(FVector& OutFocusWorld) const;
-	void CollectDesiredChunks(const FVector& FocusWorld, float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback) const;
+	void CollectDesiredChunks(const FVector& FocusWorld, float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback, TMap<FPlanetChunkId, float>& OutDistances) const;
 	int32 DesiredDepthForDistance(float DistanceToSurfaceKm) const;
-	void TraverseFace(uint8 Face, uint8 Lod, uint16 X, uint16 Y, const FVector& FocusWorld, float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback) const;
-	void TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desired, const TSet<FPlanetChunkId>& Fallback);
-	void EnqueueChunkBuild(const FPlanetChunkId& Id);
+	void TraverseFace(uint8 Face, uint8 Lod, uint16 X, uint16 Y, const FVector& FocusWorld, float BaseRadiusCm, const FPlanetGenerationConfig& Config, TSet<FPlanetChunkId>& OutDesired, TSet<FPlanetChunkId>& OutFallback, TMap<FPlanetChunkId, float>& OutDistances) const;
+	void TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desired, const TSet<FPlanetChunkId>& Fallback, const TMap<FPlanetChunkId, float>& ChunkDistances);
+	bool EnqueueChunkBuild(const FPlanetChunkId& Id, float Priority);
 	void KickBuilds();
 	void OnChunkBuilt(const FPlanetChunkId& Id, FFaceMeshData&& MeshData, const TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe>& StaticBuffers, uint64 GenerationId);
 
