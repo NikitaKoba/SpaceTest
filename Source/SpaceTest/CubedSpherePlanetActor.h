@@ -244,7 +244,61 @@ int32 MountainSeed = 5555;
 	FastNoiseLite* MountainVolcanicNoise = nullptr;
 	FastNoiseLite* MountainMaskNoise = nullptr;
 	FastNoiseLite* MountainMaskWarpNoise = nullptr;
+	// В header добавь в секцию Mountains:
 
+// --- Erosion & Detail (эрозия и детали) ---
+
+/** Включить эрозию склонов. */
+UPROPERTY(EditAnywhere, Category="Mountains|Erosion")
+bool bEnableMountainErosion = true;
+
+/** Сила эрозии (террасы на склонах). */
+UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainErosionStrength = 0.4f;
+
+/** Частота эрозионных деталей. */
+UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainErosionFrequency = 8.0f;
+
+/** Октавы для эрозии. */
+UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="1", UIMin="1"))
+int32 MountainErosionOctaves = 3;
+
+/** Скалистые детали на склонах (км). */
+UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainRockyDetailHeightKm = 0.15f;
+
+/** Частота скалистых деталей. */
+UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="1.0", UIMin="1.0"))
+float MountainRockyDetailFrequency = 12.0f;
+
+// --- Foothills (предгорья) ---
+
+/** Включить предгорья. */
+UPROPERTY(EditAnywhere, Category="Mountains|Foothills")
+bool bEnableFoothills = true;
+
+/** Высота предгорий (км). */
+UPROPERTY(EditAnywhere, Category="Mountains|Foothills", meta=(ClampMin="0.0", UIMin="0.0"))
+float FoothillsHeightKm = 0.8f;
+
+/** Частота холмов в предгорьях. */
+UPROPERTY(EditAnywhere, Category="Mountains|Foothills", meta=(ClampMin="0.1", UIMin="0.1"))
+float FoothillsFrequency = 4.0f;
+
+/** Ширина зоны предгорий (0-1 от маски гор). */
+UPROPERTY(EditAnywhere, Category="Mountains|Foothills", meta=(ClampMin="0.0", ClampMax="1.0"))
+float FoothillsWidth = 0.3f;
+
+// --- Height Variation (вариация высот) ---
+
+/** Вариация высоты гор (0=все одинаковые, 1=сильная вариация). */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", ClampMax="1.0"))
+float MountainHeightVariation = 0.6f;
+
+/** Частота вариации высоты. */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainHeightVariationFrequency = 0.5f;
 	float GetMountainHeightCm(const FVector3f& SphereDir, const FVector3f& WarpedPos, float ContinentMask) const;
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
 	int32 ContinentShelfOctaves = 2;
@@ -261,7 +315,10 @@ int32 MountainSeed = 5555;
 	/** Optional material applied per chunk section. */
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
-
+	FastNoiseLite* MountainErosionNoise = nullptr;
+	FastNoiseLite* MountainRockyDetailNoise = nullptr;
+	FastNoiseLite* FoothillsNoise = nullptr;
+	FastNoiseLite* MountainHeightVarNoise = nullptr;
 	virtual void OnConstruction(const FTransform& Transform) override;
 	// --- Coastal variation (береговая вариация) ---
 

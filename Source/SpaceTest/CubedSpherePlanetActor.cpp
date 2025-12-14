@@ -120,16 +120,33 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 	// Threshold + sharpness
 	mountainMask = (mountainMask - MountainMaskThreshold) / FMath::Max(KINDA_SMALL_NUMBER, 1.0f - MountainMaskThreshold);
 	mountainMask = FMath::Clamp(mountainMask, 0.0f, 1.0f);
+	
+	const float rawMountainMask = mountainMask; // Сохраняем для foothills
 	mountainMask = FMath::Pow(mountainMask, MountainMaskSharpness);
 	
-	if (mountainMask <= KINDA_SMALL_NUMBER)
+	if (mountainMask <= KINDA_SMALL_NUMBER && rawMountainMask <= KINDA_SMALL_NUMBER)
 	{
 		return 0.f;
 	}
 
+	// === 2. ВАРИАЦИЯ ВЫСОТЫ ГОР ===
+	
+	float heightMultiplier = 1.0f;
+	if (MountainHeightVariation > 0.f && MountainHeightVarNoise)
+	{
+		const float hvFreq = MountainHeightVariationFrequency;
+		const float hvNoise = MountainHeightVarNoise->GetNoise(
+			WarpedPos.X * hvFreq,
+			WarpedPos.Y * hvFreq,
+			WarpedPos.Z * hvFreq
+		);
+		const float hvNorm = hvNoise * 0.5f + 0.5f; // [0..1]
+		heightMultiplier = FMath::Lerp(1.0f - MountainHeightVariation, 1.0f, hvNorm);
+	}
+
 	float totalHeight = 0.f;
 
-	// === 2. СКЛАДЧАТЫЕ ГОРНЫЕ ХРЕБТЫ (RIDGED) ===
+	// === 3. СКЛАДЧАТЫЕ ГОРНЫЕ ХРЕБТЫ (RIDGED) ===
 	
 	if (MountainRidgedHeightKm > 0.f && MountainRidgedNoise)
 	{
@@ -160,7 +177,7 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 			noise = 1.0f - FMath::Abs(noise);
 			noise = FMath::Pow(noise, MountainRidgedSharpness);
 			
-			// Weighted (следующая октава зависит от текущей)
+			// Weighted
 			noise *= weight;
 			weight = FMath::Clamp(noise, 0.0f, 1.0f);
 			
@@ -172,32 +189,108 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 		
 		ridged = FMath::Clamp(ridged, 0.0f, 1.0f);
 		
-		totalHeight += ridged * MountainRidgedHeightKm * 100000.0f;
+		// === 3.1 ЭРОЗИЯ СКЛОНОВ ===
+		
+		if (bEnableMountainErosion && MountainErosionNoise && MountainErosionStrength > 0.f)
+		{
+			float erosion = 0.f;
+			float eAmp = 1.0f;
+			float eFreq = MountainErosionFrequency;
+			
+			for (int32 eOct = 0; eOct < MountainErosionOctaves; ++eOct)
+			{
+				const FVector3f ePos = ridgedPos * eFreq;
+				erosion += eAmp * MountainErosionNoise->GetNoise(ePos.X, ePos.Y, ePos.Z);
+				eFreq *= 2.0f;
+				eAmp *= 0.5f;
+			}
+			
+			erosion = erosion * 0.5f + 0.5f; // [0..1]
+			
+			// Террасирование (создаёт ступеньки на склонах)
+			const float terraceSteps = 8.0f;
+			float terraced = FMath::Floor(ridged * terraceSteps) / terraceSteps;
+			terraced = FMath::Lerp(ridged, terraced, MountainErosionStrength * 0.3f);
+			
+			// Добавляем эрозионные детали
+			ridged = FMath::Lerp(ridged, terraced * erosion, MountainErosionStrength);
+		}
+		
+		totalHeight += ridged * MountainRidgedHeightKm * 100000.0f * heightMultiplier;
+		
+		// === 3.2 СКАЛИСТЫЕ ДЕТАЛИ ===
+		
+		if (MountainRockyDetailHeightKm > 0.f && MountainRockyDetailNoise)
+		{
+			const float rdFreq = MountainRockyDetailFrequency;
+			const FVector3f rdPos = ridgedPos * rdFreq;
+			const float rockyNoise = MountainRockyDetailNoise->GetNoise(rdPos.X, rdPos.Y, rdPos.Z);
+			const float rocky = FMath::Abs(rockyNoise); // [0..1]
+			
+			// Детали сильнее на крутых склонах (где ridged высокий)
+			const float slopeInfluence = ridged;
+			totalHeight += rocky * MountainRockyDetailHeightKm * 100000.0f * slopeInfluence;
+		}
 	}
 
-	// === 3. ВУЛКАНИЧЕСКИЕ КОНУСЫ ===
+	// === 4. ВУЛКАНИЧЕСКИЕ КОНУСЫ ===
 	
 	if (bEnableVolcanicPeaks && MountainVolcanicHeightKm > 0.f && MountainVolcanicNoise)
 	{
 		const float vFreq = MountainVolcanicFrequency;
 		const FVector3f vPos = WarpedPos * vFreq;
 		
-		// Используем cellular noise для точек вулканов
 		const float cellNoise = MountainVolcanicNoise->GetNoise(vPos.X, vPos.Y, vPos.Z);
-		
-		// Distance от центра ячейки (0 в центре, 1 на краю)
-		// Cellular Distance возвращает [0..1]
 		const float dist = FMath::Clamp(FMath::Abs(cellNoise), 0.0f, 1.0f);
 		
-		// Создаём конус: высота убывает от центра
 		float cone = 1.0f - (dist * MountainVolcanicRadius);
 		cone = FMath::Clamp(cone, 0.0f, 1.0f);
 		cone = FMath::Pow(cone, MountainVolcanicSharpness);
 		
-		totalHeight += cone * MountainVolcanicHeightKm * 100000.0f * 0.5f; // 0.5 чтобы не перебивали ridged
+		totalHeight += cone * MountainVolcanicHeightKm * 100000.0f * 0.5f * heightMultiplier;
 	}
 
-	return totalHeight * mountainMask;
+	// === 5. ПРЕДГОРЬЯ ===
+	
+	float foothillsHeight = 0.f;
+	if (bEnableFoothills && FoothillsHeightKm > 0.f && FoothillsNoise && rawMountainMask > KINDA_SMALL_NUMBER)
+	{
+		// Зона предгорий - переход от равнины к горам
+		const float foothillZone = FMath::Clamp(
+			(rawMountainMask - (1.0f - FoothillsWidth)) / FMath::Max(KINDA_SMALL_NUMBER, FoothillsWidth),
+			0.0f,
+			1.0f
+		);
+		
+		// Инвертируем - предгорья на краях горной зоны
+		const float foothillMask = (1.0f - mountainMask) * foothillZone;
+		
+		if (foothillMask > KINDA_SMALL_NUMBER)
+		{
+			const float fFreq = FoothillsFrequency;
+			const FVector3f fPos = WarpedPos * fFreq;
+			
+			// FBM для холмистой местности
+			float hills = 0.f;
+			float fAmp = 1.0f;
+			float fOctFreq = 1.0f;
+			
+			for (int32 fOct = 0; fOct < 3; ++fOct)
+			{
+				const FVector3f fSample = fPos * fOctFreq;
+				hills += fAmp * FoothillsNoise->GetNoise(fSample.X, fSample.Y, fSample.Z);
+				fOctFreq *= 2.2f;
+				fAmp *= 0.5f;
+			}
+			
+			hills = FMath::Clamp(hills * 0.5f + 0.5f, 0.0f, 1.0f);
+			hills = FMath::Pow(hills, 1.5f); // Сглаживаем
+			
+			foothillsHeight = hills * FoothillsHeightKm * 100000.0f * foothillMask;
+		}
+	}
+
+	return totalHeight * mountainMask + foothillsHeight;
 }
 float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) const
 {
@@ -508,6 +601,38 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	MountainMaskWarpNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
 	MountainMaskWarpNoise->SetFractalType(FastNoiseLite::FractalType_None);
 	MountainMaskWarpNoise->SetFrequency(1.0f);
+    
+    	// === NEW MOUNTAIN DETAIL NOISES ===
+    	static FastNoiseLite MountainErosionInstance;
+    	static FastNoiseLite MountainRockyDetailInstance;
+    	static FastNoiseLite FoothillsInstance;
+    	static FastNoiseLite MountainHeightVarInstance;
+    
+    	MountainErosionNoise = &MountainErosionInstance;
+    	MountainErosionNoise->SetSeed(MountainSeed + 1111);
+    	MountainErosionNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    	MountainErosionNoise->SetFractalType(FastNoiseLite::FractalType_None);
+    	MountainErosionNoise->SetFrequency(1.0f);
+    
+    	MountainRockyDetailNoise = &MountainRockyDetailInstance;
+    	MountainRockyDetailNoise->SetSeed(MountainSeed + 2222);
+    	MountainRockyDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    	MountainRockyDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+    	MountainRockyDetailNoise->SetFractalOctaves(2);
+    	MountainRockyDetailNoise->SetFrequency(1.0f);
+    
+    	FoothillsNoise = &FoothillsInstance;
+    	FoothillsNoise->SetSeed(MountainSeed + 3333);
+    	FoothillsNoise->SetNoiseType(FastNoiseLite::NoiseType_Perlin);
+    	FoothillsNoise->SetFractalType(FastNoiseLite::FractalType_None);
+    	FoothillsNoise->SetFrequency(1.0f);
+    
+    	MountainHeightVarNoise = &MountainHeightVarInstance;
+    	MountainHeightVarNoise->SetSeed(MountainSeed + 4444);
+    	MountainHeightVarNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    	MountainHeightVarNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+    	MountainHeightVarNoise->SetFractalOctaves(2);
+    	MountainHeightVarNoise->SetFrequency(1.0f);
 
 	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
 	// ... остальной код без изменений
