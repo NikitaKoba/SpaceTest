@@ -9,6 +9,7 @@
 #include "GameFramework/PlayerController.h"
 #include "ProceduralMeshComponent.h"
 #include "UObject/UnrealType.h" // FPropertyChangedEvent, EPropertyChangeType, GET_MEMBER_NAME_CHECKED
+#include <limits>
 
 struct FStaticFaceData
 {
@@ -657,7 +658,24 @@ void AProceduralPlanetActor::TraverseFace(const uint8 Face, const uint8 Lod, con
 	const FFaceBasis Basis = CubeFaces[Face];
 	const FVector3f CenterDir = (Basis.Normal + Basis.AxisA * ((U0 + U1) * 0.5f) + Basis.AxisB * ((V0 + V1) * 0.5f)).GetSafeNormal();
 	const FVector ChunkCenterWorld = GetActorLocation() + FVector(CenterDir * BaseRadiusCm);
-	const float DistanceKm = FVector::Dist(ChunkCenterWorld, FocusWorld) / 100000.0f;
+
+	// Оцениваем не только центр чанка, но и ближайший угол, чтобы возле границы LOD не оставался грубый слой.
+	FVector3f CornerDirs[4] = {
+		(Basis.Normal + Basis.AxisA * U0 + Basis.AxisB * V0).GetSafeNormal(),
+		(Basis.Normal + Basis.AxisA * U1 + Basis.AxisB * V0).GetSafeNormal(),
+		(Basis.Normal + Basis.AxisA * U0 + Basis.AxisB * V1).GetSafeNormal(),
+		(Basis.Normal + Basis.AxisA * U1 + Basis.AxisB * V1).GetSafeNormal(),
+	};
+
+	float MinCornerDistanceKm = TNumericLimits<float>::Max();
+	for (int32 CornerIdx = 0; CornerIdx < 4; ++CornerIdx)
+	{
+		const FVector CornerWorld = GetActorLocation() + FVector(CornerDirs[CornerIdx] * BaseRadiusCm);
+		MinCornerDistanceKm = FMath::Min(MinCornerDistanceKm, FVector::Dist(CornerWorld, FocusWorld) / 100000.0f);
+	}
+
+	const float CenterDistanceKm = FVector::Dist(ChunkCenterWorld, FocusWorld) / 100000.0f;
+	const float DistanceKm = FMath::Min(CenterDistanceKm, MinCornerDistanceKm);
 	const float DistanceToSurfaceKm = FMath::Max(0.0f, DistanceKm - Config.PlanetRadiusKm);
 
 	const int32 DesiredDepth = DesiredDepthForDistance(DistanceToSurfaceKm);
@@ -714,7 +732,7 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 		}
 		else if (bFallback)
 		{
-			if (AreAllChildrenAttached(Id))
+			if (IsFallbackRemovable(Id))
 			{
 				if (PlanetMesh && PlanetMesh->GetNumSections() > It.Value().SectionIndex)
 				{
@@ -724,6 +742,7 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 				It.RemoveCurrent();
 			}
 		}
+
 	}
 
 	BuildQueue.RemoveAll([this](const FPlanetChunkId& Id)
@@ -862,15 +881,18 @@ void AProceduralPlanetActor::OnChunkBuilt(const FPlanetChunkId& Id, FFaceMeshDat
 		return;
 	}
 
-	if (!PlanetMesh || !MeshData.Indices || !MeshData.UVs || !MeshData.Tangents)
+	FChunkState* State = ChunkStates.Find(Id);
+	if (!State)
 	{
 		--ActiveBuilds;
 		KickBuilds();
 		return;
 	}
 
-	FChunkState* State = ChunkStates.Find(Id);
-	if (!State)
+	// Mark build completion before any early returns so the chunk can be re-queued if needed.
+	State->bPending = false;
+
+	if (!PlanetMesh || !MeshData.Indices || !MeshData.UVs || !MeshData.Tangents)
 	{
 		--ActiveBuilds;
 		KickBuilds();
@@ -914,8 +936,11 @@ void AProceduralPlanetActor::OnChunkBuilt(const FPlanetChunkId& Id, FFaceMeshDat
 			*MeshData.Tangents);
 	}
 
-	State->bPending = false;
+	// The chunk is now attached and ready for use by higher LOD removal logic.
 	State->bAttached = true;
+
+	TryRemoveFallbackAncestors(Id);
+
 
 	// Если все дети готовы — удаляем родителя сразу, чтобы не было двойного слоя.
 	if (Id.Lod > 0)
@@ -975,4 +1000,95 @@ TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> AProceduralPlanetActor::GetStati
 
 	StaticCache.Add(Resolution, StaticBuffers);
 	return StaticBuffers;
+}
+bool AProceduralPlanetActor::IsRegionCoveredByAttached(const FPlanetChunkId& Region, const uint8 MaxLod) const
+{
+	if (const FChunkState* State = ChunkStates.Find(Region))
+	{
+		if (State->bAttached)
+		{
+			return true; // Этот регион уже покрыт чанком этого уровня (или смешанным LOD).
+		}
+	}
+
+	if (Region.Lod >= MaxLod)
+	{
+		return false; // Глубже нельзя, а на этом уровне покрытия нет.
+	}
+
+	const uint8 ChildLod = Region.Lod + 1;
+	const FPlanetChunkId C0{ Region.Face, ChildLod, static_cast<uint16>(Region.X * 2),     static_cast<uint16>(Region.Y * 2) };
+	const FPlanetChunkId C1{ Region.Face, ChildLod, static_cast<uint16>(Region.X * 2 + 1), static_cast<uint16>(Region.Y * 2) };
+	const FPlanetChunkId C2{ Region.Face, ChildLod, static_cast<uint16>(Region.X * 2),     static_cast<uint16>(Region.Y * 2 + 1) };
+	const FPlanetChunkId C3{ Region.Face, ChildLod, static_cast<uint16>(Region.X * 2 + 1), static_cast<uint16>(Region.Y * 2 + 1) };
+
+	return IsRegionCoveredByAttached(C0, MaxLod) &&
+		   IsRegionCoveredByAttached(C1, MaxLod) &&
+		   IsRegionCoveredByAttached(C2, MaxLod) &&
+		   IsRegionCoveredByAttached(C3, MaxLod);
+}
+
+bool AProceduralPlanetActor::IsFallbackRemovable(const FPlanetChunkId& Parent) const
+{
+	if (LODLevels.Num() <= 1)
+	{
+		return false;
+	}
+
+	const uint8 MaxLod = static_cast<uint8>(LODLevels.Num() - 1);
+	if (Parent.Lod >= MaxLod)
+	{
+		return false;
+	}
+
+	// ВАЖНО: родителя как "покрытие" не считаем — он fallback. Нужно покрытие более детальными регионами.
+	const uint8 ChildLod = Parent.Lod + 1;
+	const FPlanetChunkId C0{ Parent.Face, ChildLod, static_cast<uint16>(Parent.X * 2),     static_cast<uint16>(Parent.Y * 2) };
+	const FPlanetChunkId C1{ Parent.Face, ChildLod, static_cast<uint16>(Parent.X * 2 + 1), static_cast<uint16>(Parent.Y * 2) };
+	const FPlanetChunkId C2{ Parent.Face, ChildLod, static_cast<uint16>(Parent.X * 2),     static_cast<uint16>(Parent.Y * 2 + 1) };
+	const FPlanetChunkId C3{ Parent.Face, ChildLod, static_cast<uint16>(Parent.X * 2 + 1), static_cast<uint16>(Parent.Y * 2 + 1) };
+
+	return IsRegionCoveredByAttached(C0, MaxLod) &&
+		   IsRegionCoveredByAttached(C1, MaxLod) &&
+		   IsRegionCoveredByAttached(C2, MaxLod) &&
+		   IsRegionCoveredByAttached(C3, MaxLod);
+}
+
+void AProceduralPlanetActor::TryRemoveFallbackAncestors(const FPlanetChunkId& FromChild)
+{
+	FPlanetChunkId Current = FromChild;
+
+	while (Current.Lod > 0)
+	{
+		const FPlanetChunkId Parent{
+			Current.Face,
+			static_cast<uint8>(Current.Lod - 1),
+			static_cast<uint16>(Current.X / 2),
+			static_cast<uint16>(Current.Y / 2)
+		};
+
+		if (!FallbackChunks.Contains(Parent))
+		{
+			break;
+		}
+
+		if (!IsFallbackRemovable(Parent))
+		{
+			break;
+		}
+
+		if (FChunkState* ParentState = ChunkStates.Find(Parent))
+		{
+			if (PlanetMesh && PlanetMesh->GetNumSections() > ParentState->SectionIndex)
+			{
+				PlanetMesh->ClearMeshSection(ParentState->SectionIndex);
+			}
+
+			FreeSections.Add(ParentState->SectionIndex);
+			ChunkStates.Remove(Parent);
+		}
+
+		FallbackChunks.Remove(Parent);
+		Current = Parent; // пробуем подняться ещё выше
+	}
 }

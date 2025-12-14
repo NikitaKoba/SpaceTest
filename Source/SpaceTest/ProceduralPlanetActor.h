@@ -107,6 +107,9 @@ public:
 	/** Радиус детальной подгрузки (км) от поверхности: внутри строятся мелкие LOD, снаружи берётся более грубый. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1.0", ClampMax = "200.0"))
 	float StreamingRadiusKm = 12.0f;
+	bool IsRegionCoveredByAttached(const FPlanetChunkId& Region, uint8 MaxLod) const;
+	bool IsFallbackRemovable(const FPlanetChunkId& Parent) const;
+	void TryRemoveFallbackAncestors(const FPlanetChunkId& FromChild);
 
 	/** Шаг обновления потокера (сек). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0.01", ClampMax = "1.0"))
@@ -143,7 +146,7 @@ public:
 	/** Показывать ли глобальный “лоу поли” слой (LOD0) всегда в редакторе, чтобы была видна целая планета. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Editor Preview")
 	bool bShowGlobalLowLODInEditor = false;
-
+	
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	USceneComponent* SceneRoot;
