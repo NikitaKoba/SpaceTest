@@ -18,6 +18,7 @@ struct FPlanetGenerationConfig
 	float ContinentHeightKm = 8.0f;
 	float MountainHeightKm = 5.0f;
 	int32 NoiseSeed = 12345;
+	float SkirtSizeKm = 0.0f;
 };
 
 USTRUCT(BlueprintType)
@@ -85,6 +86,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
 	int32 NoiseSeed = 12345;
 
+	/** Высота юбки вдоль границ чанков (км), чтобы скрывать щели между LOD. 0 = без юбки. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float SkirtSizeKm = 0.05f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continents", meta = (ClampMin = "0.0", ClampMax = "20.0"))
 	float ContinentHeightKm = 8.0f;
 
@@ -137,7 +142,7 @@ public:
 
 	/** Показывать ли глобальный “лоу поли” слой (LOD0) всегда в редакторе, чтобы была видна целая планета. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Editor Preview")
-	bool bShowGlobalLowLODInEditor = true;
+	bool bShowGlobalLowLODInEditor = false;
 
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")

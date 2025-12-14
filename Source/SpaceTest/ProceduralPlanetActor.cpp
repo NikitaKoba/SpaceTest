@@ -371,7 +371,13 @@ namespace
 				const FVector3f SphereDir = CubeDir.GetSafeNormal();
 				const FVector3f PositionKm = SphereDir * BaseRadiusKm;
 				const float HeightKm = SampleHeightKm(Noise, PositionKm, Config) * Config.AmplitudeScale;
-				const float RadiusCm = BaseRadiusCm + HeightKm * 100000.f;
+				float RadiusCm = BaseRadiusCm + HeightKm * 100000.f;
+
+				const bool bEdge = (X == 0 || X == Res || Y == 0 || Y == Res);
+				if (bEdge && Config.SkirtSizeKm > 0.0f)
+				{
+					RadiusCm = FMath::Max(1.0f, RadiusCm - Config.SkirtSizeKm * 100000.f);
+				}
 
 				OutMesh.Vertices.Add(static_cast<FVector>(SphereDir * RadiusCm));
 			}
@@ -589,6 +595,7 @@ void AProceduralPlanetActor::UpdateStreaming(const FVector& FocusWorld)
 	Config.ContinentHeightKm = ContinentHeightKm;
 	Config.MountainHeightKm = MountainHeightKm;
 	Config.NoiseSeed = NoiseSeed;
+	Config.SkirtSizeKm = SkirtSizeKm;
 
 	const float BaseRadiusCm = FMath::Max(1000.f, Config.PlanetRadiusKm * 100000.f);
 
@@ -597,7 +604,7 @@ void AProceduralPlanetActor::UpdateStreaming(const FVector& FocusWorld)
 	CollectDesiredChunks(FocusWorld, BaseRadiusCm, Config, DesiredChunks, Fallback);
 
 #if WITH_EDITOR
-	if (GIsEditor && bShowGlobalLowLODInEditor && !GetWorld()->IsGameWorld())
+	if (GIsEditor && bShowGlobalLowLODInEditor && GetWorld() && !GetWorld()->IsGameWorld())
 	{
 		// Добавляем полный грубый LOD (24) для обзора всей планеты.
 		for (uint8 Face = 0; Face < 6; ++Face)
@@ -812,6 +819,7 @@ void AProceduralPlanetActor::KickBuilds()
 		Config.ContinentHeightKm = ContinentHeightKm;
 		Config.MountainHeightKm = MountainHeightKm;
 		Config.NoiseSeed = NoiseSeed;
+		Config.SkirtSizeKm = SkirtSizeKm;
 
 		const float BaseRadiusCm = FMath::Max(1000.f, Config.PlanetRadiusKm * 100000.f);
 
@@ -908,6 +916,25 @@ void AProceduralPlanetActor::OnChunkBuilt(const FPlanetChunkId& Id, FFaceMeshDat
 
 	State->bPending = false;
 	State->bAttached = true;
+
+	// Если все дети готовы — удаляем родителя сразу, чтобы не было двойного слоя.
+	if (Id.Lod > 0)
+	{
+		const FPlanetChunkId Parent{ Id.Face, static_cast<uint8>(Id.Lod - 1), static_cast<uint16>(Id.X / 2), static_cast<uint16>(Id.Y / 2) };
+		if (FallbackChunks.Contains(Parent) && AreAllChildrenAttached(Parent))
+		{
+			if (FChunkState* ParentState = ChunkStates.Find(Parent))
+			{
+				if (PlanetMesh && PlanetMesh->GetNumSections() > ParentState->SectionIndex)
+				{
+					PlanetMesh->ClearMeshSection(ParentState->SectionIndex);
+				}
+				FreeSections.Add(ParentState->SectionIndex);
+				ChunkStates.Remove(Parent);
+			}
+			FallbackChunks.Remove(Parent);
+		}
+	}
 
 	--ActiveBuilds;
 	KickBuilds();
