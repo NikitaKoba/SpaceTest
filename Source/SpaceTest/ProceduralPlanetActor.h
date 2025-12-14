@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Templates/Function.h"
 #include "ProceduralPlanetActor.generated.h"
 
 class UProceduralMeshComponent;
@@ -149,6 +150,18 @@ public:
 	/** Показывать ли глобальный “лоу поли” слой (LOD0) всегда в редакторе, чтобы была видна целая планета. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Editor Preview")
 	bool bShowGlobalLowLODInEditor = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0.1", ClampMax = "50.0"))
+	float FrameBudgetMs = 4.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 MaxAppliesPerFrame = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "1", ClampMax = "128"))
+	int32 MaxClearsPerFrame = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0.0", ClampMax = "200.0"))
+	float LodPriorityPenaltyKm = 25.0f;
 	
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -165,8 +178,10 @@ private:
 		int32 SectionIndex = INDEX_NONE;
 		int32 Resolution = 0;
 		uint8 Lod = 0;
-		bool bPending = false;
+		bool bPendingBuild = false;
 		bool bAttached = false;
+		bool bReadyForApply = false;
+		float Priority = 0.0f;
 	};
 
 	struct FQueuedChunk
@@ -175,6 +190,13 @@ private:
 		float Priority = 0.0f;
 		uint64 Sequence = 0;
 	};
+
+	bool CanRequestChunk(const FPlanetChunkId& Id) const;
+	float ComputePriority(const FPlanetChunkId& Id, const TMap<FPlanetChunkId, float>& ChunkDistances) const;
+	bool HasFrameBudget(double StartSeconds) const;
+	void ProcessApplyQueue(double StartSeconds);
+	void ProcessClearQueue(double StartSeconds);
+	void QueueSectionRelease(int32 SectionIndex);
 
 	TMap<FPlanetChunkId, FChunkState> ChunkStates;
 	TArray<FQueuedChunk> BuildQueue;
@@ -187,6 +209,9 @@ private:
 	uint64 QueueSequence = 0;
 	TArray<int32> FreeSections;
 	TMap<int32, TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe>> StaticCache;
+	TArray<TFunction<void()>> PendingApplyWork;
+	TArray<TFunction<void()>> PendingClearWork;
+	TSet<int32> PendingClearIndices;
 
 	void GeneratePlanet();
 

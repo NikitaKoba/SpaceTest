@@ -9,6 +9,7 @@
 #include "GameFramework/PlayerController.h"
 #include "ProceduralMeshComponent.h"
 #include "UObject/UnrealType.h" // FPropertyChangedEvent, EPropertyChangeType, GET_MEMBER_NAME_CHECKED
+#include "HAL/PlatformTime.h"
 #include <limits>
 
 struct FStaticFaceData
@@ -424,8 +425,18 @@ void AProceduralPlanetActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	const double TickStart = FPlatformTime::Seconds();
+
+	ProcessClearQueue(TickStart);
+	ProcessApplyQueue(TickStart);
+
 	TimeSinceUpdate += DeltaSeconds;
 	if (TimeSinceUpdate < UpdateInterval)
+	{
+		return;
+	}
+
+	if (!HasFrameBudget(TickStart))
 	{
 		return;
 	}
@@ -500,6 +511,9 @@ void AProceduralPlanetActor::GeneratePlanet()
 	QueueSequence = 0;
 	FreeSections.Empty();
 	bHasLastFocus = false;
+	PendingApplyWork.Empty();
+	PendingClearWork.Empty();
+	PendingClearIndices.Empty();
 
 	PlanetMesh->ClearAllMeshSections();
 	PlanetMesh->SetCollisionEnabled(bEnableCollision ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
@@ -579,6 +593,96 @@ bool AProceduralPlanetActor::GetFocusLocation(FVector& OutFocusWorld) const
 #endif
 
 	return false;
+}
+
+bool AProceduralPlanetActor::HasFrameBudget(const double StartSeconds) const
+{
+	const double ElapsedMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
+	return ElapsedMs < FrameBudgetMs;
+}
+
+void AProceduralPlanetActor::QueueSectionRelease(const int32 SectionIndex)
+{
+	if (SectionIndex == INDEX_NONE)
+	{
+		return;
+	}
+
+	if (PendingClearIndices.Contains(SectionIndex))
+	{
+		return;
+	}
+
+	PendingClearIndices.Add(SectionIndex);
+
+	PendingClearWork.Add([this, SectionIndex]()
+	{
+		if (PlanetMesh && PlanetMesh->GetNumSections() > SectionIndex)
+		{
+			PlanetMesh->ClearMeshSection(SectionIndex);
+		}
+		FreeSections.Add(SectionIndex);
+		PendingClearIndices.Remove(SectionIndex);
+	});
+}
+
+void AProceduralPlanetActor::ProcessClearQueue(const double StartSeconds)
+{
+	int32 Processed = 0;
+	while (PendingClearWork.Num() > 0 && Processed < MaxClearsPerFrame && (Processed == 0 || HasFrameBudget(StartSeconds)))
+	{
+		const int32 Index = PendingClearWork.Num() - 1;
+		TFunction<void()> Work = MoveTemp(PendingClearWork[Index]);
+		PendingClearWork.RemoveAt(Index);
+
+		if (Work)
+		{
+			Work();
+		}
+
+		++Processed;
+	}
+}
+
+void AProceduralPlanetActor::ProcessApplyQueue(const double StartSeconds)
+{
+	int32 Applied = 0;
+	while (PendingApplyWork.Num() > 0 && Applied < MaxAppliesPerFrame && (Applied == 0 || HasFrameBudget(StartSeconds)))
+	{
+		const int32 Index = PendingApplyWork.Num() - 1;
+		TFunction<void()> Work = MoveTemp(PendingApplyWork[Index]);
+		PendingApplyWork.RemoveAt(Index);
+
+		if (Work)
+		{
+			Work();
+		}
+
+		++Applied;
+	}
+}
+
+bool AProceduralPlanetActor::CanRequestChunk(const FPlanetChunkId& Id) const
+{
+	if (Id.Lod == 0)
+	{
+		return true;
+	}
+
+	const FPlanetChunkId Parent{ Id.Face, static_cast<uint8>(Id.Lod - 1), static_cast<uint16>(Id.X / 2), static_cast<uint16>(Id.Y / 2) };
+	if (const FChunkState* ParentState = ChunkStates.Find(Parent))
+	{
+		return ParentState->bAttached || ParentState->bReadyForApply;
+	}
+
+	return false;
+}
+
+float AProceduralPlanetActor::ComputePriority(const FPlanetChunkId& Id, const TMap<FPlanetChunkId, float>& ChunkDistances) const
+{
+	const float* DistancePtr = ChunkDistances.Find(Id);
+	const float Distance = DistancePtr ? *DistancePtr : TNumericLimits<float>::Max();
+	return Distance + LodPriorityPenaltyKm * static_cast<float>(Id.Lod);
 }
 
 void AProceduralPlanetActor::UpdateStreaming(const FVector& FocusWorld)
@@ -712,16 +816,6 @@ void AProceduralPlanetActor::TraverseFace(const uint8 Face, const uint8 Lod, con
 
 void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desired, const TSet<FPlanetChunkId>& Fallback, const TMap<FPlanetChunkId, float>& ChunkDistances)
 {
-	auto GetPriority = [&ChunkDistances](const FPlanetChunkId& Id)
-	{
-		if (const float* Found = ChunkDistances.Find(Id))
-		{
-			return *Found;
-		}
-
-		return TNumericLimits<float>::Max();
-	};
-
 	const auto SortQueue = [this]()
 	{
 		BuildQueue.Sort([](const FQueuedChunk& A, const FQueuedChunk& B)
@@ -748,36 +842,34 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 
 		if (!bStillNeeded && !bFallback)
 		{
-			if (PlanetMesh && PlanetMesh->GetNumSections() > It.Value().SectionIndex)
-			{
-				PlanetMesh->ClearMeshSection(It.Value().SectionIndex);
-			}
-			FreeSections.Add(It.Value().SectionIndex);
+			QueueSectionRelease(It.Value().SectionIndex);
 			It.RemoveCurrent();
-		}
-		else if (bFallback)
-		{
-			if (IsFallbackRemovable(Id))
-			{
-				if (PlanetMesh && PlanetMesh->GetNumSections() > It.Value().SectionIndex)
-				{
-					PlanetMesh->ClearMeshSection(It.Value().SectionIndex);
-				}
-				FreeSections.Add(It.Value().SectionIndex);
-				It.RemoveCurrent();
-			}
+			continue;
 		}
 
+		if (bFallback && IsFallbackRemovable(Id))
+		{
+			QueueSectionRelease(It.Value().SectionIndex);
+			It.RemoveCurrent();
+			FallbackChunks.Remove(Id);
+			continue;
+		}
+
+		It.Value().Priority = ComputePriority(Id, ChunkDistances);
 	}
 
 	BuildQueue.RemoveAll([this](const FQueuedChunk& Entry)
 	{
-		return !ChunkStates.Contains(Entry.Id);
+		if (const FChunkState* State = ChunkStates.Find(Entry.Id))
+		{
+			return State->bAttached || State->bReadyForApply;
+		}
+		return true;
 	});
 
 	for (FQueuedChunk& Entry : BuildQueue)
 	{
-		Entry.Priority = GetPriority(Entry.Id);
+		Entry.Priority = ComputePriority(Entry.Id, ChunkDistances);
 	}
 
 	SortQueue();
@@ -801,8 +893,10 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 			{
 				NewState.SectionIndex = NextSectionIndex++;
 			}
-			NewState.bPending = false;
+			NewState.bPendingBuild = false;
 			NewState.bAttached = false;
+			NewState.bReadyForApply = false;
+			NewState.Priority = 0.0f;
 			ChunkStates.Add(Id, NewState);
 			State = ChunkStates.Find(Id);
 		}
@@ -813,16 +907,17 @@ void AProceduralPlanetActor::TrimAndQueueChunks(const TSet<FPlanetChunkId>& Desi
 		}
 
 		// Если LOD изменился, переenqueue с новым разрешением.
-		const int32 TargetRes = GetLODResolution(Id.Lod);
-		if (State->Resolution != TargetRes)
+		State->Priority = ComputePriority(Id, ChunkDistances);
+		State->Resolution = GetLODResolution(Id.Lod);
+
+		if (!CanRequestChunk(Id))
 		{
-			State->Resolution = TargetRes;
+			continue;
 		}
 
-		if (!State->bPending && NewQueuedThisUpdate < MaxNew)
+		if (!State->bPendingBuild && !State->bReadyForApply && !State->bAttached && NewQueuedThisUpdate < MaxNew)
 		{
-			const float Priority = GetPriority(Id);
-			if (EnqueueChunkBuild(Id, Priority))
+			if (EnqueueChunkBuild(Id, State->Priority))
 			{
 				++NewQueuedThisUpdate;
 			}
@@ -845,7 +940,7 @@ bool AProceduralPlanetActor::EnqueueChunkBuild(const FPlanetChunkId& Id, const f
 		if (Entry.Id == Id)
 		{
 			Entry.Priority = FMath::Min(Entry.Priority, Priority);
-			State->bPending = true;
+			State->bPendingBuild = true;
 			return false;
 		}
 	}
@@ -871,7 +966,7 @@ bool AProceduralPlanetActor::EnqueueChunkBuild(const FPlanetChunkId& Id, const f
 
 		if (FChunkState* DroppedState = ChunkStates.Find(BuildQueue[WorstIndex].Id))
 		{
-			DroppedState->bPending = false;
+			DroppedState->bPendingBuild = false;
 		}
 
 		BuildQueue.RemoveAt(WorstIndex);
@@ -882,7 +977,8 @@ bool AProceduralPlanetActor::EnqueueChunkBuild(const FPlanetChunkId& Id, const f
 	Entry.Priority = Priority;
 	Entry.Sequence = QueueSequence++;
 	BuildQueue.Add(Entry);
-	State->bPending = true;
+	State->bPendingBuild = true;
+	State->Priority = Priority;
 	return true;
 }
 
@@ -949,95 +1045,116 @@ void AProceduralPlanetActor::OnChunkBuilt(const FPlanetChunkId& Id, FFaceMeshDat
 	TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> KeepAlive = StaticBuffers;
 	(void)KeepAlive;
 
-	if (GenerationId != ActiveGenerationId)
-	{
-		--ActiveBuilds;
-		KickBuilds();
-		return;
-	}
-
 	FChunkState* State = ChunkStates.Find(Id);
-	if (!State)
+	if (State)
 	{
+		State->bPendingBuild = false;
+	}
+
+	if (GenerationId != ActiveGenerationId || !State)
+	{
+		if (State)
+		{
+			State->bReadyForApply = false;
+		}
 		--ActiveBuilds;
 		KickBuilds();
 		return;
 	}
-
-	// Mark build completion before any early returns so the chunk can be re-queued if needed.
-	State->bPending = false;
+	State->bReadyForApply = true;
 
 	if (!PlanetMesh || !MeshData.Indices || !MeshData.UVs || !MeshData.Tangents)
 	{
+		State->bReadyForApply = false;
 		--ActiveBuilds;
 		KickBuilds();
 		return;
 	}
 
-	const bool bHasSection = PlanetMesh->GetNumSections() > MeshData.SectionIndex;
-	int32 PrevVertCount = 0;
-
-	if (bHasSection)
+	PendingApplyWork.Add([this, Id, GenerationId, MeshData = MoveTemp(MeshData), StaticBuffers]() mutable
 	{
-		if (const FProcMeshSection* Section = PlanetMesh->GetProcMeshSection(MeshData.SectionIndex))
+		const TSharedPtr<FStaticBuffers, ESPMode::ThreadSafe> KeepBuffers = StaticBuffers;
+		(void)KeepBuffers;
+
+		FChunkState* ApplyState = ChunkStates.Find(Id);
+		if (!ApplyState)
 		{
-			PrevVertCount = Section->ProcVertexBuffer.Num();
+			return;
 		}
-	}
 
-	const bool bSameVertexCount = bHasSection && PrevVertCount == MeshData.Vertices.Num();
-
-	if (!bSameVertexCount)
-	{
-		PlanetMesh->ClearMeshSection(MeshData.SectionIndex);
-		PlanetMesh->CreateMeshSection_LinearColor(
-			MeshData.SectionIndex,
-			MeshData.Vertices,
-			*MeshData.Indices,
-			MeshData.Normals,
-			*MeshData.UVs,
-			TArray<FLinearColor>(),
-			*MeshData.Tangents,
-			bEnableCollision);
-	}
-	else
-	{
-		PlanetMesh->UpdateMeshSection_LinearColor(
-			MeshData.SectionIndex,
-			MeshData.Vertices,
-			MeshData.Normals,
-			*MeshData.UVs,
-			TArray<FLinearColor>(),
-			*MeshData.Tangents);
-	}
-
-	// The chunk is now attached and ready for use by higher LOD removal logic.
-	State->bAttached = true;
-
-	TryRemoveFallbackAncestors(Id);
-
-
-	// Если все дети готовы — удаляем родителя сразу, чтобы не было двойного слоя.
-	if (Id.Lod > 0)
-	{
-		const FPlanetChunkId Parent{ Id.Face, static_cast<uint8>(Id.Lod - 1), static_cast<uint16>(Id.X / 2), static_cast<uint16>(Id.Y / 2) };
-		if (FallbackChunks.Contains(Parent) && AreAllChildrenAttached(Parent))
+		if (GenerationId != ActiveGenerationId)
 		{
-			if (FChunkState* ParentState = ChunkStates.Find(Parent))
+			ApplyState->bReadyForApply = false;
+			return;
+		}
+
+		ApplyState->bReadyForApply = false;
+
+		if (!PlanetMesh || !MeshData.Indices || !MeshData.UVs || !MeshData.Tangents)
+		{
+			return;
+		}
+
+		const bool bHasSection = PlanetMesh->GetNumSections() > MeshData.SectionIndex;
+		int32 PrevVertCount = 0;
+
+		if (bHasSection)
+		{
+			if (const FProcMeshSection* Section = PlanetMesh->GetProcMeshSection(MeshData.SectionIndex))
 			{
-				if (PlanetMesh && PlanetMesh->GetNumSections() > ParentState->SectionIndex)
-				{
-					PlanetMesh->ClearMeshSection(ParentState->SectionIndex);
-				}
-				FreeSections.Add(ParentState->SectionIndex);
-				ChunkStates.Remove(Parent);
+				PrevVertCount = Section->ProcVertexBuffer.Num();
 			}
-			FallbackChunks.Remove(Parent);
 		}
-	}
+
+		const bool bSameVertexCount = bHasSection && PrevVertCount == MeshData.Vertices.Num();
+
+		if (!bSameVertexCount)
+		{
+			PlanetMesh->ClearMeshSection(MeshData.SectionIndex);
+			PlanetMesh->CreateMeshSection_LinearColor(
+				MeshData.SectionIndex,
+				MeshData.Vertices,
+				*MeshData.Indices,
+				MeshData.Normals,
+				*MeshData.UVs,
+				TArray<FLinearColor>(),
+				*MeshData.Tangents,
+				bEnableCollision);
+		}
+		else
+		{
+			PlanetMesh->UpdateMeshSection_LinearColor(
+				MeshData.SectionIndex,
+				MeshData.Vertices,
+				MeshData.Normals,
+				*MeshData.UVs,
+				TArray<FLinearColor>(),
+				*MeshData.Tangents);
+		}
+
+		ApplyState->bAttached = true;
+		ApplyState->bPendingBuild = false;
+
+		TryRemoveFallbackAncestors(Id);
+
+		if (Id.Lod > 0)
+		{
+			const FPlanetChunkId Parent{ Id.Face, static_cast<uint8>(Id.Lod - 1), static_cast<uint16>(Id.X / 2), static_cast<uint16>(Id.Y / 2) };
+			if (FallbackChunks.Contains(Parent) && AreAllChildrenAttached(Parent))
+			{
+				if (FChunkState* ParentState = ChunkStates.Find(Parent))
+				{
+					QueueSectionRelease(ParentState->SectionIndex);
+					ChunkStates.Remove(Parent);
+				}
+				FallbackChunks.Remove(Parent);
+			}
+		}
+	});
 
 	--ActiveBuilds;
 	KickBuilds();
+	return;
 }
 
 bool AProceduralPlanetActor::AreAllChildrenAttached(const FPlanetChunkId& Parent) const
@@ -1154,12 +1271,7 @@ void AProceduralPlanetActor::TryRemoveFallbackAncestors(const FPlanetChunkId& Fr
 
 		if (FChunkState* ParentState = ChunkStates.Find(Parent))
 		{
-			if (PlanetMesh && PlanetMesh->GetNumSections() > ParentState->SectionIndex)
-			{
-				PlanetMesh->ClearMeshSection(ParentState->SectionIndex);
-			}
-
-			FreeSections.Add(ParentState->SectionIndex);
+			QueueSectionRelease(ParentState->SectionIndex);
 			ChunkStates.Remove(Parent);
 		}
 
