@@ -69,7 +69,136 @@ FVector3f ACubedSpherePlanetActor::CubeToSphere(const FVector3f& P)
 
 	return FVector3f(fx, fy, fz);
 }
+float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, const FVector3f& WarpedPos, float ContinentMask) const
+{
+	if (!bEnableMountains || ContinentMask <= KINDA_SMALL_NUMBER)
+	{
+		return 0.f;
+	}
 
+	// === 1. МАСКА РАСПРЕДЕЛЕНИЯ ГОР ===
+	
+	FVector3f MountainMaskPos = SphereDir * MountainMaskFrequency;
+	
+	// Domain warp для маски
+	if (MountainMaskWarpStrength > 0.f && MountainMaskWarpNoise)
+	{
+		const float wFreq = MountainMaskFrequency * 1.5f;
+		const float wx = MountainMaskWarpNoise->GetNoise(MountainMaskPos.X * wFreq, MountainMaskPos.Y * wFreq, MountainMaskPos.Z * wFreq);
+		const float wy = MountainMaskWarpNoise->GetNoise(MountainMaskPos.Y * wFreq + 7.7f, MountainMaskPos.Z * wFreq + 7.7f, MountainMaskPos.X * wFreq + 7.7f);
+		const float wz = MountainMaskWarpNoise->GetNoise(MountainMaskPos.Z * wFreq + 15.5f, MountainMaskPos.X * wFreq + 15.5f, MountainMaskPos.Y * wFreq + 15.5f);
+		MountainMaskPos += FVector3f(wx, wy, wz) * MountainMaskWarpStrength;
+	}
+
+	// FBM для маски гор
+	float mountainMask = 0.f;
+	float mAmp = 1.0f;
+	float mFreq = 1.0f;
+	
+	if (MountainMaskNoise)
+	{
+		for (int32 oct = 0; oct < MountainMaskOctaves; ++oct)
+		{
+			const FVector3f samplePos = MountainMaskPos * mFreq;
+			mountainMask += mAmp * MountainMaskNoise->GetNoise(samplePos.X, samplePos.Y, samplePos.Z);
+			mFreq *= 2.0f;
+			mAmp *= 0.5f;
+		}
+	}
+	
+	mountainMask = FMath::Clamp(mountainMask * 0.5f + 0.5f, 0.0f, 1.0f);
+	
+	// Bias к центру или краям континента
+	const float continentBias = FMath::Lerp(
+		FMath::Pow(ContinentMask, 0.5f),           // Ближе к краям
+		FMath::Pow(ContinentMask, 2.0f),           // Ближе к центру
+		MountainContinentBias
+	);
+	
+	mountainMask *= continentBias;
+	
+	// Threshold + sharpness
+	mountainMask = (mountainMask - MountainMaskThreshold) / FMath::Max(KINDA_SMALL_NUMBER, 1.0f - MountainMaskThreshold);
+	mountainMask = FMath::Clamp(mountainMask, 0.0f, 1.0f);
+	mountainMask = FMath::Pow(mountainMask, MountainMaskSharpness);
+	
+	if (mountainMask <= KINDA_SMALL_NUMBER)
+	{
+		return 0.f;
+	}
+
+	float totalHeight = 0.f;
+
+	// === 2. СКЛАДЧАТЫЕ ГОРНЫЕ ХРЕБТЫ (RIDGED) ===
+	
+	if (MountainRidgedHeightKm > 0.f && MountainRidgedNoise)
+	{
+		FVector3f ridgedPos = WarpedPos * MountainRidgedFrequency;
+		
+		// Domain warp для искривления хребтов
+		if (MountainRidgedWarpStrength > 0.f && MountainRidgedWarpNoise)
+		{
+			const float rwFreq = MountainRidgedWarpFrequency;
+			const float rwx = MountainRidgedWarpNoise->GetNoise(ridgedPos.X * rwFreq, ridgedPos.Y * rwFreq, ridgedPos.Z * rwFreq);
+			const float rwy = MountainRidgedWarpNoise->GetNoise(ridgedPos.Y * rwFreq + 11.1f, ridgedPos.Z * rwFreq + 11.1f, ridgedPos.X * rwFreq + 11.1f);
+			const float rwz = MountainRidgedWarpNoise->GetNoise(ridgedPos.Z * rwFreq + 22.2f, ridgedPos.X * rwFreq + 22.2f, ridgedPos.Y * rwFreq + 22.2f);
+			ridgedPos += FVector3f(rwx, rwy, rwz) * MountainRidgedWarpStrength;
+		}
+		
+		// Ridged multifractal
+		float ridged = 0.f;
+		float rAmp = 1.0f;
+		float rFreq = 1.0f;
+		float weight = 1.0f;
+		
+		for (int32 oct = 0; oct < MountainRidgedOctaves; ++oct)
+		{
+			const FVector3f rPos = ridgedPos * rFreq;
+			float noise = MountainRidgedNoise->GetNoise(rPos.X, rPos.Y, rPos.Z);
+			
+			// Ridged: 1 - |noise|
+			noise = 1.0f - FMath::Abs(noise);
+			noise = FMath::Pow(noise, MountainRidgedSharpness);
+			
+			// Weighted (следующая октава зависит от текущей)
+			noise *= weight;
+			weight = FMath::Clamp(noise, 0.0f, 1.0f);
+			
+			ridged += noise * rAmp;
+			
+			rFreq *= MountainRidgedLacunarity;
+			rAmp *= MountainRidgedGain;
+		}
+		
+		ridged = FMath::Clamp(ridged, 0.0f, 1.0f);
+		
+		totalHeight += ridged * MountainRidgedHeightKm * 100000.0f;
+	}
+
+	// === 3. ВУЛКАНИЧЕСКИЕ КОНУСЫ ===
+	
+	if (bEnableVolcanicPeaks && MountainVolcanicHeightKm > 0.f && MountainVolcanicNoise)
+	{
+		const float vFreq = MountainVolcanicFrequency;
+		const FVector3f vPos = WarpedPos * vFreq;
+		
+		// Используем cellular noise для точек вулканов
+		const float cellNoise = MountainVolcanicNoise->GetNoise(vPos.X, vPos.Y, vPos.Z);
+		
+		// Distance от центра ячейки (0 в центре, 1 на краю)
+		// Cellular Distance возвращает [0..1]
+		const float dist = FMath::Clamp(FMath::Abs(cellNoise), 0.0f, 1.0f);
+		
+		// Создаём конус: высота убывает от центра
+		float cone = 1.0f - (dist * MountainVolcanicRadius);
+		cone = FMath::Clamp(cone, 0.0f, 1.0f);
+		cone = FMath::Pow(cone, MountainVolcanicSharpness);
+		
+		totalHeight += cone * MountainVolcanicHeightKm * 100000.0f * 0.5f; // 0.5 чтобы не перебивали ridged
+	}
+
+	return totalHeight * mountainMask;
+}
 float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) const
 {
 	if (!bEnableContinents || !ContinentBaseNoise || ContinentHeightKm <= 0.f)
@@ -216,7 +345,12 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	const float BaseHeightCm = ContinentHeightKm * 100000.0f;
 	const float DetailHeightCm = ContinentDetailHeightKm * 100000.0f;
 
-	return mask * (BaseHeightCm + detail * DetailHeightCm);
+	float totalHeight = mask * (BaseHeightCm + detail * DetailHeightCm);
+	
+	// Добавляем горы поверх континентов
+	totalHeight += GetMountainHeightCm(SphereDir, WarpedPos, mask);
+	
+	return totalHeight;
 }
 
 void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm)
@@ -330,10 +464,54 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	CoastalDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
 	CoastalDetailNoise->SetFractalOctaves(3);
 	CoastalDetailNoise->SetFrequency(1.0f);
+	CoastalDetailNoise->SetSeed(CoastalVariationSeed + 111);
+	CoastalDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	CoastalDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+	CoastalDetailNoise->SetFractalOctaves(3);
+	CoastalDetailNoise->SetFrequency(1.0f);
 
-	// ... остальной код без изменений
+	// === MOUNTAIN NOISES ===
+	static FastNoiseLite MountainRidgedInstance;
+	static FastNoiseLite MountainRidgedWarpInstance;
+	static FastNoiseLite MountainVolcanicInstance;
+	static FastNoiseLite MountainMaskInstance;
+	static FastNoiseLite MountainMaskWarpInstance;
+
+	MountainRidgedNoise = &MountainRidgedInstance;
+	MountainRidgedNoise->SetSeed(MountainSeed);
+	MountainRidgedNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainRidgedNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	MountainRidgedNoise->SetFrequency(1.0f);
+
+	MountainRidgedWarpNoise = &MountainRidgedWarpInstance;
+	MountainRidgedWarpNoise->SetSeed(MountainSeed + 123);
+	MountainRidgedWarpNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainRidgedWarpNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	MountainRidgedWarpNoise->SetFrequency(1.0f);
+
+	MountainVolcanicNoise = &MountainVolcanicInstance;
+	MountainVolcanicNoise->SetSeed(MountainSeed + 456);
+	MountainVolcanicNoise->SetNoiseType(FastNoiseLite::NoiseType_Cellular);
+	MountainVolcanicNoise->SetCellularReturnType(FastNoiseLite::CellularReturnType_Distance);
+	MountainVolcanicNoise->SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
+	MountainVolcanicNoise->SetCellularJitter(0.8f);
+	MountainVolcanicNoise->SetFrequency(1.0f);
+
+	MountainMaskNoise = &MountainMaskInstance;
+	MountainMaskNoise->SetSeed(MountainSeed + 789);
+	MountainMaskNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainMaskNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	MountainMaskNoise->SetFrequency(1.0f);
+
+	MountainMaskWarpNoise = &MountainMaskWarpInstance;
+	MountainMaskWarpNoise->SetSeed(MountainSeed + 999);
+	MountainMaskWarpNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainMaskWarpNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	MountainMaskWarpNoise->SetFrequency(1.0f);
 
 	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
+	// ... остальной код без изменений
+	
 	{
 		Existing->Reset();
 	}

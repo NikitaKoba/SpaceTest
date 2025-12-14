@@ -141,7 +141,97 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShoreNoiseFrequency = 1.6f;
-	
+	// ========== MOUNTAINS ==========
+
+/** Включить генерацию гор. */
+UPROPERTY(EditAnywhere, Category="Mountains")
+bool bEnableMountains = true;
+
+// --- Складчатые горные хребты (ridged mountains) ---
+
+/** Максимальная высота складчатых гор (км). */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainRidgedHeightKm = 4.5f;
+
+/** Частота основных хребтов. Выше = больше мелких хребтов. */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainRidgedFrequency = 2.0f;
+
+/** Октавы для детализации хребтов. */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="1", UIMin="1"))
+int32 MountainRidgedOctaves = 4;
+
+/** Резкость гребней (выше = острее пики). */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.5", UIMin="0.5"))
+float MountainRidgedSharpness = 2.5f;
+
+/** Gain для ridged noise. */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainRidgedGain = 0.5f;
+
+/** Lacunarity для ridged noise. */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="1.0", UIMin="1.0"))
+float MountainRidgedLacunarity = 2.2f;
+
+/** Domain warp для искривления хребтов. */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainRidgedWarpStrength = 0.15f;
+
+/** Частота domain warp для хребтов. */
+UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainRidgedWarpFrequency = 1.5f;
+
+// --- Вулканические горы (volcanic peaks) ---
+
+/** Включить вулканические конусы. */
+UPROPERTY(EditAnywhere, Category="Mountains|Volcanic")
+bool bEnableVolcanicPeaks = true;
+
+/** Максимальная высота вулканов (км). */
+UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainVolcanicHeightKm = 3.0f;
+
+/** Частота вулканических точек. */
+UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainVolcanicFrequency = 1.2f;
+
+/** Радиус основания вулкана (влияет на крутизну). */
+UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="0.5", UIMin="0.5"))
+float MountainVolcanicRadius = 2.0f;
+
+/** Резкость конуса вулкана. */
+UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="1.0", UIMin="1.0"))
+float MountainVolcanicSharpness = 3.0f;
+
+// --- Распределение гор (mountain distribution) ---
+
+/** Частота маски распределения гор (где будут горы). */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainMaskFrequency = 0.8f;
+
+/** Октавы для маски гор. */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="1", UIMin="1"))
+int32 MountainMaskOctaves = 3;
+
+/** Порог маски (выше = меньше гор, 0.3-0.5 оптимально). */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", ClampMax="1.0"))
+float MountainMaskThreshold = 0.4f;
+
+/** Резкость краёв горных областей. */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.1", UIMin="0.1"))
+float MountainMaskSharpness = 1.8f;
+
+/** Предпочитать горы ближе к центру континентов (1.0) или к берегам (0.0). */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", ClampMax="1.0"))
+float MountainContinentBias = 0.6f;
+
+/** Domain warp для маски гор (искривление горных областей). */
+UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", UIMin="0.0"))
+float MountainMaskWarpStrength = 0.2f;
+
+/** Seed для гор. */
+UPROPERTY(EditAnywhere, Category="Mountains")
+int32 MountainSeed = 5555;
 	/** Полка/шельф у берега (км, умножается на s*(1-s)). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentShelfHeightKm = 1.0f;
@@ -149,7 +239,13 @@ public:
 	FastNoiseLite* CoastalDetailNoise = nullptr;
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShelfFrequency = 1.2f;
+	FastNoiseLite* MountainRidgedNoise = nullptr;
+	FastNoiseLite* MountainRidgedWarpNoise = nullptr;
+	FastNoiseLite* MountainVolcanicNoise = nullptr;
+	FastNoiseLite* MountainMaskNoise = nullptr;
+	FastNoiseLite* MountainMaskWarpNoise = nullptr;
 
+	float GetMountainHeightCm(const FVector3f& SphereDir, const FVector3f& WarpedPos, float ContinentMask) const;
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
 	int32 ContinentShelfOctaves = 2;
 
