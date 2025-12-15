@@ -727,7 +727,7 @@ void ACubedSpherePlanetActor::BuildChunk(
 			Builder.AddTriangle(I1, I2, I3, 0);
 		}
 	}
-
+ 
 	const FRealtimeMeshSectionGroupKey GroupKey =
 		FRealtimeMeshSectionGroupKey::Create(0, FName(*FString::Printf(TEXT("Chunk_%d"), SectionId)));
 	const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
