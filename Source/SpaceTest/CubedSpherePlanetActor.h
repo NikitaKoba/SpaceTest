@@ -69,7 +69,7 @@ public:
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentGain = 0.45f;
 
-	/** Power curve applied to noise ( >1 sharpens landmasses ). */
+	/** Power curve applied to noise (>1 sharpens landmasses). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentExponent = 1.3f;
 
@@ -77,355 +77,361 @@ public:
 	UPROPERTY(EditAnywhere, Category="Continents")
 	int32 ContinentSeed = 1337;
 
-	/** Mask threshold: lower = گ+گ?گ>‘?‘?گç ‘?‘?‘?گٌ, گ?‘<‘?گç = گ?گçگ?‘?‘?گç ‘?‘?‘?گٌ. */
+	/** Land/water mask threshold (lower = more water, higher = more land). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentMaskThreshold = 0.48f;
 
-	/** گ"گ?گُ. گَگ?گ?‘'‘?گّ‘?‘' گ?‘?گّگ?گٌ‘إ گَگ?گ?‘'گٌگ?گçگ?‘'گ?گ?. 1=گ>گٌگ?گçگüگ?گ?, >1 = ‘?گçگْ‘طگç. */
+	/** Shore edge sharpness (1 = soft, >1 = sharper). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentMaskSharpness = 2.0f;
 
-	/** گًگٌ‘?گٌگ?گّ گ+گç‘?گçگ?گّ گ?گ>‘? گُگ>گّگ?گ?گ?گ?گ? گُگç‘?گç‘:گ?گ?گّ ‘?‘?‘?گّ-گ?گ?گ?گّ (0-1 گ?‘' گ?گّ‘?گَگٌ). */
+	/** Blend width for shoreline mask (0-1). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentShoreWidth = 0.08f;
 
-	/** گ?گٌگگ?گٌگü گُگ?‘?گ?گ? گ?گّ‘?گَگٌ (گç‘?گ>گٌ <0 ¢?" گ?‘<‘طگٌ‘?گ>‘?گç‘'‘?‘? گ?‘' Threshold). */
+	/** Optional lower mask override (<0 disables override). */
 	UPROPERTY(EditAnywhere, Category="Continents")
 	float ContinentLowMaskOverride = -1.f;
 
-	/** گ?گ?گُگ>گٌ‘'‘?گ?گّ domain-warp (‘?گَگ?گ>‘?گَگ? ‘?‘?گ? گٌگْگ?گٌگ+گّگç‘' گَگ?گ?‘'گٌگ?گçگ?‘'‘<). */
+	/** Domain warp strength for continent mask. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentWarpStrength = 0.25f;
 
-	/** گگّ‘?‘'گ?‘'گّ domain-warp. */
+	/** Domain warp base frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentWarpFrequency = 0.8f;
 
-	/** گ?گ?گ>-گ?گ? گٌ‘'گç‘?گّ‘إگٌگü warp (گَگّگگ?گّ‘? ‘?گ?گçگ?‘?‘?گّگç‘' ‘?گٌگ>‘?, ‘?گ?گçگ>گٌ‘طگٌگ?گّگç‘' ‘طگّ‘?‘'گ?‘'‘?). */
+	/** Domain warp octave count. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
 	int32 ContinentWarpOctaves = 2;
 
-	/** گِگٌگ>گّ گ?گçگ>گَگٌ‘: گ?گç‘'گّگ>گçگü گ? گ?‘<‘?گ?‘'‘? (گَگ?), ‘?گ?گ?گ?گگّگç‘'‘?‘? گ?گّ گ?گّ‘?گَ‘? ‘?‘?‘?گٌ. */
+	/** Extra detail height inside land (km). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentDetailHeightKm = 1.5f;
 
-	/** گگّ‘?‘'گ?‘'گّ گ?گçگ>گَگٌ‘: گ?گç‘'گّگ>گçگü. */
+	/** Detail noise frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentDetailFrequency = 3.0f;
 
-	/** گ?گَ‘'گّگ?‘< گ?گ>‘? گ?گç‘'گّگ>گçگü. */
+	/** Detail noise octaves. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
 	int32 ContinentDetailOctaves = 3;
 
-	/** Gain گ?گ>‘? گ?گç‘'گّگ>گçگü. */
+	/** Detail gain per octave. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentDetailGain = 0.5f;
 
-	/** Lacunarity گ?گ>‘? گ?گç‘'گّگ>گçگü. */
+	/** Detail lacunarity per octave. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1.0", UIMin="1.0"))
 	float ContinentDetailLacunarity = 2.3f;
 
-	/** گگّ‘?‘'گ?‘'گّ ‘?‘?گ?گّ گ+گç‘?گçگ?گّ/گْگّگ?گٌ‘:‘?گçگ?گٌگü. */
+	/** Coast breakup frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentCoastFrequency = 2.4f;
 
-	/** گےگçگْگَگ?‘?‘'‘? ‘?‘?گ?گّ گ+گç‘?گçگ?گّ/گْگّگ?گٌ‘:‘?گçگ?گٌگü. */
+	/** Coast breakup sharpness. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentCoastSharpness = 1.5f;
 
-	/** گ?گّ‘?گَگ?گ>‘?گَگ? گ+گç‘?گçگ?گ?گ?گ?گü ‘?‘?گ? گ?گ>گٌ‘?گç‘' گ?گّ گ?گّ‘?گَ‘? (0-1). */
+	/** Blend weight of coast breakup (0-1). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentCoastInfluence = 0.6f;
 
-	/** Jitter گ?گ>‘? cellular-‘?‘?گ?گّ گ+گç‘?گçگ?گ?گ?. */
+	/** Cellular jitter for coast breakup. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float ContinentCoastJitter = 0.35f;
 
-	/** گً‘?گ? گ>گ?گَگّگ>‘?گ?گ?گ?گ? ‘?گ?گ?گٌگ?گّ گ+گç‘?گçگ?گّ (گُگ?‘?گ?گ? گ?گّ‘?گَگٌ). */
+	/** Additional noise strength along shores. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentShoreNoiseStrength = 0.08f;
 
+	/** Shore noise frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShoreNoiseFrequency = 1.6f;
 
-	/** گ?گ?گ>گَگّ/‘?گçگ>‘?‘" ‘? گ+گç‘?گçگ?گّ (گَگ?, ‘?گ?گ?گ?گگّگç‘'‘?‘? گ?گّ s*(1-s)). */
+	/** Shelf height around shores (km). */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentShelfHeightKm = 1.0f;
 
+	/** Shelf noise frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShelfFrequency = 1.2f;
 
+	/** Shelf noise octaves. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1", UIMin="1"))
 	int32 ContinentShelfOctaves = 2;
 
+	/** Shelf noise gain. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ContinentShelfGain = 0.6f;
 
+	/** Shelf noise lacunarity. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="1.0", UIMin="1.0"))
 	float ContinentShelfLacunarity = 2.1f;
 
+	/** Shelf profile power. */
 	UPROPERTY(EditAnywhere, Category="Continents", meta=(ClampMin="0.1", UIMin="0.1"))
 	float ContinentShelfPower = 1.2f;
 
 	// --- Coastal variation ---
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?گّ‘?گٌگّ‘إگٌ‘? گ+گç‘?گçگ?گ?گ?گ?گü گ>گٌگ?گٌگٌ. */
+	/** Enable varying shoreline width/detail. */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation")
 	bool bEnableCoastalVariation = true;
 
-	/** گگّ‘?‘'گ?‘'گّ ‘?‘?گ?گّ گ?گ>‘? گ?گّ‘?گٌگّ‘إگٌگٌ گ+گç‘?گçگ?گّ (گَ‘?‘?گُگ?‘<گç گْگّگ>گٌگ?‘</گُگ?گ>‘?گ?‘?‘'‘?گ?گ?گّ). */
+	/** Large-scale shoreline variation frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.1", UIMin="0.1"))
 	float CoastalVariationFrequency = 1.2f;
 
-	/** گ?گّ‘?گَگ?گ>‘?گَگ? ‘?گٌگ>‘?گ?گ? گ?گّ‘?‘?گٌ‘?‘?گç‘'‘?‘? ‘?گٌ‘?گٌگ?گّ گ+گç‘?گçگ?گّ (0-1). */
+	/** Variation amount for shoreline width (0-1). */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float CoastalVariationStrength = 0.6f;
 
-	/** گگّ‘?‘'گ?‘'گّ گ?گçگ>گَگٌ‘: گ?گç‘'گّگ>گçگü گ+گç‘?گçگ?گ?گ?گ?گü گ>گٌگ?گٌگٌ (‘"‘?گ?‘?گ?‘<, گ?گçگ>گَگٌگç گْگّگ>گٌگ?‘<). */
+	/** Small-scale shoreline variation frequency. */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.1", UIMin="0.1"))
 	float CoastalDetailFrequency = 4.0f;
 
-	/** گِگٌگ>گّ گ?گçگ>گَگٌ‘: گ?گç‘'گّگ>گçگü گ+گç‘?گçگ?گ?گ?گ?گü گ>گٌگ?گٌگٌ. */
+	/** Small-scale variation strength (0-1). */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float CoastalDetailStrength = 0.3f;
 
-	/** گےگçگْگَگ?‘?‘'‘? گَ‘?گّ‘'گ? گَگ?گ?‘'گٌگ?گçگ?‘'گ?گ? (0.5=گ?‘?گ?گَگ?, 2.0=‘?‘?گçگ?گ?گç, 5.0=‘?گçگْگَگ?). */
+	/** Coast edge sharpness multiplier. */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation", meta=(ClampMin="0.1", UIMin="0.1"))
 	float CoastalEdgeSharpness = 1.5f;
 
-	/** Seed گ?گ>‘? گ?گّ‘?گٌگّ‘إگٌگٌ گ+گç‘?گçگ?گّ. */
+	/** Seed for coastal variation noise. */
 	UPROPERTY(EditAnywhere, Category="Continents|Coastal Variation")
 	int32 CoastalVariationSeed = 7777;
 
 	// --- Mountains ---
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?گçگ?گç‘?گّ‘إگٌ‘? گ?گ?‘?. */
+	/** Enable mountain generation. */
 	UPROPERTY(EditAnywhere, Category="Mountains")
 	bool bEnableMountains = true;
 
 	// Mountain distribution
 
-	/** گگّ‘?‘'گ?‘'گّ گ?گّ‘?گَگٌ ‘?گّ‘?گُ‘?گçگ?گçگ>گçگ?گٌ‘? گ?گ?‘? (گ?گ?گç گ+‘?گ?‘?‘' گ?گ?‘?‘<). */
+	/** Base frequency for mountain distribution mask. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainMaskFrequency = 0.8f;
 
-	/** گ?گَ‘'گّگ?‘< گ?گ>‘? گ?گّ‘?گَگٌ گ?گ?‘?. */
+	/** Octaves for mountain mask FBM. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="1", UIMin="1"))
 	int32 MountainMaskOctaves = 3;
 
-	/** گ?گ?‘?گ?گ? گ?گّ‘?گَگٌ (گ?‘<‘?گç = گ?گçگ?‘?‘?گç گ?گ?‘?, 0.3-0.5 گ?گُ‘'گٌگ?گّگ>‘?گ?گ?). */
+	/** Threshold for mountain mask (0-1). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float MountainMaskThreshold = 0.4f;
 
-	/** گےگçگْگَگ?‘?‘'‘? گَ‘?گّ‘'گ? گ?گ?‘?گ?‘<‘: گ?گ+گ>گّ‘?‘'گçگü. */
+	/** Mask sharpness for mountain edges. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainMaskSharpness = 1.8f;
 
-	/** گ?‘?گçگ?گُگ?‘طگٌ‘'گّ‘'‘? گ?گ?‘?‘< گ+گ>گٌگگç گَ ‘إگçگ?‘'‘?‘? گَگ?گ?‘'گٌگ?گçگ?‘'گ?گ? (1.0) گٌگ>گٌ گَ گ+گç‘?گçگ?گّگ? (0.0). */
+	/** Bias mountains toward continents (1 = inland, 0 = open ocean). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float MountainContinentBias = 0.6f;
 
-	/** Domain warp گ?گ>‘? گ?گّ‘?گَگٌ گ?گ?‘? (گٌ‘?گَ‘?گٌگ?گ>گçگ?گٌگç گ?گ?‘?گ?‘<‘: گ?گ+گ>گّ‘?‘'گçگü). */
+	/** Domain warp strength for mountain mask. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainMaskWarpStrength = 0.2f;
 
-	/** گ'گّ‘?گٌگّ‘إگٌ‘? گ?‘<‘?گ?‘'‘< گ?گ?‘? (0=گ?‘?گç گ?گ?گٌگ?گّگَگ?گ?‘<گç, 1=‘?گٌگ>‘?گ?گّ‘? گ?گّ‘?گٌگّ‘إگٌ‘?). */
+	/** Random mountain height variation factor (0-1). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float MountainHeightVariation = 0.6f;
 
-	/** گگّ‘?‘'گ?‘'گّ گ?گّ‘?گٌگّ‘إگٌگٌ گ?‘<‘?گ?‘'‘<. */
+	/** Frequency for height variation noise. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Distribution", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainHeightVariationFrequency = 0.5f;
 
 	// Ridged mountains
 
-	/** گ?گّگَ‘?گٌگ?گّگ>‘?گ?گّ‘? گ?‘<‘?گ?‘'گّ ‘?گَگ>گّگ?‘طگّ‘'‘<‘: گ?گ?‘? (گَگ?). */
+	/** Ridged mountain height (km). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainRidgedHeightKm = 4.5f;
 
-	/** گگّ‘?‘'گ?‘'گّ گ?‘?گ?گ?گ?گ?‘<‘: ‘:‘?گçگ+‘'گ?گ?. گ'‘<‘?گç = گ+گ?گ>‘?‘?گç گ?گçگ>گَگٌ‘: ‘:‘?گçگ+‘'گ?گ?. */
+	/** Ridged base frequency. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainRidgedFrequency = 2.0f;
 
-	/** گ?گَ‘'گّگ?‘< گ?گ>‘? گ?گç‘'گّگ>گٌگْگّ‘إگٌگٌ ‘:‘?گçگ+‘'گ?گ?. */
+	/** Ridged octaves. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="1", UIMin="1"))
 	int32 MountainRidgedOctaves = 4;
 
-	/** گےگçگْگَگ?‘?‘'‘? گ?‘?گçگ+گ?گçگü (گ?‘<‘?گç = گ?‘?‘'‘?گçگç گُگٌگَگٌ). */
+	/** Ridged shaping power. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.5", UIMin="0.5"))
 	float MountainRidgedSharpness = 2.5f;
 
-	/** Gain گ?گ>‘? ridged noise. */
+	/** Ridged gain per octave. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainRidgedGain = 0.5f;
 
-	/** Lacunarity گ?گ>‘? ridged noise. */
+	/** Ridged lacunarity per octave. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="1.0", UIMin="1.0"))
 	float MountainRidgedLacunarity = 2.2f;
 
-	/** Domain warp گ?گ>‘? گٌ‘?گَ‘?گٌگ?گ>گçگ?گٌ‘? ‘:‘?گçگ+‘'گ?گ?. */
+	/** Domain warp strength for ridged pattern. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainRidgedWarpStrength = 0.15f;
 
-	/** گگّ‘?‘'گ?‘'گّ domain warp گ?گ>‘? ‘:‘?گçگ+‘'گ?گ?. */
+	/** Domain warp frequency for ridged pattern. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainRidgedWarpFrequency = 1.5f;
 
 	// Volcanic peaks
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?‘?گ>گَگّگ?گٌ‘طگç‘?گَگٌگç گَگ?گ?‘?‘?‘<. */
+	/** Enable volcanic peak noise. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Volcanic")
 	bool bEnableVolcanicPeaks = true;
 
-	/** گ?گّگَ‘?گٌگ?گّگ>‘?گ?گّ‘? گ?‘<‘?گ?‘'گّ گ?‘?گ>گَگّگ?گ?گ? (گَگ?). */
+	/** Volcanic cone height (km). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainVolcanicHeightKm = 3.0f;
 
-	/** گگّ‘?‘'گ?‘'گّ گ?‘?گ>گَگّگ?گٌ‘طگç‘?گَگٌ‘: ‘'گ?‘طگçگَ. */
+	/** Volcanic cell frequency. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainVolcanicFrequency = 1.2f;
 
-	/** گےگّگ?گٌ‘?‘? گ?‘?گ?گ?گ?گّگ?گٌ‘? گ?‘?گ>گَگّگ?گّ (گ?گ>گٌ‘?گç‘' گ?گّ گَ‘?‘?‘'گٌگْگ?‘?). */
+	/** Volcanic cone radius factor. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="0.5", UIMin="0.5"))
 	float MountainVolcanicRadius = 2.0f;
 
-	/** گےگçگْگَگ?‘?‘'‘? گَگ?گ?‘?‘?گّ گ?‘?گ>گَگّگ?گّ. */
+	/** Volcanic cone sharpness. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Volcanic", meta=(ClampMin="1.0", UIMin="1.0"))
 	float MountainVolcanicSharpness = 3.0f;
 
 	// Erosion & detail
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? ‘?‘?گ?گْگٌ‘? ‘?گَگ>گ?گ?گ?گ?. */
+	/** Enable erosion/terrace details. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Erosion")
 	bool bEnableMountainErosion = true;
 
-	/** گِگٌگ>گّ ‘?‘?گ?گْگٌگٌ (‘'گç‘?‘?گّ‘?‘< گ?گّ ‘?گَگ>گ?گ?گّ‘:). */
+	/** Erosion influence (0-1). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainErosionStrength = 0.4f;
 
-	/** گگّ‘?‘'گ?‘'گّ ‘?‘?گ?گْگٌگ?گ?گ?‘<‘: گ?گç‘'گّگ>گçگü. */
+	/** Erosion base frequency. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainErosionFrequency = 8.0f;
 
-	/** گ?گَ‘'گّگ?‘< گ?گ>‘? ‘?‘?گ?گْگٌگٌ. */
+	/** Erosion octaves. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="1", UIMin="1"))
 	int32 MountainErosionOctaves = 3;
 
-	/** گِگَگّگ>گٌ‘?‘'‘<گç گ?گç‘'گّگ>گٌ گ?گّ ‘?گَگ>گ?گ?گّ‘: (گَگ?). */
+	/** Rocky detail height (km). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="0.0", UIMin="0.0"))
 	float MountainRockyDetailHeightKm = 0.15f;
 
-	/** گگّ‘?‘'گ?‘'گّ ‘?گَگّگ>گٌ‘?‘'‘<‘: گ?گç‘'گّگ>گçگü. */
+	/** Rocky detail frequency. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Erosion", meta=(ClampMin="1.0", UIMin="1.0"))
 	float MountainRockyDetailFrequency = 12.0f;
 
 	// Foothills
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گُ‘?گçگ?گ?گ?‘?‘?‘?. */
+	/** Enable foothills blending. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Foothills")
 	bool bEnableFoothills = true;
 
-	/** گ'‘<‘?گ?‘'گّ گُ‘?گçگ?گ?گ?‘?گٌگü (گَگ?). */
+	/** Foothill height (km). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Foothills", meta=(ClampMin="0.0", UIMin="0.0"))
 	float FoothillsHeightKm = 0.8f;
 
-	/** گگّ‘?‘'گ?‘'گّ ‘:گ?گ>گ?گ?گ? گ? گُ‘?گçگ?گ?گ?‘?‘?‘?‘:. */
+	/** Foothill noise frequency. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Foothills", meta=(ClampMin="0.1", UIMin="0.1"))
 	float FoothillsFrequency = 4.0f;
 
-	/** گًگٌ‘?گٌگ?گّ گْگ?گ?‘< گُ‘?گçگ?گ?گ؟‘?گٌگü (0-1 گ?‘' گ?گّ‘?گَگٌ گ?گ?‘?). */
+	/** Blend width from flats to foothills (0-1). */
 	UPROPERTY(EditAnywhere, Category="Mountains|Foothills", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float FoothillsWidth = 0.3f;
 
-	/** Seed گ?گ>‘? گ?گ?‘?. */
+	/** Seed for mountain noises. */
 	UPROPERTY(EditAnywhere, Category="Mountains")
 	int32 MountainSeed = 5555;
 
 	// --- Points of interest ---
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?گçگ?گç‘?گّ‘إگٌ‘? ‘?گ?گٌگَگّگ>‘?گ?‘<‘: گ?گçگ?گ>گ?گ?گٌ‘طگç‘?گَگٌ‘: گ?گ+‘?گçگَ‘'گ?گ?. */
+	/** Enable POI features (volcanoes, craters, canyon). */
 	UPROPERTY(EditAnywhere, Category="POI")
 	bool bEnablePOI = true;
 
-	/** Seed گ?گ>‘? گ?گçگ?گç‘?گّ‘إگٌگٌ گُگ?گْگٌ‘إگٌگü POI. */
+	/** Seed for POI placement. */
 	UPROPERTY(EditAnywhere, Category="POI")
 	int32 POISeed = 9999;
 
 	// Super volcanoes
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?گçگ?گç‘?گّ‘إگٌ‘? ‘?‘?گُگç‘?گ?‘?گ>گَگّگ?گ?گ?. */
+	/** Enable super volcano placement. */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano")
 	bool bEnableSuperVolcanoes = true;
 
-	/** گ?گ?گ>گٌ‘طگç‘?‘'گ?گ? ‘?‘?گُگç‘?گ?‘?گ>گَگّگ?گ?گ? گ?گّ گُگ>گّگ?گç‘'گç. */
+	/** Number of super volcanoes. */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="0", ClampMax="5"))
 	int32 SuperVolcanoCount = 1;
 
-	/** گ'‘<‘?گ?‘'گّ ‘?‘?گُگç‘?گ?‘?گ>گَگّگ?گّ (گَگ?). */
+	/** Super volcano height (km). */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="0.0", UIMin="0.0"))
 	float SuperVolcanoHeightKm = 15.0f;
 
-	/** گےگّگ?گٌ‘?‘? گ?‘?گ?گ?گ?گّگ?گٌ‘? ‘?‘?گُگç‘?گ?‘?گ>گَگّگ?گّ (گَگ?). */
+	/** Super volcano radius (km). */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="10.0", UIMin="10.0"))
 	float SuperVolcanoRadiusKm = 300.0f;
 
-	/** گ?‘?‘?‘'گٌگْگ?گّ ‘?گَگ>گ?گ?گ?گ? ‘?‘?گُگç‘?گ?‘?گ>گَگّگ?گّ. */
+	/** Caldera cone steepness power. */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="1.0", UIMin="1.0"))
 	float SuperVolcanoSteepness = 2.5f;
 
-	/** گ"گ>‘?گ+گٌگ?گّ گَگّگ>‘?گ?گç‘?‘< گ?گّ گ?گç‘?‘?گٌگ?گç (گَگ?). */
+	/** Caldera depth (km). */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="0.0", UIMin="0.0"))
 	float SuperVolcanoCalderaDepthKm = 1.5f;
 
-	/** گےگّگ?گٌ‘?‘? گَگّگ>‘?گ?گç‘?‘< (گَگ?). */
+	/** Caldera radius (km). */
 	UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="1.0", UIMin="1.0"))
 	float SuperVolcanoCalderaRadiusKm = 40.0f;
 
 	// Impact craters
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?گçگ?گç‘?گّ‘إگٌ‘? ‘?گ?گّ‘?گ?‘<‘: گَ‘?گّ‘'گç‘?گ?گ?. */
+	/** Enable impact craters. */
 	UPROPERTY(EditAnywhere, Category="POI|ImpactCraters")
 	bool bEnableImpactCraters = true;
 
-	/** گ?گ?گ>گٌ‘طگç‘?‘'گ?گ? گَ‘?‘?گُگ?‘<‘: گَ‘?گّ‘'گç‘?گ?گ?. */
+	/** Number of impact craters. */
 	UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="0", ClampMax="10"))
 	int32 ImpactCraterCount = 3;
 
-	/** گ"گ>‘?گ+گٌگ?گّ گَ‘?گّ‘'گç‘?گّ (گَگ?). */
+	/** Crater depth (km). */
 	UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ImpactCraterDepthKm = 3.0f;
 
-	/** گےگّگ?گٌ‘?‘? گَ‘?گّ‘'گç‘?گّ (گَگ?). */
+	/** Crater radius (km). */
 	UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="10.0", UIMin="10.0"))
 	float ImpactCraterRadiusKm = 150.0f;
 
-	/** گ'‘<‘?گ?‘'گّ گ?گّگ>گّ گ?گ?گَ‘?‘?گ? گَ‘?گّ‘'گç‘?گّ (گَگ?). */
+	/** Rim height (km). */
 	UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="0.0", UIMin="0.0"))
 	float ImpactCraterRimHeightKm = 0.8f;
 
-	/** گًگٌ‘?گٌگ?گّ گ?گّگ>گّ (گَگ?). */
+	/** Rim width (km). */
 	UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="1.0", UIMin="1.0"))
 	float ImpactCraterRimWidthKm = 30.0f;
 
 	// Grand canyon
 
-	/** گ'گَگ>‘?‘طگٌ‘'‘? گ?گçگ?گç‘?گّ‘إگٌ‘? گ?گٌگ?گّگ?‘'‘?گَگ?گ?گ? گَگّگ?‘?گ?گ?گّ. */
+	/** Enable grand canyon feature. */
 	UPROPERTY(EditAnywhere, Category="POI|GrandCanyon")
 	bool bEnableGrandCanyon = true;
 
-	/** گ"گ>‘?گ+گٌگ?گّ گَگّگ?‘?گ?گ?گّ (گَگ?). */
+	/** Canyon depth (km). */
 	UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="0.0", UIMin="0.0"))
 	float CanyonDepthKm = 5.0f;
 
-	/** گًگٌ‘?گٌگ?گّ گَگّگ?‘?گ?گ?گّ (گَگ?). */
+	/** Canyon width (km). */
 	UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="10.0", UIMin="10.0"))
 	float CanyonWidthKm = 100.0f;
 
-	/** گ"گ>گٌگ?گّ گَگّگ?‘?گ?گ?گّ (گ?‘?گّگ?‘?‘?‘< گُگ? ‘?گَگ?گّ‘'گ?‘?‘?). */
+	/** Canyon arc length along globe (degrees). */
 	UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="5.0", ClampMax="180.0"))
 	float CanyonLengthDegrees = 60.0f;
 
-	/** گ?گْگ?گٌگ>گٌ‘?‘'گ?‘?‘'‘? گَگّگ?‘?گ?گ?گّ. */
+	/** Canyon wiggle amplitude (0-1). */
 	UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float CanyonWindiness = 0.3f;
 
