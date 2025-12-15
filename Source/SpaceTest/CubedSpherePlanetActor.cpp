@@ -1101,6 +1101,9 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	const int32 BootstrapIndex = FMath::Clamp(BootstrapLODLevel, 0, LodList.Num() - 1);
 
 	LODSystem = MakeUnique<FCubedSphereLODSystem>(*this);
-	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), LodList, BootstrapIndex, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier);
+	const float RangeCm = ActiveRangeKm * 100000.0f;
+	const float BufferCm = ActiveRangeBufferKm * 100000.0f;
+	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
+	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), LodList, BootstrapIndex, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, HyperThreshold, HyperdriveRangeMultiplier);
 	LODSystem->Tick(0.0f);
 }

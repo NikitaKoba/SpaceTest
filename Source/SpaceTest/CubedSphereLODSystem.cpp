@@ -50,7 +50,7 @@ void FCubedSphereLODSystem::Shutdown()
 	bBootstrapping = false;
 }
 
-void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, const TArray<int32>& InLodVerticesPerEdge, int32 BootstrapLodIndex, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float InEvaluationInterval, float TargetSSE, float HysteresisPixels, float InErrorScale)
+void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, const TArray<int32>& InLodVerticesPerEdge, int32 BootstrapLodIndex, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float InEvaluationInterval, float TargetSSE, float HysteresisPixels, float InErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier)
 {
 	Shutdown();
 
@@ -65,6 +65,14 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	WarmupBudget = FMath::Max(1, WarmupChunksPerFrame);
 	ErrorScale = FMath::Max(0.01f, InErrorScale);
 	MaxConcurrentBuilds = WarmupBudget;
+	bStreamingEnabled = bEnableStreaming;
+	BaseActiveRangeCm = InBaseActiveRangeCm;
+	ActiveRangeBufferCm = InActiveBufferCm;
+	HyperdriveSpeedThreshold = InHyperSpeedThreshold;
+	HyperdriveRangeMultiplier = FMath::Max(1.0f, InHyperRangeMultiplier);
+	bHasPrevCam = false;
+	BootstrapLOD = FMath::Clamp(BootstrapLodIndex, 0, LodVertices.Num() - 1);
+	bBootstrapping = true;
 
 	LodVertices = InLodVerticesPerEdge;
 	LodErrorsCm.Reset();
@@ -98,6 +106,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 				Chunk.FaceNormal = Face.Normal;
 				Chunk.FaceRight = Face.Right;
 				Chunk.FaceUp = Face.Up;
+				Chunk.bIsActive = !bStreamingEnabled;
 
 				Chunk.CenterDir = ACubedSpherePlanetActor::CubeToSphere(CubePoint).GetSafeNormal();
 				Chunk.LocalCenter = FVector(Chunk.CenterDir * PlanetRadiusCm);
@@ -125,7 +134,10 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 		LodErrorsCm.Add(Error);
 	}
 
-	EnqueueInitialBuilds(FMath::Clamp(BootstrapLodIndex, 0, LodVertices.Num() - 1));
+	if (!bStreamingEnabled)
+	{
+		EnqueueInitialBuilds(BootstrapLOD);
+	}
 }
 
 void FCubedSphereLODSystem::EnqueueInitialBuilds(int32 BootstrapLodIndex)
@@ -148,6 +160,45 @@ float FCubedSphereLODSystem::ComputeScreenSpaceError(const FChunkState& Chunk, i
 
 	const float ErrorCm = LodErrorsCm[LodIndex] * ActorScale;
 	return (ErrorCm / DistanceCm) * PixelsPerCm;
+}
+
+void FCubedSphereLODSystem::UpdateActiveChunks(const FVector& CamLocation, float DeltaSeconds, float CameraSpeedCmPerSec, const FTransform& PlanetTransform, float ActorScale, int32 BootstrapLodIndex)
+{
+	if (!Mesh || !Owner || !bStreamingEnabled)
+	{
+		return;
+	}
+
+	const float SpeedFactor = (HyperdriveSpeedThreshold > 0.0f) ? FMath::Clamp(CameraSpeedCmPerSec / HyperdriveSpeedThreshold, 0.0f, 10.0f) : 0.0f;
+	const float RangeScale = 1.0f + SpeedFactor * (HyperdriveRangeMultiplier - 1.0f);
+	const float ActivateRange = BaseActiveRangeCm * RangeScale;
+	const float DeactivateRange = ActivateRange + ActiveRangeBufferCm;
+
+	for (int32 Index = 0; Index < Chunks.Num(); ++Index)
+	{
+		FChunkState& Chunk = Chunks[Index];
+
+		const FVector WorldCenter = PlanetTransform.TransformPosition(Chunk.LocalCenter);
+		const float Distance = FVector::Distance(CamLocation, WorldCenter) - Chunk.BoundingRadiusCm * ActorScale;
+
+		const bool bShouldActivate = Distance <= ActivateRange;
+		const bool bShouldDeactivate = Distance > DeactivateRange;
+
+		if (!Chunk.bIsActive && bShouldActivate)
+		{
+			Chunk.bIsActive = true;
+			Chunk.CurrentLOD = INDEX_NONE;
+			Chunk.PendingLOD = INDEX_NONE;
+			EnqueueBuild(Index, BootstrapLodIndex);
+		}
+		else if (Chunk.bIsActive && bShouldDeactivate)
+		{
+			Chunk.bIsActive = false;
+			Chunk.PendingLOD = INDEX_NONE;
+			Chunk.CurrentLOD = INDEX_NONE;
+			Mesh->RemoveSectionGroup(Chunk.GroupKey);
+		}
+	}
 }
 
 void FCubedSphereLODSystem::EvaluateLOD()
@@ -189,6 +240,10 @@ void FCubedSphereLODSystem::EvaluateLOD()
 	for (int32 Index = 0; Index < Chunks.Num(); ++Index)
 	{
 		FChunkState& Chunk = Chunks[Index];
+		if (bStreamingEnabled && !Chunk.bIsActive)
+		{
+			continue;
+		}
 
 		const FVector WorldCenter = PlanetTransform.TransformPosition(Chunk.LocalCenter);
 		float Distance = FVector::Distance(CamLocation, WorldCenter) - Chunk.BoundingRadiusCm * ActorScale;
@@ -273,6 +328,10 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 		{
 			continue;
 		}
+		if (bStreamingEnabled && !Chunk.bIsActive)
+		{
+			continue;
+		}
 
 		if (InFlightBuilds >= MaxConcurrentBuilds)
 		{
@@ -317,6 +376,10 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds()
 		{
 			continue;
 		}
+		if (bStreamingEnabled && !Chunk.bIsActive)
+		{
+			continue;
+		}
 
 		if (Chunk.CurrentLOD == INDEX_NONE)
 		{
@@ -339,6 +402,34 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 	{
 		return;
 	}
+
+	UWorld* World = Owner->GetWorld();
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	if (!PC)
+	{
+		return;
+	}
+
+	FVector CamLocation;
+	FRotator CamRotation;
+	PC->GetPlayerViewPoint(CamLocation, CamRotation);
+
+	float CameraSpeed = 0.0f;
+	if (APawn* Pawn = PC->GetPawn())
+	{
+		CameraSpeed = Pawn->GetVelocity().Size();
+	}
+	if (CameraSpeed <= KINDA_SMALL_NUMBER && bHasPrevCam)
+	{
+		CameraSpeed = FVector::Distance(CamLocation, LastCamLocation) / FMath::Max(DeltaSeconds, KINDA_SMALL_NUMBER);
+	}
+	LastCamLocation = CamLocation;
+	bHasPrevCam = true;
+
+	const FTransform PlanetTransform = Owner->GetActorTransform();
+	const float ActorScale = PlanetTransform.GetScale3D().GetMax();
+
+	UpdateActiveChunks(CamLocation, DeltaSeconds, CameraSpeed, PlanetTransform, ActorScale, BootstrapLOD);
 
 	EvaluationAccumulator += DeltaSeconds;
 	if (EvaluationAccumulator >= EvaluationIntervalSeconds)

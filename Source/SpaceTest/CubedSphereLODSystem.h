@@ -17,7 +17,7 @@ class FCubedSphereLODSystem
 public:
 	explicit FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner);
 
-	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, const TArray<int32>& InLodVerticesPerEdge, int32 BootstrapLodIndex, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale);
+	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, const TArray<int32>& InLodVerticesPerEdge, int32 BootstrapLodIndex, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier);
 	void Tick(float DeltaSeconds);
 	void Shutdown();
 
@@ -44,6 +44,7 @@ private:
 		int32 CurrentLOD = INDEX_NONE;
 		int32 PendingLOD = INDEX_NONE;
 		float LastSSE = 0.0f;
+		bool bIsActive = true;
 	};
 
 	struct FChunkBuildRequest
@@ -84,6 +85,15 @@ private:
 	int32 MaxConcurrentBuilds = 4;
 	volatile int32 InFlightBuilds = 0;
 	bool bBootstrapping = false;
+	bool bStreamingEnabled = false;
+	float BaseActiveRangeCm = 0.0f;
+	float ActiveRangeBufferCm = 0.0f;
+	float HyperdriveSpeedThreshold = 0.0f;
+	float HyperdriveRangeMultiplier = 1.0f;
+	int32 BootstrapLOD = 0;
+
+	FVector LastCamLocation = FVector::ZeroVector;
+	bool bHasPrevCam = false;
 
 	void EnqueueInitialBuilds(int32 BootstrapLodIndex);
 	void EvaluateLOD();
@@ -91,4 +101,5 @@ private:
 	void ProcessCompletedBuilds();
 	void EnqueueBuild(int32 ChunkIndex, int32 LodIndex);
 	float ComputeScreenSpaceError(const FChunkState& Chunk, int32 LodIndex, float DistanceCm, float PixelsPerCm, float ActorScale) const;
+	void UpdateActiveChunks(const FVector& CamLocation, float DeltaSeconds, float CameraSpeedCmPerSec, const FTransform& PlanetTransform, float ActorScale, int32 BootstrapLodIndex);
 };

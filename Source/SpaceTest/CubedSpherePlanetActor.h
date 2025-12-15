@@ -90,6 +90,26 @@ public:
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.01"))
 	float GeometricErrorMultiplier = 1.0f;
 
+	/** Enable distance-based streaming: только чанки в радиусе активны, остальные выгружаются. */
+	UPROPERTY(EditAnywhere, Category="Streaming")
+	bool bEnableChunkStreaming = true;
+
+	/** Базовый радиус активации чанков вокруг камеры, км. */
+	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="1.0"))
+	float ActiveRangeKm = 400.0f;
+
+	/** Дополнительный буфер для деактивации (гистерезис), км. */
+	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.0"))
+	float ActiveRangeBufferKm = 200.0f;
+
+	/** Скорость (км/с), с которой считаем, что включен гиперрежим, радиус масштабируется. */
+	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.1"))
+	float HyperdriveSpeedThresholdKmPerSec = 30.0f;
+
+	/** Множитель радиуса при скоростях >= HyperdriveSpeedThresholdKmPerSec. */
+	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="1.0"))
+	float HyperdriveRangeMultiplier = 3.0f;
+
 	// --- Continents ---
 
 	/** Enable displacement for large-scale continents. */
