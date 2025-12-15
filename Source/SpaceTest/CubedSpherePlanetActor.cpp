@@ -39,7 +39,7 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 	RuntimeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	RuntimeMesh->SetGenerateOverlapEvents(false);
 
-	LODVerticesPerEdge = {9, 17, VerticesPerChunkEdge};
+	LODVerticesPerEdge = {9, 17, 33, 65};
 }
 
 void ACubedSpherePlanetActor::BeginPlay()

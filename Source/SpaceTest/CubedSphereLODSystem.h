@@ -91,6 +91,7 @@ private:
 	float HyperdriveSpeedThreshold = 0.0f;
 	float HyperdriveRangeMultiplier = 1.0f;
 	int32 BootstrapLOD = 0;
+	int32 MinLOD = 0;
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	bool bHasPrevCam = false;

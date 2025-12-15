@@ -72,6 +72,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	HyperdriveRangeMultiplier = FMath::Max(1.0f, InHyperRangeMultiplier);
 	bHasPrevCam = false;
 	BootstrapLOD = FMath::Clamp(BootstrapLodIndex, 0, LodVertices.Num() - 1);
+	MinLOD = 0;
 	bBootstrapping = true;
 
 	LodVertices = InLodVerticesPerEdge;
@@ -134,10 +135,8 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 		LodErrorsCm.Add(Error);
 	}
 
-	if (!bStreamingEnabled)
-	{
-		EnqueueInitialBuilds(BootstrapLOD);
-	}
+	const int32 InitLOD = bStreamingEnabled ? MinLOD : BootstrapLOD;
+	EnqueueInitialBuilds(InitLOD);
 }
 
 void FCubedSphereLODSystem::EnqueueInitialBuilds(int32 BootstrapLodIndex)
@@ -182,23 +181,22 @@ void FCubedSphereLODSystem::UpdateActiveChunks(const FVector& CamLocation, float
 		const float Distance = FVector::Distance(CamLocation, WorldCenter) - Chunk.BoundingRadiusCm * ActorScale;
 
 		const bool bShouldActivate = Distance <= ActivateRange;
-		const bool bShouldDeactivate = Distance > DeactivateRange;
+	const bool bShouldDeactivate = Distance > DeactivateRange;
 
-		if (!Chunk.bIsActive && bShouldActivate)
+	if (!Chunk.bIsActive && bShouldActivate)
+	{
+		Chunk.bIsActive = true;
+		Chunk.PendingLOD = INDEX_NONE;
+	}
+	else if (Chunk.bIsActive && bShouldDeactivate)
+	{
+		Chunk.bIsActive = false;
+		if (Chunk.CurrentLOD != MinLOD || Chunk.PendingLOD != MinLOD)
 		{
-			Chunk.bIsActive = true;
-			Chunk.CurrentLOD = INDEX_NONE;
-			Chunk.PendingLOD = INDEX_NONE;
-			EnqueueBuild(Index, BootstrapLodIndex);
-		}
-		else if (Chunk.bIsActive && bShouldDeactivate)
-		{
-			Chunk.bIsActive = false;
-			Chunk.PendingLOD = INDEX_NONE;
-			Chunk.CurrentLOD = INDEX_NONE;
-			Mesh->RemoveSectionGroup(Chunk.GroupKey);
+			EnqueueBuild(Index, MinLOD);
 		}
 	}
+}
 }
 
 void FCubedSphereLODSystem::EvaluateLOD()
@@ -328,7 +326,9 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 		{
 			continue;
 		}
-		if (bStreamingEnabled && !Chunk.bIsActive)
+		const bool bIsInactive = bStreamingEnabled && !Chunk.bIsActive;
+		const bool bIsDegradeToMin = Request.LodIndex <= MinLOD;
+		if (bIsInactive && !bIsDegradeToMin)
 		{
 			continue;
 		}
@@ -376,7 +376,7 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds()
 		{
 			continue;
 		}
-		if (bStreamingEnabled && !Chunk.bIsActive)
+		if (bStreamingEnabled && !Chunk.bIsActive && Result.LodIndex > MinLOD)
 		{
 			continue;
 		}
