@@ -1,0 +1,82 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Containers/Queue.h"
+#include "RealtimeMeshSimple.h"
+
+class ACubedSpherePlanetActor;
+
+namespace RealtimeMesh
+{
+	struct FRealtimeMeshStreamSet;
+}
+
+class FCubedSphereLODSystem
+{
+public:
+	explicit FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner);
+
+	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, const TArray<int32>& InLodVerticesPerEdge, int32 BootstrapLodIndex, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale);
+	void Tick(float DeltaSeconds);
+	void Shutdown();
+
+private:
+	struct FChunkState
+	{
+		int32 FaceIndex = 0;
+		int32 ChunkX = 0;
+		int32 ChunkY = 0;
+		int32 SectionId = 0;
+
+		FVector FaceNormal;
+		FVector FaceRight;
+		FVector FaceUp;
+
+		FVector3f CenterDir = FVector3f::ZeroVector;
+		FVector LocalCenter = FVector::ZeroVector;
+		float PatchSizeCm = 0.0f;
+		float BoundingRadiusCm = 0.0f;
+
+		FRealtimeMeshSectionGroupKey GroupKey;
+		FRealtimeMeshSectionKey SectionKey;
+
+		int32 CurrentLOD = INDEX_NONE;
+		int32 PendingLOD = INDEX_NONE;
+		float LastSSE = 0.0f;
+	};
+
+	struct FChunkBuildRequest
+	{
+		int32 ChunkIndex = INDEX_NONE;
+		int32 LodIndex = INDEX_NONE;
+	};
+
+	ACubedSpherePlanetActor* Owner = nullptr;
+	URealtimeMeshSimple* Mesh = nullptr;
+
+	TArray<int32> LodVertices;
+	TArray<float> LodErrorsCm;
+	TArray<FChunkState> Chunks;
+	TQueue<FChunkBuildRequest> BuildQueue;
+
+	int32 ChunksPerFace = 0;
+	float PlanetRadiusCm = 0.0f;
+	float ChunkSize = 0.0f;
+	float MaxPatchSizeCm = 0.0f;
+
+	float EvaluationAccumulator = 0.0f;
+	float EvaluationIntervalSeconds = 0.1f;
+	float TargetErrorPixels = 3.0f;
+	float ErrorHysteresisPixels = 0.5f;
+	float ErrorScale = 1.0f;
+
+	int32 FrameBudget = 2;
+	int32 WarmupBudget = 12;
+	bool bBootstrapping = false;
+
+	void EnqueueInitialBuilds(int32 BootstrapLodIndex);
+	void EvaluateLOD();
+	void ProcessBuildQueue(int32 Budget);
+	void EnqueueBuild(int32 ChunkIndex, int32 LodIndex);
+	float ComputeScreenSpaceError(const FChunkState& Chunk, int32 LodIndex, float DistanceCm, float PixelsPerCm, float ActorScale) const;
+};

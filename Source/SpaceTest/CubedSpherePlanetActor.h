@@ -2,12 +2,17 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "CubedSphereLODSystem.h"
 #include "CubedSpherePlanetActor.generated.h"
 
 class FastNoiseLite;
 class URealtimeMeshComponent;
 class URealtimeMeshSimple;
 class UMaterialInterface;
+namespace RealtimeMesh
+{
+	struct FRealtimeMeshStreamSet;
+}
 
 /**
  * Cubed-sphere planet built from RuntimeMeshComponent chunks.
@@ -42,6 +47,48 @@ public:
 	/** Optional material applied per chunk section. */
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
+
+	// --- LOD ---
+
+	/** Enable SSE-driven LOD system (runtime only). */
+	UPROPERTY(EditAnywhere, Category="LOD")
+	bool bEnableLODSystem = true;
+
+	/** Ordered list of vertex counts per chunk edge for LODs (low->high). Highest will be forced to include VerticesPerChunkEdge. */
+	UPROPERTY(EditAnywhere, Category="LOD")
+	TArray<int32> LODVerticesPerEdge;
+
+	/** LOD index used for construction preview (low = faster). */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0"))
+	int32 PreviewLODLevel = 0;
+
+	/** LOD level to bootstrap at BeginPlay before SSE refines. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0"))
+	int32 BootstrapLODLevel = 0;
+
+	/** Target SSE in pixels; chunks try to raise LOD until below this. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0"))
+	float ScreenSpaceErrorTarget = 3.0f;
+
+	/** Hysteresis around the target SSE to avoid LOD flicker. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0"))
+	float ScreenSpaceErrorHysteresis = 0.5f;
+
+	/** How many chunk rebuilds are allowed per frame after warmup. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="1"))
+	int32 MaxChunksPerFrame = 2;
+
+	/** Chunk rebuild budget while the initial low LOD is coming in. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="1"))
+	int32 WarmupChunksPerFrame = 12;
+
+	/** Seconds between SSE evaluations. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.01"))
+	float LodEvaluationInterval = 0.1f;
+
+	/** Scales computed geometric error per LOD (bigger = more aggressive upgrades). */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.01"))
+	float GeometricErrorMultiplier = 1.0f;
 
 	// --- Continents ---
 
@@ -436,19 +483,32 @@ public:
 	float CanyonWindiness = 0.3f;
 
 	virtual void OnConstruction(const FTransform& Transform) override;
+	virtual void Tick(float DeltaSeconds) override;
 
 protected:
 	virtual void BeginPlay() override;
 
 private:
+	friend class FCubedSphereLODSystem;
+
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	USceneComponent* SceneRoot = nullptr;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	URealtimeMeshComponent* RuntimeMesh = nullptr;
 
+	TUniquePtr<FCubedSphereLODSystem> LODSystem;
+
 	void BuildPlanetMesh();
-	void BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm);
+	void BuildPlanetPreview(int32 LodIndex);
+	URealtimeMeshSimple* ResetRuntimeMesh();
+	void InitializeNoise();
+	void StartLODSystem();
+
+	TArray<int32> GetOrderedLODVertices() const;
+	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
+
+	void BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
 	static FVector3f CubeToSphere(const FVector3f& P);
 	float GetPlanetRadiusCm() const;
 	float GetContinentHeightCm(const FVector3f& SphereDir) const;

@@ -1,10 +1,11 @@
 #include "CubedSpherePlanetActor.h"
 
+#include "FastNoiseLite.h"
+#include "CubedSphereLODSystem.h"
 #include "Components/SceneComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
-#include "FastNoiseLite.h"
 
 namespace
 {
@@ -27,7 +28,8 @@ namespace
 
 ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
 
 	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
 	SetRootComponent(SceneRoot);
@@ -36,18 +38,30 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 	RuntimeMesh->SetupAttachment(SceneRoot);
 	RuntimeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	RuntimeMesh->SetGenerateOverlapEvents(false);
+
+	LODVerticesPerEdge = {9, 17, VerticesPerChunkEdge};
 }
 
 void ACubedSpherePlanetActor::BeginPlay()
 {
 	Super::BeginPlay();
-	BuildPlanetMesh();
+	StartLODSystem();
 }
 
 void ACubedSpherePlanetActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	BuildPlanetMesh();
+}
+
+void ACubedSpherePlanetActor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (LODSystem)
+	{
+		LODSystem->Tick(DeltaSeconds);
+	}
 }
 
 float ACubedSpherePlanetActor::GetPlanetRadiusCm() const
@@ -619,6 +633,106 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	return totalHeight;
 }
 
+RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
+	const FVector& FaceNormal,
+	const FVector& FaceRight,
+	const FVector& FaceUp,
+	int32 ChunkX,
+	int32 ChunkY,
+	float HalfExtent,
+	float ChunkSize,
+	float RadiusCm,
+	int32 VerticesPerEdge) const
+{
+	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
+	const int32 QuadEdge = VertEdge - 1;
+	const float Step = ChunkSize / QuadEdge;
+
+	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
+	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
+	Builder.EnableTangents();
+	Builder.EnableTexCoords();
+	Builder.EnablePolyGroups();
+
+	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
+
+	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
+	{
+		const FVector3f NDir = Dir.GetSafeNormal();
+		const float H = GetContinentHeightCm(NDir);
+		return NDir * (RadiusCm + H);
+	};
+
+	auto RotateDirAroundTangent = [&](const FVector3f& Dir, const FVector3f& Tangent, float AngleRad) -> FVector3f
+	{
+		float s, c;
+		FMath::SinCos(&s, &c, AngleRad);
+		return (Dir * c + Tangent * s).GetSafeNormal();
+	};
+
+	for (int32 Y = 0; Y < VertEdge; ++Y)
+	{
+		const float V = -HalfExtent + (ChunkY * ChunkSize) + Y * Step;
+
+		for (int32 X = 0; X < VertEdge; ++X)
+		{
+			const float U = -HalfExtent + (ChunkX * ChunkSize) + X * Step;
+
+			const FVector3f CubePoint =
+				FVector3f(FaceNormal) +
+				FVector3f(FaceRight) * U +
+				FVector3f(FaceUp) * V;
+
+			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
+			const FVector3f P = PosFromDir(SphereDir);
+
+			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
+			FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();
+			FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();
+
+			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, SampleAngleRad);
+			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, SampleAngleRad);
+			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, SampleAngleRad);
+			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, SampleAngleRad);
+
+			const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
+			const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
+
+			FVector3f N = FVector3f::CrossProduct(Pu, Pv).GetSafeNormal();
+
+			if (FVector3f::DotProduct(N, SphereDir) < 0.0f)
+			{
+				N *= -1.0f;
+			}
+
+			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
+
+			Builder.AddVertex(P)
+				.SetNormalAndTangent(N, Tangent)
+				.SetTexCoord(FVector2f(
+					(U + HalfExtent) / (HalfExtent * 2.0f),
+					(V + HalfExtent) / (HalfExtent * 2.0f)
+				));
+		}
+	}
+
+	for (int32 Y = 0; Y < QuadEdge; ++Y)
+	{
+		for (int32 X = 0; X < QuadEdge; ++X)
+		{
+			const uint32 I0 = Y * VertEdge + X;
+			const uint32 I1 = I0 + 1;
+			const uint32 I2 = I0 + VertEdge;
+			const uint32 I3 = I2 + 1;
+
+			Builder.AddTriangle(I0, I2, I1, 0);
+			Builder.AddTriangle(I1, I2, I3, 0);
+		}
+	}
+
+	return StreamSet;
+}
+
 void ACubedSpherePlanetActor::BuildChunk(
 	URealtimeMeshSimple& Mesh,
 	int32 SectionId,
@@ -629,9 +743,10 @@ void ACubedSpherePlanetActor::BuildChunk(
 	int32 ChunkY,
 	float HalfExtent,
 	float ChunkSize,
-	float RadiusCm)
+	float RadiusCm,
+	int32 VerticesPerEdge) const
 {
-	const int32 VertEdge = FMath::Max(2, VerticesPerChunkEdge);
+	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
 
@@ -739,18 +854,76 @@ void ACubedSpherePlanetActor::BuildChunk(
 
 void ACubedSpherePlanetActor::BuildPlanetMesh()
 {
-	if (!RuntimeMesh)
+	BuildPlanetPreview(PreviewLODLevel);
+}
+
+TArray<int32> ACubedSpherePlanetActor::GetOrderedLODVertices() const
+{
+	TArray<int32> Ordered = LODVerticesPerEdge;
+	if (VerticesPerChunkEdge >= 2 && !Ordered.Contains(VerticesPerChunkEdge))
 	{
-		return;
+		Ordered.Add(VerticesPerChunkEdge);
 	}
 
-	// Setup noise instances
+	Ordered.RemoveAll([](int32 Count)
+	{
+		return Count < 2;
+	});
+
+	Ordered.Sort();
+	for (int32 Index = Ordered.Num() - 1; Index > 0; --Index)
+	{
+		if (Ordered[Index] == Ordered[Index - 1])
+		{
+			Ordered.RemoveAt(Index);
+		}
+	}
+
+	return Ordered;
+}
+
+URealtimeMeshSimple* ACubedSpherePlanetActor::ResetRuntimeMesh()
+{
+	if (!RuntimeMesh)
+	{
+		return nullptr;
+	}
+
+	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
+	{
+		Existing->Reset();
+	}
+
+	URealtimeMeshSimple* Mesh = RuntimeMesh->InitializeRealtimeMesh<URealtimeMeshSimple>();
+	if (!Mesh)
+	{
+		return nullptr;
+	}
+
+	if (GEngine && RuntimeMesh->GetWorld())
+	{
+		GEngine->Exec(RuntimeMesh->GetWorld(), TEXT("r.RayTracing.Geometry.RealtimeMeshes 1"));
+	}
+
+	if (PlanetMaterial)
+	{
+		Mesh->SetupMaterialSlot(0, FName(TEXT("Planet")));
+		RuntimeMesh->SetMaterial(0, PlanetMaterial);
+	}
+
+	RuntimeMesh->SetCollisionEnabled(bGenerateCollision ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+
+	return Mesh;
+}
+
+void ACubedSpherePlanetActor::InitializeNoise()
+{
 	static FastNoiseLite BaseInstance;
 	static FastNoiseLite WarpInstance;
 	static FastNoiseLite DetailInstance;
 	static FastNoiseLite CoastInstance;
-	static FastNoiseLite CoastalVarInstance;      // NEW
-	static FastNoiseLite CoastalDetailInstance;    // NEW
+	static FastNoiseLite CoastalVarInstance;
+	static FastNoiseLite CoastalDetailInstance;
 
 	ContinentBaseNoise = &BaseInstance;
 	ContinentBaseNoise->SetSeed(ContinentSeed);
@@ -778,7 +951,6 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	ContinentCoastNoise->SetCellularJitter(FMath::Clamp(ContinentCoastJitter, 0.0f, 1.0f));
 	ContinentCoastNoise->SetFrequency(1.0f);
 
-	// NEW: Coastal variation noises
 	CoastalVariationNoise = &CoastalVarInstance;
 	CoastalVariationNoise->SetSeed(CoastalVariationSeed);
 	CoastalVariationNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
@@ -792,18 +964,16 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	CoastalDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
 	CoastalDetailNoise->SetFractalOctaves(3);
 	CoastalDetailNoise->SetFrequency(1.0f);
-	CoastalDetailNoise->SetSeed(CoastalVariationSeed + 111);
-	CoastalDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-	CoastalDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
-	CoastalDetailNoise->SetFractalOctaves(3);
-	CoastalDetailNoise->SetFrequency(1.0f);
 
-	// === MOUNTAIN NOISES ===
 	static FastNoiseLite MountainRidgedInstance;
 	static FastNoiseLite MountainRidgedWarpInstance;
 	static FastNoiseLite MountainVolcanicInstance;
 	static FastNoiseLite MountainMaskInstance;
 	static FastNoiseLite MountainMaskWarpInstance;
+	static FastNoiseLite MountainErosionInstance;
+	static FastNoiseLite MountainRockyDetailInstance;
+	static FastNoiseLite FoothillsInstance;
+	static FastNoiseLite MountainHeightVarInstance;
 
 	MountainRidgedNoise = &MountainRidgedInstance;
 	MountainRidgedNoise->SetSeed(MountainSeed);
@@ -836,68 +1006,58 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	MountainMaskWarpNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
 	MountainMaskWarpNoise->SetFractalType(FastNoiseLite::FractalType_None);
 	MountainMaskWarpNoise->SetFrequency(1.0f);
-    
-    	// === NEW MOUNTAIN DETAIL NOISES ===
-    	static FastNoiseLite MountainErosionInstance;
-    	static FastNoiseLite MountainRockyDetailInstance;
-    	static FastNoiseLite FoothillsInstance;
-    	static FastNoiseLite MountainHeightVarInstance;
-    
-    	MountainErosionNoise = &MountainErosionInstance;
-    	MountainErosionNoise->SetSeed(MountainSeed + 1111);
-    	MountainErosionNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    	MountainErosionNoise->SetFractalType(FastNoiseLite::FractalType_None);
-    	MountainErosionNoise->SetFrequency(1.0f);
-    
-    	MountainRockyDetailNoise = &MountainRockyDetailInstance;
-    	MountainRockyDetailNoise->SetSeed(MountainSeed + 2222);
-    	MountainRockyDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    	MountainRockyDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
-    	MountainRockyDetailNoise->SetFractalOctaves(2);
-    	MountainRockyDetailNoise->SetFrequency(1.0f);
-    
-    	FoothillsNoise = &FoothillsInstance;
-    	FoothillsNoise->SetSeed(MountainSeed + 3333);
-    	FoothillsNoise->SetNoiseType(FastNoiseLite::NoiseType_Perlin);
-    	FoothillsNoise->SetFractalType(FastNoiseLite::FractalType_None);
-    	FoothillsNoise->SetFrequency(1.0f);
-    
-    	MountainHeightVarNoise = &MountainHeightVarInstance;
-    	MountainHeightVarNoise->SetSeed(MountainSeed + 4444);
-    	MountainHeightVarNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-    	MountainHeightVarNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
-    	MountainHeightVarNoise->SetFractalOctaves(2);
-    	MountainHeightVarNoise->SetFrequency(1.0f);
 
-	if (URealtimeMesh* Existing = RuntimeMesh->GetRealtimeMesh())
-	// ... остальной код без изменений
-	
-	{
-		Existing->Reset();
-	}
+	MountainErosionNoise = &MountainErosionInstance;
+	MountainErosionNoise->SetSeed(MountainSeed + 1111);
+	MountainErosionNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainErosionNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	MountainErosionNoise->SetFrequency(1.0f);
 
-	URealtimeMeshSimple* Mesh = RuntimeMesh->InitializeRealtimeMesh<URealtimeMeshSimple>();
+	MountainRockyDetailNoise = &MountainRockyDetailInstance;
+	MountainRockyDetailNoise->SetSeed(MountainSeed + 2222);
+	MountainRockyDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainRockyDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+	MountainRockyDetailNoise->SetFractalOctaves(2);
+	MountainRockyDetailNoise->SetFrequency(1.0f);
+
+	FoothillsNoise = &FoothillsInstance;
+	FoothillsNoise->SetSeed(MountainSeed + 3333);
+	FoothillsNoise->SetNoiseType(FastNoiseLite::NoiseType_Perlin);
+	FoothillsNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	FoothillsNoise->SetFrequency(1.0f);
+
+	MountainHeightVarNoise = &MountainHeightVarInstance;
+	MountainHeightVarNoise->SetSeed(MountainSeed + 4444);
+	MountainHeightVarNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainHeightVarNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+	MountainHeightVarNoise->SetFractalOctaves(2);
+	MountainHeightVarNoise->SetFrequency(1.0f);
+}
+
+void ACubedSpherePlanetActor::BuildPlanetPreview(int32 LodIndex)
+{
+	InitializeNoise();
+
+	URealtimeMeshSimple* Mesh = ResetRuntimeMesh();
 	if (!Mesh)
 	{
 		return;
 	}
 
-	// Disable RMC ray tracing instances to avoid invalid geometry asserts while we iterate on generation.
-	if (GEngine && RuntimeMesh->GetWorld())
+	const TArray<int32> LodList = GetOrderedLODVertices();
+	if (LodList.Num() == 0)
 	{
-		GEngine->Exec(RuntimeMesh->GetWorld(), TEXT("r.RayTracing.Geometry.RealtimeMeshes 1"));
+		BuildPlanetPreview(PreviewLODLevel);
+		return;
 	}
 
-	if (PlanetMaterial)
-	{
-		Mesh->SetupMaterialSlot(0, FName(TEXT("Planet")));
-		RuntimeMesh->SetMaterial(0, PlanetMaterial);
-	}
+	const int32 ClampedLod = FMath::Clamp(LodIndex, 0, LodList.Num() - 1);
+	const int32 VerticesPerEdge = LodList[ClampedLod];
 
 	const int32 FaceChunks = FMath::Max(1, ChunksPerFace);
 	const float RadiusCm = GetPlanetRadiusCm();
 
-	const float HalfExtent = 1.0f; // Cube half-size for parametric space [-1,1]
+	const float HalfExtent = 1.0f;
 	const float ChunkSize = (HalfExtent * 2.0f) / FaceChunks;
 
 	int32 SectionId = 0;
@@ -907,11 +1067,40 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 		{
 			for (int32 ChunkX = 0; ChunkX < FaceChunks; ++ChunkX)
 			{
-				BuildChunk(*Mesh, SectionId, Face.Normal, Face.Right, Face.Up, ChunkX, ChunkY, HalfExtent, ChunkSize, RadiusCm);
+				BuildChunk(*Mesh, SectionId, Face.Normal, Face.Right, Face.Up, ChunkX, ChunkY, HalfExtent, ChunkSize, RadiusCm, VerticesPerEdge);
 				++SectionId;
 			}
 		}
 	}
+}
 
-	RuntimeMesh->SetCollisionEnabled(bGenerateCollision ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+void ACubedSpherePlanetActor::StartLODSystem()
+{
+	LODSystem.Reset();
+
+	if (!bEnableLODSystem)
+	{
+		BuildPlanetMesh();
+		return;
+	}
+
+	const TArray<int32> LodList = GetOrderedLODVertices();
+	if (LodList.Num() == 0)
+	{
+		return;
+	}
+
+	InitializeNoise();
+
+	URealtimeMeshSimple* Mesh = ResetRuntimeMesh();
+	if (!Mesh)
+	{
+		return;
+	}
+
+	const int32 BootstrapIndex = FMath::Clamp(BootstrapLODLevel, 0, LodList.Num() - 1);
+
+	LODSystem = MakeUnique<FCubedSphereLODSystem>(*this);
+	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), LodList, BootstrapIndex, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier);
+	LODSystem->Tick(0.0f);
 }
