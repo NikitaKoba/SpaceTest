@@ -8,3 +8,9 @@
 # 3) И не игнорируем каталог Source и всё что в нём
 !/Source
 !/Source/**
+
+# 4) Track RuntimeMeshComponent plugin
+!/Plugins/
+Plugins/*
+!/Plugins/RuntimeMeshComponent/
+!/Plugins/RuntimeMeshComponent/**
