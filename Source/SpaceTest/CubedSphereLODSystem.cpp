@@ -6,25 +6,6 @@
 #include "GameFramework/PlayerController.h"
 #include "RealtimeMeshSimple.h"
 
-namespace
-{
-	struct FCubedSphereFace
-	{
-		FVector Normal;
-		FVector Right;
-		FVector Up;
-	};
-
-	const FCubedSphereFace Faces[6] = {
-		{ FVector(1, 0, 0),  FVector(0, 1, 0),  FVector(0, 0, 1) },
-		{ FVector(-1, 0, 0), FVector(0, -1, 0), FVector(0, 0, 1) },
-		{ FVector(0, 1, 0),  FVector(1, 0, 0),  FVector(0, 0, -1) },
-		{ FVector(0, -1, 0), FVector(1, 0, 0),  FVector(0, 0, 1) },
-		{ FVector(0, 0, 1),  FVector(1, 0, 0),  FVector(0, 1, 0) },
-		{ FVector(0, 0, -1), FVector(1, 0, 0),  FVector(0, -1, 0) }
-	};
-}
-
 FCubedSphereLODSystem::FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner)
 	: Owner(&InOwner)
 {
@@ -88,7 +69,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 
 	for (int32 FaceIndex = 0; FaceIndex < 6; ++FaceIndex)
 	{
-		const FCubedSphereFace& Face = Faces[FaceIndex];
+		const FCubedSphereFace& Face = GCubedSphereFaces[FaceIndex];
 
 		for (int32 ChunkY = 0; ChunkY < ChunksPerFace; ++ChunkY)
 		{

@@ -14,6 +14,15 @@ namespace RealtimeMesh
 	struct FRealtimeMeshStreamSet;
 }
 
+struct FCubedSphereFace
+{
+	FVector Normal;
+	FVector Right;
+	FVector Up;
+};
+
+extern const FCubedSphereFace GCubedSphereFaces[6];
+
 /**
  * Cubed-sphere planet built from RuntimeMeshComponent chunks.
  * Base version: uniform cube faces projected onto a sphere without height noise.

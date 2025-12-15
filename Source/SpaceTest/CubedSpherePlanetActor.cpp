@@ -7,25 +7,14 @@
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
 
-namespace
-{
-	struct FCubedSphereFace
-	{
-		FVector Normal;
-		FVector Right;
-		FVector Up;
-	};
-
-	const FCubedSphereFace Faces[6] = {
-		{ FVector(1, 0, 0),  FVector(0, 1, 0),  FVector(0, 0, 1) },  // +X
-		{ FVector(-1, 0, 0), FVector(0, -1, 0), FVector(0, 0, 1) }, // -X
-		{ FVector(0, 1, 0),  FVector(1, 0, 0),  FVector(0, 0, -1) }, // +Y
+const FCubedSphereFace GCubedSphereFaces[6] = {
+	{ FVector(1, 0, 0),  FVector(0, 1, 0),  FVector(0, 0, 1) },  // +X
+	{ FVector(-1, 0, 0), FVector(0, -1, 0), FVector(0, 0, 1) }, // -X
+	{ FVector(0, 1, 0),  FVector(1, 0, 0),  FVector(0, 0, -1) }, // +Y
 		{ FVector(0, -1, 0), FVector(1, 0, 0), FVector(0, 0, 1) },  // -Y
 		{ FVector(0, 0, 1),  FVector(1, 0, 0),  FVector(0, 1, 0) },  // +Z
 		{ FVector(0, 0, -1), FVector(1, 0, 0),  FVector(0, -1, 0) }  // -Z
 	};
-}
-
 ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -1170,7 +1159,7 @@ void ACubedSpherePlanetActor::BuildPlanetPreview(int32 LodIndex)
 	const float ChunkSize = (HalfExtent * 2.0f) / FaceChunks;
 
 	int32 SectionId = 0;
-	for (const FCubedSphereFace& Face : Faces)
+	for (const FCubedSphereFace& Face : GCubedSphereFaces)
 	{
 		for (int32 ChunkY = 0; ChunkY < FaceChunks; ++ChunkY)
 		{
