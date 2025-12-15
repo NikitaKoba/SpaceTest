@@ -73,6 +73,8 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	bHasPrevCam = false;
 	BootstrapLOD = FMath::Clamp(BootstrapLodIndex, 0, LodVertices.Num() - 1);
 	MinLOD = 0;
+	ForwardPreloadStrength = 0.6f;
+	ForwardPreloadHalfAngleCos = FMath::Cos(FMath::DegreesToRadians(60.0f));
 	bBootstrapping = true;
 
 	LodVertices = InLodVerticesPerEdge;
@@ -173,6 +175,8 @@ void FCubedSphereLODSystem::UpdateActiveChunks(const FVector& CamLocation, float
 	const float ActivateRange = BaseActiveRangeCm * RangeScale;
 	const float DeactivateRange = ActivateRange + ActiveRangeBufferCm;
 
+	const FVector CamDir = (bHasPrevCam && !CamLocation.IsZero()) ? (CamLocation - LastCamLocation).GetSafeNormal() : FVector::ZeroVector;
+
 	for (int32 Index = 0; Index < Chunks.Num(); ++Index)
 	{
 		FChunkState& Chunk = Chunks[Index];
@@ -180,8 +184,19 @@ void FCubedSphereLODSystem::UpdateActiveChunks(const FVector& CamLocation, float
 		const FVector WorldCenter = PlanetTransform.TransformPosition(Chunk.LocalCenter);
 		const float Distance = FVector::Distance(CamLocation, WorldCenter) - Chunk.BoundingRadiusCm * ActorScale;
 
-		const bool bShouldActivate = Distance <= ActivateRange;
-	const bool bShouldDeactivate = Distance > DeactivateRange;
+		float LocalActivateRange = ActivateRange;
+		if (!CamDir.IsNearlyZero())
+		{
+			const FVector ChunkDir = (WorldCenter - CamLocation).GetSafeNormal();
+			const float Dot = FVector::DotProduct(CamDir, ChunkDir);
+			if (Dot > ForwardPreloadHalfAngleCos)
+			{
+				LocalActivateRange *= (1.0f + ForwardPreloadStrength * Dot);
+			}
+		}
+
+		const bool bShouldActivate = Distance <= LocalActivateRange;
+		const bool bShouldDeactivate = Distance > DeactivateRange;
 
 	if (!Chunk.bIsActive && bShouldActivate)
 	{

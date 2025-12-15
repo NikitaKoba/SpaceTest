@@ -106,6 +106,79 @@ float ACubedSpherePlanetActor::GetDistanceToPointKm(const FVector3f& Point1, con
 	return angle * PlanetRadiusKm;
 }
 
+void ACubedSpherePlanetActor::ComputeBiomeData(float HeightCm, const FVector3f& Normal, const FVector3f& SphereDir, FVector2f& OutBiomeUV, FColor& OutBiomeColor) const
+{
+	if (!bGenerateBiomeData)
+	{
+		OutBiomeUV = FVector2f::ZeroVector;
+		OutBiomeColor = FColor::White;
+		return;
+	}
+
+	const float heightKm = FMath::Max(0.0f, HeightCm / 100000.0f);
+	const float heightNorm = FMath::Clamp(heightKm / FMath::Max(KINDA_SMALL_NUMBER, BiomeHeightRangeKm), 0.0f, 1.0f);
+
+	float snowMask = 0.0f;
+	if (SnowFullCoverHeightKm <= SnowStartHeightKm)
+	{
+		snowMask = heightKm >= SnowStartHeightKm ? 1.0f : 0.0f;
+	}
+	else
+	{
+		const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, SnowFullCoverHeightKm - SnowStartHeightKm);
+		snowMask = FMath::Clamp((heightKm - SnowStartHeightKm) * invRange, 0.0f, 1.0f);
+	}
+
+	if (SnowNoiseStrength > 0.0f && BiomeSnowNoise)
+	{
+		const float n = BiomeSnowNoise->GetNoise(
+			SphereDir.X * SnowNoiseFrequency,
+			SphereDir.Y * SnowNoiseFrequency,
+			SphereDir.Z * SnowNoiseFrequency
+		) * 0.5f + 0.5f;
+
+		snowMask = FMath::Clamp(snowMask + (n - 0.5f) * SnowNoiseStrength, 0.0f, 1.0f);
+	}
+
+	const float slopeDot = FMath::Clamp(FVector3f::DotProduct(Normal.GetSafeNormal(), SphereDir.GetSafeNormal()), 0.0f, 1.0f);
+	const float slope01 = 1.0f - slopeDot; // 0 = flat, 1 = vertical
+	const float slopeDeg = FMath::RadiansToDegrees(FMath::Acos(slopeDot));
+
+	if (SnowSlopeResistance > 0.0f)
+	{
+		snowMask *= FMath::Clamp(1.0f - slope01 * SnowSlopeResistance, 0.0f, 1.0f);
+	}
+
+	float rockMask = 0.0f;
+	if (RockSlopeFullDegrees > RockSlopeStartDegrees)
+	{
+		const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, RockSlopeFullDegrees - RockSlopeStartDegrees);
+		rockMask = FMath::Clamp((slopeDeg - RockSlopeStartDegrees) * invRange, 0.0f, 1.0f);
+	}
+	else
+	{
+		rockMask = slopeDeg >= RockSlopeStartDegrees ? 1.0f : 0.0f;
+	}
+	rockMask *= (1.0f - snowMask);
+	snowMask *= (1.0f - rockMask);
+
+	float groundMask = 1.0f - snowMask;
+	groundMask *= (1.0f - rockMask);
+
+	const float sum = groundMask + rockMask + snowMask;
+	if (sum > KINDA_SMALL_NUMBER)
+	{
+		const float inv = 1.0f / sum;
+		groundMask *= inv;
+		rockMask *= inv;
+		snowMask *= inv;
+	}
+
+	// UV1 = (height normalized, slope steepness). VertexColor = {ground, rock, snow, height}.
+	OutBiomeUV = FVector2f(heightNorm, slope01);
+	OutBiomeColor = FLinearColor(groundMask, rockMask, snowMask, heightNorm).ToFColor(false);
+}
+
 float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 {
 	if (!bEnablePOI)
@@ -649,17 +722,22 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	const float Step = ChunkSize / QuadEdge;
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
-	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
+	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 2> Builder(StreamSet);
 	Builder.EnableTangents();
-	Builder.EnableTexCoords();
+	Builder.EnableTexCoords(2);
+	Builder.EnableColors();
 	Builder.EnablePolyGroups();
 
 	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
 
-	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
+	auto PosFromDir = [&](const FVector3f& Dir, float* OutHeightCm = nullptr) -> FVector3f
 	{
 		const FVector3f NDir = Dir.GetSafeNormal();
 		const float H = GetContinentHeightCm(NDir);
+		if (OutHeightCm)
+		{
+			*OutHeightCm = H;
+		}
 		return NDir * (RadiusCm + H);
 	};
 
@@ -684,7 +762,8 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 				FVector3f(FaceUp) * V;
 
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
-			const FVector3f P = PosFromDir(SphereDir);
+			float HeightCm = 0.0f;
+			const FVector3f P = PosFromDir(SphereDir, &HeightCm);
 
 			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
 			FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();
@@ -707,12 +786,20 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 
 			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
 
+			FVector2f BiomeUV(0.0f, 0.0f);
+			FColor BiomeColor = FColor::White;
+			ComputeBiomeData(HeightCm, N, SphereDir, BiomeUV, BiomeColor);
+
+			const FVector2f BaseUV(
+				(U + HalfExtent) / (HalfExtent * 2.0f),
+				(V + HalfExtent) / (HalfExtent * 2.0f)
+			);
+
 			Builder.AddVertex(P)
 				.SetNormalAndTangent(N, Tangent)
-				.SetTexCoord(FVector2f(
-					(U + HalfExtent) / (HalfExtent * 2.0f),
-					(V + HalfExtent) / (HalfExtent * 2.0f)
-				));
+				.SetTexCoord(0, BaseUV)
+				.SetTexCoord(1, BiomeUV)
+				.SetColor(BiomeColor);
 		}
 	}
 
@@ -751,9 +838,10 @@ void ACubedSpherePlanetActor::BuildChunk(
 	const float Step = ChunkSize / QuadEdge;
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
-	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
+	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 2> Builder(StreamSet);
 	Builder.EnableTangents();
-	Builder.EnableTexCoords();
+	Builder.EnableTexCoords(2);
+	Builder.EnableColors();
 	Builder.EnablePolyGroups();
 
 	// Маленький угол для сэмпла нормали (в радианах).
@@ -761,10 +849,14 @@ void ACubedSpherePlanetActor::BuildChunk(
 	// Обычно 0.05..0.2 градуса ок.
 	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
 
-	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
+	auto PosFromDir = [&](const FVector3f& Dir, float* OutHeightCm = nullptr) -> FVector3f
 	{
 		const FVector3f NDir = Dir.GetSafeNormal();
 		const float H = GetContinentHeightCm(NDir);
+		if (OutHeightCm)
+		{
+			*OutHeightCm = H;
+		}
 		return NDir * (RadiusCm + H);
 	};
 
@@ -792,7 +884,8 @@ void ACubedSpherePlanetActor::BuildChunk(
 				FVector3f(FaceUp) * V;
 
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
-			const FVector3f P = PosFromDir(SphereDir);
+			float HeightCm = 0.0f;
+			const FVector3f P = PosFromDir(SphereDir, &HeightCm);
 
 			// === КАСАТЕЛЬНЫЕ НА СФЕРЕ (НЕ ЗАВИСЯТ ОТ ГРАНИ КУБА → МЕНЬШЕ ШВОВ) ===
 			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
@@ -820,12 +913,20 @@ void ACubedSpherePlanetActor::BuildChunk(
 			// Тангенс ортогонализуем относительно N
 			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
 
+			FVector2f BiomeUV(0.0f, 0.0f);
+			FColor BiomeColor = FColor::White;
+			ComputeBiomeData(HeightCm, N, SphereDir, BiomeUV, BiomeColor);
+
+			const FVector2f BaseUV(
+				(U + HalfExtent) / (HalfExtent * 2.0f),
+				(V + HalfExtent) / (HalfExtent * 2.0f)
+			);
+
 			Builder.AddVertex(P)
 				.SetNormalAndTangent(N, Tangent)
-				.SetTexCoord(FVector2f(
-					(U + HalfExtent) / (HalfExtent * 2.0f),
-					(V + HalfExtent) / (HalfExtent * 2.0f)
-				));
+				.SetTexCoord(0, BaseUV)
+				.SetTexCoord(1, BiomeUV)
+				.SetColor(BiomeColor);
 		}
 	}
 
@@ -924,6 +1025,7 @@ void ACubedSpherePlanetActor::InitializeNoise()
 	static FastNoiseLite CoastInstance;
 	static FastNoiseLite CoastalVarInstance;
 	static FastNoiseLite CoastalDetailInstance;
+	static FastNoiseLite BiomeSnowInstance;
 
 	ContinentBaseNoise = &BaseInstance;
 	ContinentBaseNoise->SetSeed(ContinentSeed);
@@ -964,6 +1066,13 @@ void ACubedSpherePlanetActor::InitializeNoise()
 	CoastalDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
 	CoastalDetailNoise->SetFractalOctaves(3);
 	CoastalDetailNoise->SetFrequency(1.0f);
+
+	BiomeSnowNoise = &BiomeSnowInstance;
+	BiomeSnowNoise->SetSeed(SnowNoiseSeed);
+	BiomeSnowNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	BiomeSnowNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
+	BiomeSnowNoise->SetFractalOctaves(2);
+	BiomeSnowNoise->SetFrequency(1.0f);
 
 	static FastNoiseLite MountainRidgedInstance;
 	static FastNoiseLite MountainRidgedWarpInstance;

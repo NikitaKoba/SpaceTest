@@ -48,6 +48,48 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
 
+	// --- Surface materials ---
+
+	/** Write biome helper data (height/slope/snow masks) into mesh UV1 + vertex color for automatic material blending. */
+	UPROPERTY(EditAnywhere, Category="Materials")
+	bool bGenerateBiomeData = true;
+
+	/** Height range used to normalize biome data (km). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.1", UIMin="0.1"))
+	float BiomeHeightRangeKm = 16.0f;
+
+	/** Height where snow starts to appear on mountains (km above sea level). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.0", UIMin="0.0"))
+	float SnowStartHeightKm = 9.0f;
+
+	/** Height where snow is fully applied (km above sea level). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.0", UIMin="0.0"))
+	float SnowFullCoverHeightKm = 12.0f;
+
+	/** Random variation strength for snow coverage (0 = uniform, 1 = very noisy). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float SnowNoiseStrength = 0.02f;
+
+	/** Frequency for snow coverage noise. */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.01", UIMin="0.01"))
+	float SnowNoiseFrequency = 2.5f;
+
+	/** Seed for snow coverage noise. */
+	UPROPERTY(EditAnywhere, Category="Materials")
+	int32 SnowNoiseSeed = 424242;
+
+	/** How strongly steep slopes push snow away (0 = ignore slope, 1 = remove on vertical cliffs). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float SnowSlopeResistance = 0.8f;
+
+	/** Slope angle where rock starts to dominate over ground (degrees). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.0", ClampMax="90.0"))
+	float RockSlopeStartDegrees = 40.0f;
+
+	/** Slope angle where rock is fully dominant (degrees). */
+	UPROPERTY(EditAnywhere, Category="Materials", meta=(ClampMin="0.0", ClampMax="90.0"))
+	float RockSlopeFullDegrees = 65.0f;
+
 	// --- LOD ---
 
 	/** Enable SSE-driven LOD system (runtime only). */
@@ -536,6 +578,7 @@ private:
 	float GetPOIHeightCm(const FVector3f& SphereDir) const;
 	FVector3f GeneratePOIPosition(int32 Index, int32 TotalCount) const;
 	float GetDistanceToPointKm(const FVector3f& Point1, const FVector3f& Point2) const;
+	void ComputeBiomeData(float HeightCm, const FVector3f& Normal, const FVector3f& SphereDir, FVector2f& OutBiomeUV, FColor& OutBiomeColor) const;
 
 	FastNoiseLite* ContinentBaseNoise = nullptr;
 	FastNoiseLite* ContinentWarpNoise = nullptr;
@@ -555,4 +598,5 @@ private:
 	FastNoiseLite* MountainRockyDetailNoise = nullptr;
 	FastNoiseLite* FoothillsNoise = nullptr;
 	FastNoiseLite* MountainHeightVarNoise = nullptr;
+	FastNoiseLite* BiomeSnowNoise = nullptr;
 };

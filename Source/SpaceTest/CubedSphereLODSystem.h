@@ -92,6 +92,8 @@ private:
 	float HyperdriveRangeMultiplier = 1.0f;
 	int32 BootstrapLOD = 0;
 	int32 MinLOD = 0;
+	float ForwardPreloadStrength = 0.5f; // 0..1 scale
+	float ForwardPreloadHalfAngleCos = 0.5f; // cos(60 deg)
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	bool bHasPrevCam = false;
