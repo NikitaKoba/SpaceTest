@@ -41,6 +41,12 @@ void FCubedSphereLODSystem::Shutdown()
 		FChunkBuildRequest Dummy;
 		BuildQueue.Dequeue(Dummy);
 	}
+	while (!CompletedQueue.IsEmpty())
+	{
+		FChunkBuildResult DummyResult;
+		CompletedQueue.Dequeue(DummyResult);
+	}
+	InFlightBuilds = 0;
 	bBootstrapping = false;
 }
 
@@ -58,6 +64,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	FrameBudget = FMath::Max(1, MaxChunksPerFrame);
 	WarmupBudget = FMath::Max(1, WarmupChunksPerFrame);
 	ErrorScale = FMath::Max(0.01f, InErrorScale);
+	MaxConcurrentBuilds = WarmupBudget;
 
 	LodVertices = InLodVerticesPerEdge;
 	LodErrorsCm.Reset();
@@ -267,22 +274,62 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 			continue;
 		}
 
+		if (InFlightBuilds >= MaxConcurrentBuilds)
+		{
+			break;
+		}
+
+		// Copy required data for async build
+		const FChunkState ChunkCopy = Chunk;
 		const int32 VerticesPerEdge = LodVertices[Request.LodIndex];
-		const RealtimeMesh::FRealtimeMeshStreamSet StreamSet = Owner->BuildChunkStreams(Chunk.FaceNormal, Chunk.FaceRight, Chunk.FaceUp, Chunk.ChunkX, Chunk.ChunkY, 1.0f, ChunkSize, PlanetRadiusCm, VerticesPerEdge);
+		const int32 LodIndex = Request.LodIndex;
+		const int32 ChunkIndex = Request.ChunkIndex;
+		FPlatformAtomics::InterlockedIncrement(&InFlightBuilds);
+
+		Async(EAsyncExecution::ThreadPool, [this, ChunkCopy, VerticesPerEdge, LodIndex, ChunkIndex]()
+		{
+			RealtimeMesh::FRealtimeMeshStreamSet StreamSet = Owner->BuildChunkStreams(ChunkCopy.FaceNormal, ChunkCopy.FaceRight, ChunkCopy.FaceUp, ChunkCopy.ChunkX, ChunkCopy.ChunkY, 1.0f, ChunkSize, PlanetRadiusCm, VerticesPerEdge);
+			CompletedQueue.Enqueue({ ChunkIndex, LodIndex, MoveTemp(StreamSet) });
+			FPlatformAtomics::InterlockedDecrement(&InFlightBuilds);
+		});
+
+		Processed++;
+	}
+}
+
+void FCubedSphereLODSystem::ProcessCompletedBuilds()
+{
+	if (!Mesh || !Owner)
+	{
+		return;
+	}
+
+	FChunkBuildResult Result;
+	while (CompletedQueue.Dequeue(Result))
+	{
+		if (!Chunks.IsValidIndex(Result.ChunkIndex) || !LodVertices.IsValidIndex(Result.LodIndex))
+		{
+			continue;
+		}
+
+		FChunkState& Chunk = Chunks[Result.ChunkIndex];
+		if (Chunk.PendingLOD != Result.LodIndex)
+		{
+			continue;
+		}
 
 		if (Chunk.CurrentLOD == INDEX_NONE)
 		{
-			Mesh->CreateSectionGroup(Chunk.GroupKey, StreamSet, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+			Mesh->CreateSectionGroup(Chunk.GroupKey, Result.Streams, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
 			Mesh->UpdateSectionConfig(Chunk.SectionKey, FRealtimeMeshSectionConfig(0), Owner->bGenerateCollision);
 		}
 		else
 		{
-			Mesh->UpdateSectionGroup(Chunk.GroupKey, StreamSet);
+			Mesh->UpdateSectionGroup(Chunk.GroupKey, Result.Streams);
 		}
 
-		Chunk.CurrentLOD = Request.LodIndex;
+		Chunk.CurrentLOD = Result.LodIndex;
 		Chunk.PendingLOD = INDEX_NONE;
-		Processed++;
 	}
 }
 
@@ -302,8 +349,9 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 
 	const int32 Budget = bBootstrapping ? WarmupBudget : FrameBudget;
 	ProcessBuildQueue(Budget);
+	ProcessCompletedBuilds();
 
-	if (bBootstrapping && BuildQueue.IsEmpty())
+	if (bBootstrapping && BuildQueue.IsEmpty() && CompletedQueue.IsEmpty() && InFlightBuilds == 0)
 	{
 		bBootstrapping = false;
 	}

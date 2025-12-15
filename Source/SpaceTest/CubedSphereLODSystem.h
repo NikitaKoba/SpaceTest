@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Containers/Queue.h"
 #include "RealtimeMeshSimple.h"
+#include "Async/Async.h"
 
 class ACubedSpherePlanetActor;
 
@@ -51,6 +52,13 @@ private:
 		int32 LodIndex = INDEX_NONE;
 	};
 
+	struct FChunkBuildResult
+	{
+		int32 ChunkIndex = INDEX_NONE;
+		int32 LodIndex = INDEX_NONE;
+		RealtimeMesh::FRealtimeMeshStreamSet Streams;
+	};
+
 	ACubedSpherePlanetActor* Owner = nullptr;
 	URealtimeMeshSimple* Mesh = nullptr;
 
@@ -58,6 +66,7 @@ private:
 	TArray<float> LodErrorsCm;
 	TArray<FChunkState> Chunks;
 	TQueue<FChunkBuildRequest> BuildQueue;
+	TQueue<FChunkBuildResult, EQueueMode::Mpsc> CompletedQueue;
 
 	int32 ChunksPerFace = 0;
 	float PlanetRadiusCm = 0.0f;
@@ -72,11 +81,14 @@ private:
 
 	int32 FrameBudget = 2;
 	int32 WarmupBudget = 12;
+	int32 MaxConcurrentBuilds = 4;
+	volatile int32 InFlightBuilds = 0;
 	bool bBootstrapping = false;
 
 	void EnqueueInitialBuilds(int32 BootstrapLodIndex);
 	void EvaluateLOD();
 	void ProcessBuildQueue(int32 Budget);
+	void ProcessCompletedBuilds();
 	void EnqueueBuild(int32 ChunkIndex, int32 LodIndex);
 	float ComputeScreenSpaceError(const FChunkState& Chunk, int32 LodIndex, float DistanceCm, float PixelsPerCm, float ActorScale) const;
 };
