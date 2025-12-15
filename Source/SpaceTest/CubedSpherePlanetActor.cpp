@@ -69,6 +69,176 @@ FVector3f ACubedSpherePlanetActor::CubeToSphere(const FVector3f& P)
 
 	return FVector3f(fx, fy, fz);
 }
+FVector3f ACubedSpherePlanetActor::GeneratePOIPosition(int32 Index, int32 TotalCount) const
+{
+	// Генерируем детерминированную позицию на сфере из seed + index
+	const uint32 hash = POISeed * 73856093 ^ Index * 19349663;
+	const float phi = (hash & 0xFFFF) / 65535.0f * 2.0f * PI;
+	const float theta = ((hash >> 16) & 0xFFFF) / 65535.0f * PI;
+	
+	const float sinTheta = FMath::Sin(theta);
+	const float x = sinTheta * FMath::Cos(phi);
+	const float y = sinTheta * FMath::Sin(phi);
+	const float z = FMath::Cos(theta);
+	
+	return FVector3f(x, y, z).GetSafeNormal();
+}
+
+float ACubedSpherePlanetActor::GetDistanceToPointKm(const FVector3f& Point1, const FVector3f& Point2) const
+{
+	// Расстояние по поверхности сферы (great circle distance)
+	const float dot = FMath::Clamp(FVector3f::DotProduct(Point1, Point2), -1.0f, 1.0f);
+	const float angle = FMath::Acos(dot);
+	return angle * PlanetRadiusKm;
+}
+
+float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
+{
+	if (!bEnablePOI)
+	{
+		return 0.f;
+	}
+
+	float totalPOIHeight = 0.f;
+
+	// === 1. СУПЕРВУЛКАНЫ ===
+	
+	if (bEnableSuperVolcanoes && SuperVolcanoCount > 0 && SuperVolcanoHeightKm > 0.f)
+	{
+		for (int32 i = 0; i < SuperVolcanoCount; ++i)
+		{
+			const FVector3f volcanoPos = GeneratePOIPosition(i * 1000, SuperVolcanoCount);
+			const float distKm = GetDistanceToPointKm(SphereDir, volcanoPos);
+			
+			if (distKm < SuperVolcanoRadiusKm * 2.0f)
+			{
+				// Профиль вулкана - конус с кальдерой на вершине
+				const float radiusCm = SuperVolcanoRadiusKm * 100000.0f;
+				const float distCm = distKm * 100000.0f;
+				
+				// Основной конус
+				float coneHeight = 1.0f - (distCm / radiusCm);
+				coneHeight = FMath::Clamp(coneHeight, 0.0f, 1.0f);
+				coneHeight = FMath::Pow(coneHeight, SuperVolcanoSteepness);
+				
+				float height = coneHeight * SuperVolcanoHeightKm * 100000.0f;
+				
+				// Кальдера на вершине
+				if (SuperVolcanoCalderaDepthKm > 0.f)
+				{
+					const float calderaRadiusCm = SuperVolcanoCalderaRadiusKm * 100000.0f;
+					if (distCm < calderaRadiusCm)
+					{
+						const float calderaDepth = 1.0f - (distCm / calderaRadiusCm);
+						const float smoothCaldera = calderaDepth * calderaDepth * (3.0f - 2.0f * calderaDepth);
+						height -= smoothCaldera * SuperVolcanoCalderaDepthKm * 100000.0f;
+					}
+				}
+				
+				totalPOIHeight += height;
+			}
+		}
+	}
+
+	// === 2. УДАРНЫЕ КРАТЕРЫ ===
+	
+	if (bEnableImpactCraters && ImpactCraterCount > 0 && ImpactCraterDepthKm > 0.f)
+	{
+		for (int32 i = 0; i < ImpactCraterCount; ++i)
+		{
+			const FVector3f craterPos = GeneratePOIPosition(i * 2000 + 500, ImpactCraterCount);
+			const float distKm = GetDistanceToPointKm(SphereDir, craterPos);
+			
+			const float totalRadiusKm = ImpactCraterRadiusKm + ImpactCraterRimWidthKm;
+			
+			if (distKm < totalRadiusKm)
+			{
+				const float distCm = distKm * 100000.0f;
+				const float craterRadiusCm = ImpactCraterRadiusKm * 100000.0f;
+				const float rimRadiusCm = totalRadiusKm * 100000.0f;
+				
+				float height = 0.f;
+				
+				if (distCm < craterRadiusCm)
+				{
+					// Внутри кратера - параболическая депрессия
+					const float t = distCm / craterRadiusCm;
+					const float depth = (1.0f - t * t);
+					height = -depth * ImpactCraterDepthKm * 100000.0f;
+				}
+				else if (distCm < rimRadiusCm)
+				{
+					// Вал вокруг кратера
+					const float rimDist = distCm - craterRadiusCm;
+					const float rimWidth = rimRadiusCm - craterRadiusCm;
+					const float t = rimDist / rimWidth;
+					const float rimProfile = FMath::Sin(t * PI); // Плавный вал
+					height = rimProfile * ImpactCraterRimHeightKm * 100000.0f;
+				}
+				
+				totalPOIHeight += height;
+			}
+		}
+	}
+
+	// === 3. ГИГАНТСКИЙ КАНЬОН ===
+	
+	if (bEnableGrandCanyon && CanyonDepthKm > 0.f)
+	{
+		// Каньон идёт вдоль экватора с извилинами
+		const FVector3f canyonStart = GeneratePOIPosition(3000, 1);
+		
+		// Вычисляем локальную систему координат для каньона
+		const FVector3f canyonDir = FVector3f::CrossProduct(canyonStart, FVector3f(0, 0, 1)).GetSafeNormal();
+		
+		// Проекция текущей точки на направление каньона
+		const float alongCanyon = FVector3f::DotProduct(SphereDir, canyonDir);
+		const float perpCanyon = FVector3f::DotProduct(SphereDir, canyonStart);
+		
+		// Конвертируем в "координаты каньона"
+		const float canyonAngle = FMath::Atan2(alongCanyon, perpCanyon);
+		const float canyonLength = FMath::DegreesToRadians(CanyonLengthDegrees);
+		
+		if (FMath::Abs(canyonAngle) < canyonLength * 0.5f)
+		{
+			// Извилистость через синусоиду
+			const float wiggle = FMath::Sin(canyonAngle * 8.0f) * CanyonWindiness;
+			
+			// Расстояние от центральной линии каньона
+			const float crossAngle = FMath::Acos(FMath::Clamp(FVector3f::DotProduct(SphereDir, canyonStart), -1.0f, 1.0f));
+			const float wiggleAngle = crossAngle + wiggle * 0.1f;
+			const float crossDistKm = wiggleAngle * PlanetRadiusKm;
+			
+			const float halfWidthKm = CanyonWidthKm * 0.5f;
+			
+			if (crossDistKm < halfWidthKm * 2.0f)
+			{
+				const float t = FMath::Clamp(crossDistKm / halfWidthKm, 0.0f, 1.0f);
+				
+				float depth = 0.f;
+				if (t < 1.0f)
+				{
+					// V-образный профиль каньона
+					depth = (1.0f - t);
+					depth = FMath::Pow(depth, 1.5f); // Немного параболический
+				}
+				else
+				{
+					// Плавные края
+					const float edgeFade = 2.0f - t;
+					depth = FMath::Pow(edgeFade, 3.0f) * 0.3f;
+				}
+				
+				// Вариация глубины вдоль каньона
+				const float depthVariation = 0.7f + 0.3f * FMath::Sin(canyonAngle * 4.0f);
+				
+				totalPOIHeight -= depth * CanyonDepthKm * 100000.0f * depthVariation;
+			}
+		}
+	}
+
+	return totalPOIHeight;
+}
 float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, const FVector3f& WarpedPos, float ContinentMask) const
 {
 	if (!bEnableMountains || ContinentMask <= KINDA_SMALL_NUMBER)
@@ -443,16 +613,27 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	// Добавляем горы поверх континентов
 	totalHeight += GetMountainHeightCm(SphereDir, WarpedPos, mask);
 	
+	// Добавляем уникальные POI (не зависят от гор/континентов)
+	totalHeight += GetPOIHeightCm(SphereDir);
+	
 	return totalHeight;
 }
 
-void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm)
+void ACubedSpherePlanetActor::BuildChunk(
+	URealtimeMeshSimple& Mesh,
+	int32 SectionId,
+	const FVector& FaceNormal,
+	const FVector& FaceRight,
+	const FVector& FaceUp,
+	int32 ChunkX,
+	int32 ChunkY,
+	float HalfExtent,
+	float ChunkSize,
+	float RadiusCm)
 {
 	const int32 VertEdge = FMath::Max(2, VerticesPerChunkEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
-
-	const FVector TangentDir = FaceRight.GetSafeNormal();
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
 	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
@@ -460,24 +641,76 @@ void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 Sectio
 	Builder.EnableTexCoords();
 	Builder.EnablePolyGroups();
 
+	// Маленький угол для сэмпла нормали (в радианах).
+	// Чем больше — тем "грубее" нормаль, чем меньше — тем точнее, но шумнее.
+	// Обычно 0.05..0.2 градуса ок.
+	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
+
+	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
+	{
+		const FVector3f NDir = Dir.GetSafeNormal();
+		const float H = GetContinentHeightCm(NDir);
+		return NDir * (RadiusCm + H);
+	};
+
+	auto RotateDirAroundTangent = [&](const FVector3f& Dir, const FVector3f& Tangent, float AngleRad) -> FVector3f
+	{
+		// Rodrigues: Dir*cos + (Tangent*sin) + axis*(axis·Dir)*(1-cos)
+		// Но Tangent у нас перпендикулярен Dir, поэтому последний член ~0.
+		float s, c;
+		FMath::SinCos(&s, &c, AngleRad);
+		return (Dir * c + Tangent * s).GetSafeNormal();
+	};
+
 	for (int32 Y = 0; Y < VertEdge; ++Y)
 	{
 		const float V = -HalfExtent + (ChunkY * ChunkSize) + Y * Step;
+
 		for (int32 X = 0; X < VertEdge; ++X)
 		{
 			const float U = -HalfExtent + (ChunkX * ChunkSize) + X * Step;
 
-			const FVector3f CubePoint = FVector3f(FaceNormal) + FVector3f(FaceRight) * U + FVector3f(FaceUp) * V;
+			// === БАЗОВАЯ ТОЧКА НА СФЕРЕ ===
+			const FVector3f CubePoint =
+				FVector3f(FaceNormal) +
+				FVector3f(FaceRight) * U +
+				FVector3f(FaceUp) * V;
+
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
+			const FVector3f P = PosFromDir(SphereDir);
 
-			const float HeightOffsetCm = GetContinentHeightCm(SphereDir);
+			// === КАСАТЕЛЬНЫЕ НА СФЕРЕ (НЕ ЗАВИСЯТ ОТ ГРАНИ КУБА → МЕНЬШЕ ШВОВ) ===
+			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
+			FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();   // tangent 1
+			FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();      // tangent 2
 
-			const FVector3f DisplacedPos = SphereDir * (RadiusCm + HeightOffsetCm);
-			const FVector3f DisplacedNormal = FVector3f(DisplacedPos.GetSafeNormal());
+			// Сэмплы вокруг текущего направления
+			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, SampleAngleRad);
+			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, SampleAngleRad);
+			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, SampleAngleRad);
+			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, SampleAngleRad);
 
-			Builder.AddVertex(DisplacedPos)
-				.SetNormalAndTangent(DisplacedNormal, FVector3f(TangentDir))
-				.SetTexCoord(FVector2f((U + HalfExtent) / (HalfExtent * 2.0f), (V + HalfExtent) / (HalfExtent * 2.0f)));
+			const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
+			const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
+
+			// Нормаль по кроссу производных
+			FVector3f N = FVector3f::CrossProduct(Pu, Pv).GetSafeNormal();
+
+			// Гарантируем "наружу"
+			if (FVector3f::DotProduct(N, SphereDir) < 0.0f)
+			{
+				N *= -1.0f;
+			}
+
+			// Тангенс ортогонализуем относительно N
+			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
+
+			Builder.AddVertex(P)
+				.SetNormalAndTangent(N, Tangent)
+				.SetTexCoord(FVector2f(
+					(U + HalfExtent) / (HalfExtent * 2.0f),
+					(V + HalfExtent) / (HalfExtent * 2.0f)
+				));
 		}
 	}
 
@@ -495,12 +728,14 @@ void ACubedSpherePlanetActor::BuildChunk(URealtimeMeshSimple& Mesh, int32 Sectio
 		}
 	}
 
-	const FRealtimeMeshSectionGroupKey GroupKey = FRealtimeMeshSectionGroupKey::Create(0, FName(*FString::Printf(TEXT("Chunk_%d"), SectionId)));
+	const FRealtimeMeshSectionGroupKey GroupKey =
+		FRealtimeMeshSectionGroupKey::Create(0, FName(*FString::Printf(TEXT("Chunk_%d"), SectionId)));
 	const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
 
 	Mesh.CreateSectionGroup(GroupKey, StreamSet, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
 	Mesh.UpdateSectionConfig(SectionKey, FRealtimeMeshSectionConfig(0), bGenerateCollision);
 }
+
 
 void ACubedSpherePlanetActor::BuildPlanetMesh()
 {
@@ -650,7 +885,7 @@ void ACubedSpherePlanetActor::BuildPlanetMesh()
 	// Disable RMC ray tracing instances to avoid invalid geometry asserts while we iterate on generation.
 	if (GEngine && RuntimeMesh->GetWorld())
 	{
-		GEngine->Exec(RuntimeMesh->GetWorld(), TEXT("r.RayTracing.Geometry.RealtimeMeshes 0"));
+		GEngine->Exec(RuntimeMesh->GetWorld(), TEXT("r.RayTracing.Geometry.RealtimeMeshes 1"));
 	}
 
 	if (PlanetMaterial)

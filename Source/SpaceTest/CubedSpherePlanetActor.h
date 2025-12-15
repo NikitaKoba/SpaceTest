@@ -28,7 +28,94 @@ public:
 	/** Number of chunks per cube face (NxN). */
 	UPROPERTY(EditAnywhere, Category="Planet", meta=(ClampMin="1", UIMin="1"))
 	int32 ChunksPerFace = 4;
+	// ========== POINTS OF INTEREST (Уникальные объекты) ==========
 
+/** Включить генерацию уникальных геологических объектов. */
+UPROPERTY(EditAnywhere, Category="POI")
+bool bEnablePOI = true;
+
+/** Seed для генерации позиций POI. */
+UPROPERTY(EditAnywhere, Category="POI")
+int32 POISeed = 9999;
+
+// --- Супервулканы ---
+
+/** Включить генерацию супервулканов. */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano")
+bool bEnableSuperVolcanoes = true;
+
+/** Количество супервулканов на планете. */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="0", ClampMax="5"))
+int32 SuperVolcanoCount = 1;
+
+/** Высота супервулкана (км). */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="0.0", UIMin="0.0"))
+float SuperVolcanoHeightKm = 15.0f;
+
+/** Радиус основания супервулкана (км). */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="10.0", UIMin="10.0"))
+float SuperVolcanoRadiusKm = 300.0f;
+
+/** Крутизна склонов супервулкана. */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="1.0", UIMin="1.0"))
+float SuperVolcanoSteepness = 2.5f;
+
+/** Глубина кальдеры на вершине (км). */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="0.0", UIMin="0.0"))
+float SuperVolcanoCalderaDepthKm = 1.5f;
+
+/** Радиус кальдеры (км). */
+UPROPERTY(EditAnywhere, Category="POI|SuperVolcano", meta=(ClampMin="1.0", UIMin="1.0"))
+float SuperVolcanoCalderaRadiusKm = 40.0f;
+
+// --- Ударные кратеры ---
+
+/** Включить генерацию ударных кратеров. */
+UPROPERTY(EditAnywhere, Category="POI|ImpactCraters")
+bool bEnableImpactCraters = true;
+
+/** Количество крупных кратеров. */
+UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="0", ClampMax="10"))
+int32 ImpactCraterCount = 3;
+
+/** Глубина кратера (км). */
+UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="0.0", UIMin="0.0"))
+float ImpactCraterDepthKm = 3.0f;
+
+/** Радиус кратера (км). */
+UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="10.0", UIMin="10.0"))
+float ImpactCraterRadiusKm = 150.0f;
+
+/** Высота вала вокруг кратера (км). */
+UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="0.0", UIMin="0.0"))
+float ImpactCraterRimHeightKm = 0.8f;
+
+/** Ширина вала (км). */
+UPROPERTY(EditAnywhere, Category="POI|ImpactCraters", meta=(ClampMin="1.0", UIMin="1.0"))
+float ImpactCraterRimWidthKm = 30.0f;
+
+// --- Гигантский каньон ---
+
+/** Включить генерацию гигантского каньона. */
+UPROPERTY(EditAnywhere, Category="POI|GrandCanyon")
+bool bEnableGrandCanyon = true;float GetPOIHeightCm(const FVector3f& SphereDir) const;
+FVector3f GeneratePOIPosition(int32 Index, int32 TotalCount) const;
+float GetDistanceToPointKm(const FVector3f& Point1, const FVector3f& Point2) const;
+/** Глубина каньона (км). */
+UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="0.0", UIMin="0.0"))
+float CanyonDepthKm = 5.0f;
+
+/** Ширина каньона (км). */
+UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="10.0", UIMin="10.0"))
+float CanyonWidthKm = 100.0f;
+
+/** Длина каньона (градусы по экватору). */
+UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="5.0", ClampMax="180.0"))
+float CanyonLengthDegrees = 60.0f;
+
+/** Извилистость каньона. */
+UPROPERTY(EditAnywhere, Category="POI|GrandCanyon", meta=(ClampMin="0.0", ClampMax="1.0"))
+float CanyonWindiness = 0.3f;
 	/** Vertex grid resolution per chunk edge (number of vertices, not quads). */
 	UPROPERTY(EditAnywhere, Category="Planet", meta=(ClampMin="2", UIMin="2"))
 	int32 VerticesPerChunkEdge = 33;
