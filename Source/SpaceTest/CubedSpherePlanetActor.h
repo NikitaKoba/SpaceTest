@@ -54,7 +54,7 @@ public:
 	UPROPERTY(EditAnywhere, Category="LOD")
 	bool bEnableLODSystem = true;
 
-	/** Ordered list of vertex counts per chunk edge for LODs (low->high). Highest will be forced to include VerticesPerChunkEdge. */
+	/** Ordered list of vertex counts per chunk edge for preview (low->high). Highest will be forced to include VerticesPerChunkEdge. */
 	UPROPERTY(EditAnywhere, Category="LOD")
 	TArray<int32> LODVerticesPerEdge;
 
@@ -62,7 +62,7 @@ public:
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0"))
 	int32 PreviewLODLevel = 0;
 
-	/** LOD level to bootstrap at BeginPlay before SSE refines. */
+	/** Legacy vertex LOD bootstrap level (unused when using subdivision LOD). */
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0"))
 	int32 BootstrapLODLevel = 0;
 
@@ -89,6 +89,30 @@ public:
 	/** Scales computed geometric error per LOD (bigger = more aggressive upgrades). */
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.01"))
 	float GeometricErrorMultiplier = 1.0f;
+
+	/** Maximum quadtree subdivision level per base chunk (0 = no splits). */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0", UIMin="0"))
+	int32 MaxSubdivisionLevel = 6;
+
+	/** Force detail by target world edge length near camera (0 disables). */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0", UIMin="0.0"))
+	float TargetEdgeLengthMeters = 1.0f;
+
+	/** Range around camera to enforce target edge length (0 disables). */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0", UIMin="0.0"))
+	float TargetEdgeRangeKm = 5.0f;
+
+	/** Enable skirts to hide cracks between subdivision levels. */
+	UPROPERTY(EditAnywhere, Category="LOD")
+	bool bEnableChunkSkirts = true;
+
+	/** Skirt depth as a fraction of patch size. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0", UIMin="0.0"))
+	float SkirtDepthScale = 0.05f;
+
+	/** Minimum skirt depth in meters. */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0", UIMin="0.0"))
+	float SkirtMinDepthMeters = 1.0f;
 
 	/** Enable distance-based streaming: только чанки в радиусе активны, остальные выгружаются. */
 	UPROPERTY(EditAnywhere, Category="Streaming")
@@ -526,7 +550,7 @@ private:
 	void StartLODSystem();
 
 	TArray<int32> GetOrderedLODVertices() const;
-	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
+	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
 
 	void BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
 	static FVector3f CubeToSphere(const FVector3f& P);

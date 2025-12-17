@@ -17,17 +17,19 @@ class FCubedSphereLODSystem
 public:
 	explicit FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner);
 
-	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, const TArray<int32>& InLodVerticesPerEdge, int32 BootstrapLodIndex, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier);
+	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm);
 	void Tick(float DeltaSeconds);
 	void Shutdown();
 
 private:
-	struct FChunkState
+	struct FChunkNode
 	{
 		int32 FaceIndex = 0;
+		int32 Level = 0;
 		int32 ChunkX = 0;
 		int32 ChunkY = 0;
-		int32 SectionId = 0;
+		int32 ParentIndex = INDEX_NONE;
+		int32 Children[4] = { INDEX_NONE, INDEX_NONE, INDEX_NONE, INDEX_NONE };
 
 		FVector FaceNormal;
 		FVector FaceRight;
@@ -41,38 +43,44 @@ private:
 		FRealtimeMeshSectionGroupKey GroupKey;
 		FRealtimeMeshSectionKey SectionKey;
 
-		int32 CurrentLOD = INDEX_NONE;
-		int32 PendingLOD = INDEX_NONE;
-		float LastSSE = 0.0f;
+		bool bInUse = false;
+		bool bIsLeaf = true;
 		bool bIsActive = true;
+		bool bHasMesh = false;
+		bool bRetireAfterSplit = false;
+
+		int32 BuildVersion = 0;
+		int32 PendingBuildVersion = 0;
+		bool bBuildInProgress = false;
+
+		float LastSSE = 0.0f;
 	};
 
 	struct FChunkBuildRequest
 	{
-		int32 ChunkIndex = INDEX_NONE;
-		int32 LodIndex = INDEX_NONE;
+		int32 NodeIndex = INDEX_NONE;
+		int32 BuildVersion = 0;
 	};
 
 	struct FChunkBuildResult
 	{
-		int32 ChunkIndex = INDEX_NONE;
-		int32 LodIndex = INDEX_NONE;
+		int32 NodeIndex = INDEX_NONE;
+		int32 BuildVersion = 0;
 		RealtimeMesh::FRealtimeMeshStreamSet Streams;
 	};
 
 	ACubedSpherePlanetActor* Owner = nullptr;
 	URealtimeMeshSimple* Mesh = nullptr;
 
-	TArray<int32> LodVertices;
-	TArray<float> LodErrorsCm;
-	TArray<FChunkState> Chunks;
+	TArray<FChunkNode> Nodes;
 	TQueue<FChunkBuildRequest> BuildQueue;
 	TQueue<FChunkBuildResult, EQueueMode::Mpsc> CompletedQueue;
 
 	int32 ChunksPerFace = 0;
 	float PlanetRadiusCm = 0.0f;
-	float ChunkSize = 0.0f;
-	float MaxPatchSizeCm = 0.0f;
+	int32 VerticesPerEdge = 0;
+	int32 MaxSubdivisionLevel = 0;
+	float BaseChunkSize = 0.0f;
 
 	float EvaluationAccumulator = 0.0f;
 	float EvaluationIntervalSeconds = 0.1f;
@@ -90,17 +98,33 @@ private:
 	float ActiveRangeBufferCm = 0.0f;
 	float HyperdriveSpeedThreshold = 0.0f;
 	float HyperdriveRangeMultiplier = 1.0f;
-	int32 BootstrapLOD = 0;
-	int32 MinLOD = 0;
+
+	bool bEnableSkirts = true;
+	float SkirtDepthScale = 0.05f;
+	float SkirtMinDepthCm = 0.0f;
+	float TargetEdgeLengthCm = 0.0f;
+	float TargetEdgeRangeCm = 0.0f;
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	bool bHasPrevCam = false;
 
-	void EnqueueInitialBuilds(int32 BootstrapLodIndex);
-	void EvaluateLOD();
+	void CreateRootNodes();
+	int32 CreateNode(int32 FaceIndex, int32 Level, int32 ChunkX, int32 ChunkY, int32 ParentIndex);
+	void ActivateNode(int32 NodeIndex, bool bMakeLeaf);
+
+	void UpdateNodeBounds(FChunkNode& Node);
+	float GetChunkSize(int32 Level) const;
+	float ComputeSkirtDepthCm(const FChunkNode& Node) const;
+	float ComputeScreenSpaceError(const FChunkNode& Node, float DistanceCm, float PixelsPerCm, float ActorScale) const;
+
+	void EvaluateLOD(const FVector& CamLocation, float PixelsPerCm, float ActorScale, float ActivateRange, float DeactivateRange, const FTransform& PlanetTransform);
+
+	void SplitNode(int32 NodeIndex);
+	void MergeNode(int32 ParentIndex);
+	bool AreChildrenReadyToMerge(const FChunkNode& Node) const;
+	void RetireParentIfReady(int32 ParentIndex);
+
+	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);
 	void ProcessCompletedBuilds();
-	void EnqueueBuild(int32 ChunkIndex, int32 LodIndex);
-	float ComputeScreenSpaceError(const FChunkState& Chunk, int32 LodIndex, float DistanceCm, float PixelsPerCm, float ActorScale) const;
-	void UpdateActiveChunks(const FVector& CamLocation, float DeltaSeconds, float CameraSpeedCmPerSec, const FTransform& PlanetTransform, float ActorScale, int32 BootstrapLodIndex);
 };

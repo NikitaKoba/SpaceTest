@@ -2,29 +2,11 @@
 
 #include "FastNoiseLite.h"
 #include "CubedSphereLODSystem.h"
+#include "CubedSphereFaces.h"
 #include "Components/SceneComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
-
-namespace
-{
-	struct FCubedSphereFace
-	{
-		FVector Normal;
-		FVector Right;
-		FVector Up;
-	};
-
-	const FCubedSphereFace Faces[6] = {
-		{ FVector(1, 0, 0),  FVector(0, 1, 0),  FVector(0, 0, 1) },  // +X
-		{ FVector(-1, 0, 0), FVector(0, -1, 0), FVector(0, 0, 1) }, // -X
-		{ FVector(0, 1, 0),  FVector(1, 0, 0),  FVector(0, 0, -1) }, // +Y
-		{ FVector(0, -1, 0), FVector(1, 0, 0), FVector(0, 0, 1) },  // -Y
-		{ FVector(0, 0, 1),  FVector(1, 0, 0),  FVector(0, 1, 0) },  // +Z
-		{ FVector(0, 0, -1), FVector(1, 0, 0),  FVector(0, -1, 0) }  // -Z
-	};
-}
 
 ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 {
@@ -642,17 +624,34 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	float HalfExtent,
 	float ChunkSize,
 	float RadiusCm,
-	int32 VerticesPerEdge) const
+	int32 VerticesPerEdge,
+	bool bEnableSkirts,
+	float SkirtDepthCm) const
 {
 	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
+	const bool bUseSkirts = bEnableSkirts && SkirtDepthCm > 0.0f;
+	const int32 VertCount = VertEdge * VertEdge;
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
 	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
 	Builder.EnableTangents();
 	Builder.EnableTexCoords();
 	Builder.EnablePolyGroups();
+
+	TArray<FVector3f> BasePositions;
+	TArray<FVector3f> BaseNormals;
+	TArray<FVector3f> BaseTangents;
+	TArray<FVector2f> BaseUVs;
+
+	if (bUseSkirts)
+	{
+		BasePositions.SetNum(VertCount);
+		BaseNormals.SetNum(VertCount);
+		BaseTangents.SetNum(VertCount);
+		BaseUVs.SetNum(VertCount);
+	}
 
 	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
 
@@ -677,6 +676,7 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 		for (int32 X = 0; X < VertEdge; ++X)
 		{
 			const float U = -HalfExtent + (ChunkX * ChunkSize) + X * Step;
+			const int32 Index = Y * VertEdge + X;
 
 			const FVector3f CubePoint =
 				FVector3f(FaceNormal) +
@@ -706,13 +706,22 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 			}
 
 			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
+			const FVector2f UV(
+				(U + HalfExtent) / (HalfExtent * 2.0f),
+				(V + HalfExtent) / (HalfExtent * 2.0f)
+			);
+
+			if (bUseSkirts)
+			{
+				BasePositions[Index] = P;
+				BaseNormals[Index] = N;
+				BaseTangents[Index] = Tangent;
+				BaseUVs[Index] = UV;
+			}
 
 			Builder.AddVertex(P)
 				.SetNormalAndTangent(N, Tangent)
-				.SetTexCoord(FVector2f(
-					(U + HalfExtent) / (HalfExtent * 2.0f),
-					(V + HalfExtent) / (HalfExtent * 2.0f)
-				));
+				.SetTexCoord(UV);
 		}
 	}
 
@@ -728,6 +737,60 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 			Builder.AddTriangle(I0, I2, I1, 0);
 			Builder.AddTriangle(I1, I2, I3, 0);
 		}
+	}
+
+	if (bUseSkirts)
+	{
+		int32 NextVertexIndex = VertCount;
+		TArray<uint32> SkirtTop;
+		TArray<uint32> SkirtBottom;
+		TArray<uint32> SkirtLeft;
+		TArray<uint32> SkirtRight;
+
+		auto AddSkirtEdge = [&](int32 StartIndex, int32 Stride, TArray<uint32>& OutIndices)
+		{
+			OutIndices.SetNum(VertEdge);
+			for (int32 i = 0; i < VertEdge; ++i)
+			{
+				const int32 BaseIndex = StartIndex + i * Stride;
+				const FVector3f& BasePos = BasePositions[BaseIndex];
+				const FVector3f Radial = BasePos.GetSafeNormal();
+				const FVector3f SkirtPos = BasePos - Radial * SkirtDepthCm;
+				const uint32 SkirtIndex = static_cast<uint32>(NextVertexIndex++);
+
+				Builder.AddVertex(SkirtPos)
+					.SetNormalAndTangent(BaseNormals[BaseIndex], BaseTangents[BaseIndex])
+					.SetTexCoord(BaseUVs[BaseIndex]);
+
+				OutIndices[i] = SkirtIndex;
+			}
+		};
+
+		auto AddSkirtTriangles = [&](int32 BaseStart, int32 BaseStride, const TArray<uint32>& SkirtIndices)
+		{
+			for (int32 i = 0; i < VertEdge - 1; ++i)
+			{
+				const uint32 I0 = static_cast<uint32>(BaseStart + i * BaseStride);
+				const uint32 I1 = static_cast<uint32>(BaseStart + (i + 1) * BaseStride);
+				const uint32 S0 = SkirtIndices[i];
+				const uint32 S1 = SkirtIndices[i + 1];
+
+				Builder.AddTriangle(I0, S0, I1, 0);
+				Builder.AddTriangle(I1, S0, S1, 0);
+				Builder.AddTriangle(I1, S0, I0, 0);
+				Builder.AddTriangle(S1, S0, I1, 0);
+			}
+		};
+
+		AddSkirtEdge(0, 1, SkirtTop);
+		AddSkirtEdge((VertEdge - 1) * VertEdge, 1, SkirtBottom);
+		AddSkirtEdge(0, VertEdge, SkirtLeft);
+		AddSkirtEdge(VertEdge - 1, VertEdge, SkirtRight);
+
+		AddSkirtTriangles(0, 1, SkirtTop);
+		AddSkirtTriangles((VertEdge - 1) * VertEdge, 1, SkirtBottom);
+		AddSkirtTriangles(0, VertEdge, SkirtLeft);
+		AddSkirtTriangles(VertEdge - 1, VertEdge, SkirtRight);
 	}
 
 	return StreamSet;
@@ -1084,12 +1147,6 @@ void ACubedSpherePlanetActor::StartLODSystem()
 		return;
 	}
 
-	const TArray<int32> LodList = GetOrderedLODVertices();
-	if (LodList.Num() == 0)
-	{
-		return;
-	}
-
 	InitializeNoise();
 
 	URealtimeMeshSimple* Mesh = ResetRuntimeMesh();
@@ -1098,12 +1155,15 @@ void ACubedSpherePlanetActor::StartLODSystem()
 		return;
 	}
 
-	const int32 BootstrapIndex = FMath::Clamp(BootstrapLODLevel, 0, LodList.Num() - 1);
-
 	LODSystem = MakeUnique<FCubedSphereLODSystem>(*this);
 	const float RangeCm = ActiveRangeKm * 100000.0f;
 	const float BufferCm = ActiveRangeBufferKm * 100000.0f;
 	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
-	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), LodList, BootstrapIndex, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, HyperThreshold, HyperdriveRangeMultiplier);
+	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
+	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
+	// Hardcoded 1m edge length within 3km of the camera.
+	const float TargetEdgeLengthCm = 100.0f;
+	const float TargetEdgeRangeCm = 300000.0f;
+	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm);
 	LODSystem->Tick(0.0f);
 }
