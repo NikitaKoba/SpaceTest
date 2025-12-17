@@ -62,7 +62,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	TargetEdgeLengthCm = FMath::Max(0.0f, InTargetEdgeLengthCm);
 	TargetEdgeRangeCm = FMath::Max(0.0f, InTargetEdgeRangeCm);
 
-	bBootstrapping = true;
+	bBootstrapping = !bStreamingEnabled;
 	bHasPrevCam = false;
 
 	CreateRootNodes();
@@ -85,9 +85,12 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 			MaxSubdivisionLevel = FMath::Clamp(FMath::Max(MaxSubdivisionLevel, RequiredLevel), 0, 18);
 		}
 	}
-	for (int32 Index = 0; Index < Nodes.Num(); ++Index)
+	if (!bStreamingEnabled)
 	{
-		EnqueueBuild(Index);
+		for (int32 Index = 0; Index < Nodes.Num(); ++Index)
+		{
+			EnqueueBuild(Index);
+		}
 	}
 }
 
@@ -110,6 +113,11 @@ void FCubedSphereLODSystem::CreateRootNodes()
 
 int32 FCubedSphereLODSystem::CreateNode(int32 FaceIndex, int32 Level, int32 ChunkX, int32 ChunkY, int32 ParentIndex)
 {
+	if (FaceIndex < 0 || FaceIndex >= UE_ARRAY_COUNT(Faces))
+	{
+		return INDEX_NONE;
+	}
+
 	FChunkNode Node;
 	Node.FaceIndex = FaceIndex;
 	Node.Level = Level;
@@ -174,13 +182,30 @@ void FCubedSphereLODSystem::UpdateNodeBounds(FChunkNode& Node)
 	Node.CenterDir = ACubedSpherePlanetActor::CubeToSphere(CubePoint).GetSafeNormal();
 	Node.LocalCenter = FVector(Node.CenterDir * PlanetRadiusCm);
 
-	const FVector3f OffsetU = ACubedSpherePlanetActor::CubeToSphere(CubePoint + FVector3f(Node.FaceRight) * (ChunkSize * 0.5f)).GetSafeNormal();
-	const FVector3f OffsetV = ACubedSpherePlanetActor::CubeToSphere(CubePoint + FVector3f(Node.FaceUp) * (ChunkSize * 0.5f)).GetSafeNormal();
-	const float HalfWidth = FVector::Distance(FVector(Node.CenterDir * PlanetRadiusCm), FVector(OffsetU * PlanetRadiusCm));
-	const float HalfHeight = FVector::Distance(FVector(Node.CenterDir * PlanetRadiusCm), FVector(OffsetV * PlanetRadiusCm));
+	const float U0 = -HalfExtent + Node.ChunkX * ChunkSize;
+	const float U1 = U0 + ChunkSize;
+	const float V0 = -HalfExtent + Node.ChunkY * ChunkSize;
+	const float V1 = V0 + ChunkSize;
 
-	Node.PatchSizeCm = 2.0f * FMath::Max(HalfWidth, HalfHeight);
-	Node.BoundingRadiusCm = Node.PatchSizeCm * 0.75f;
+	const FVector CenterPos = FVector(Node.CenterDir * PlanetRadiusCm);
+	float MaxCornerDist = 0.0f;
+
+	const FVector3f CornerPoints[4] =
+	{
+		ACubedSpherePlanetActor::CubeToSphere(FVector3f(Node.FaceNormal) + FVector3f(Node.FaceRight) * U0 + FVector3f(Node.FaceUp) * V0).GetSafeNormal(),
+		ACubedSpherePlanetActor::CubeToSphere(FVector3f(Node.FaceNormal) + FVector3f(Node.FaceRight) * U1 + FVector3f(Node.FaceUp) * V0).GetSafeNormal(),
+		ACubedSpherePlanetActor::CubeToSphere(FVector3f(Node.FaceNormal) + FVector3f(Node.FaceRight) * U0 + FVector3f(Node.FaceUp) * V1).GetSafeNormal(),
+		ACubedSpherePlanetActor::CubeToSphere(FVector3f(Node.FaceNormal) + FVector3f(Node.FaceRight) * U1 + FVector3f(Node.FaceUp) * V1).GetSafeNormal()
+	};
+
+	for (const FVector3f& CornerDir : CornerPoints)
+	{
+		const FVector CornerPos = FVector(CornerDir * PlanetRadiusCm);
+		MaxCornerDist = FMath::Max(MaxCornerDist, FVector::Distance(CenterPos, CornerPos));
+	}
+
+	Node.PatchSizeCm = 2.0f * MaxCornerDist;
+	Node.BoundingRadiusCm = MaxCornerDist;
 }
 
 float FCubedSphereLODSystem::GetChunkSize(int32 Level) const
@@ -249,10 +274,15 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 			Node.bIsActive = false;
 		}
 
+		if (Node.bIsActive && Node.bIsLeaf && !Node.bHasMesh && !Node.bBuildInProgress)
+		{
+			EnqueueBuild(Index);
+		}
+
 		const float Sse = ComputeScreenSpaceError(Node, Distance, PixelsPerCm, ActorScale);
 		Node.LastSSE = Sse;
 
-		if (Node.bIsActive && Node.bHasMesh && Node.Level < MaxSubdivisionLevel && (Sse > TargetErrorPixels + ErrorHysteresisPixels || bNeedsEdgeDetail))
+		if (Node.bIsActive && Node.Level < MaxSubdivisionLevel && (Sse > TargetErrorPixels + ErrorHysteresisPixels || bNeedsEdgeDetail))
 		{
 			SplitList.Add(Index);
 		}
@@ -354,15 +384,19 @@ void FCubedSphereLODSystem::SplitNode(int32 NodeIndex)
 		return;
 	}
 
-	FChunkNode& Node = Nodes[NodeIndex];
-	if (!Node.bInUse || !Node.bIsLeaf || Node.Level >= MaxSubdivisionLevel)
+	const FChunkNode NodeSnapshot = Nodes[NodeIndex];
+	if (!NodeSnapshot.bInUse || !NodeSnapshot.bIsLeaf || NodeSnapshot.Level >= MaxSubdivisionLevel)
 	{
 		return;
 	}
 
-	const int32 ChildLevel = Node.Level + 1;
-	const int32 BaseX = Node.ChunkX * 2;
-	const int32 BaseY = Node.ChunkY * 2;
+	const int32 ChildLevel = NodeSnapshot.Level + 1;
+	const int32 BaseX = NodeSnapshot.ChunkX * 2;
+	const int32 BaseY = NodeSnapshot.ChunkY * 2;
+	const int32 FaceIndex = NodeSnapshot.FaceIndex;
+	const bool bParentActive = NodeSnapshot.bIsActive;
+	const bool bParentHasMesh = NodeSnapshot.bHasMesh;
+	int32 ExistingChildren[4] = { NodeSnapshot.Children[0], NodeSnapshot.Children[1], NodeSnapshot.Children[2], NodeSnapshot.Children[3] };
 
 	const int32 Offsets[4][2] =
 	{
@@ -372,37 +406,47 @@ void FCubedSphereLODSystem::SplitNode(int32 NodeIndex)
 		{1, 1}
 	};
 
-	if (Node.Children[0] == INDEX_NONE)
+	if (ExistingChildren[0] == INDEX_NONE)
 	{
 		for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 		{
 			const int32 ChildX = BaseX + Offsets[ChildSlot][0];
 			const int32 ChildY = BaseY + Offsets[ChildSlot][1];
-			const int32 ChildIndex = CreateNode(Node.FaceIndex, ChildLevel, ChildX, ChildY, NodeIndex);
-			Node.Children[ChildSlot] = ChildIndex;
+			const int32 ChildIndex = CreateNode(FaceIndex, ChildLevel, ChildX, ChildY, NodeIndex);
+			if (!Nodes.IsValidIndex(NodeIndex))
+			{
+				return;
+			}
+			Nodes[NodeIndex].Children[ChildSlot] = ChildIndex;
+			ExistingChildren[ChildSlot] = ChildIndex;
 		}
 	}
 	else
 	{
 		for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 		{
-			ActivateNode(Node.Children[ChildSlot], true);
+			ActivateNode(ExistingChildren[ChildSlot], true);
 		}
 	}
 
-	Node.bIsLeaf = false;
-	Node.bRetireAfterSplit = Node.bHasMesh;
+	if (!Nodes.IsValidIndex(NodeIndex))
+	{
+		return;
+	}
+
+	Nodes[NodeIndex].bIsLeaf = false;
+	Nodes[NodeIndex].bRetireAfterSplit = bParentHasMesh;
 
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
-		const int32 ChildIndex = Node.Children[ChildSlot];
+		const int32 ChildIndex = ExistingChildren[ChildSlot];
 		if (!Nodes.IsValidIndex(ChildIndex))
 		{
 			continue;
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
-		Child.bIsActive = Node.bIsActive;
+		Child.bIsActive = bParentActive;
 		Child.bHasMesh = false;
 		Child.bBuildInProgress = false;
 		Child.BuildVersion++;
@@ -694,7 +738,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 	}
 	const float DeactivateRange = ActivateRange + ActiveRangeBufferCm;
 
-	if (!bBootstrapping)
+	if (!bBootstrapping || TargetEdgeLengthCm > 0.0f)
 	{
 		EvaluationAccumulator += DeltaSeconds;
 		if (EvaluationAccumulator >= EvaluationIntervalSeconds)

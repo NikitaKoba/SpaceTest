@@ -1161,9 +1161,9 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
 	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
 	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
-	// Hardcoded 1m edge length within 3km of the camera.
+	// Hardcoded 1m edge length within 2km of the camera.
 	const float TargetEdgeLengthCm = 100.0f;
-	const float TargetEdgeRangeCm = 300000.0f;
+	const float TargetEdgeRangeCm = 200000.0f;
 	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm);
 	LODSystem->Tick(0.0f);
 }
