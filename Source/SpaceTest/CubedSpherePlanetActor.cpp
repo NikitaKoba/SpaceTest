@@ -67,7 +67,7 @@ FVector3f ACubedSpherePlanetActor::CubeToSphere(const FVector3f& P)
 }
 FVector3f ACubedSpherePlanetActor::GeneratePOIPosition(int32 Index, int32 TotalCount) const
 {
-	// Генерируем детерминированную позицию на сфере из seed + index
+	// Р“РµРЅРµСЂРёСЂСѓРµРј РґРµС‚РµСЂРјРёРЅРёСЂРѕРІР°РЅРЅСѓСЋ РїРѕР·РёС†РёСЋ РЅР° СЃС„РµСЂРµ РёР· seed + index
 	const uint32 hash = POISeed * 73856093 ^ Index * 19349663;
 	const float phi = (hash & 0xFFFF) / 65535.0f * 2.0f * PI;
 	const float theta = ((hash >> 16) & 0xFFFF) / 65535.0f * PI;
@@ -82,7 +82,7 @@ FVector3f ACubedSpherePlanetActor::GeneratePOIPosition(int32 Index, int32 TotalC
 
 float ACubedSpherePlanetActor::GetDistanceToPointKm(const FVector3f& Point1, const FVector3f& Point2) const
 {
-	// Расстояние по поверхности сферы (great circle distance)
+	// Р Р°СЃСЃС‚РѕСЏРЅРёРµ РїРѕ РїРѕРІРµСЂС…РЅРѕСЃС‚Рё СЃС„РµСЂС‹ (great circle distance)
 	const float dot = FMath::Clamp(FVector3f::DotProduct(Point1, Point2), -1.0f, 1.0f);
 	const float angle = FMath::Acos(dot);
 	return angle * PlanetRadiusKm;
@@ -97,7 +97,7 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 
 	float totalPOIHeight = 0.f;
 
-	// === 1. СУПЕРВУЛКАНЫ ===
+	// === 1. РЎРЈРџР•Р Р’РЈР›РљРђРќР« ===
 	
 	if (bEnableSuperVolcanoes && SuperVolcanoCount > 0 && SuperVolcanoHeightKm > 0.f)
 	{
@@ -108,18 +108,18 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 			
 			if (distKm < SuperVolcanoRadiusKm * 2.0f)
 			{
-				// Профиль вулкана - конус с кальдерой на вершине
+				// РџСЂРѕС„РёР»СЊ РІСѓР»РєР°РЅР° - РєРѕРЅСѓСЃ СЃ РєР°Р»СЊРґРµСЂРѕР№ РЅР° РІРµСЂС€РёРЅРµ
 				const float radiusCm = SuperVolcanoRadiusKm * 100000.0f;
 				const float distCm = distKm * 100000.0f;
 				
-				// Основной конус
+				// РћСЃРЅРѕРІРЅРѕР№ РєРѕРЅСѓСЃ
 				float coneHeight = 1.0f - (distCm / radiusCm);
 				coneHeight = FMath::Clamp(coneHeight, 0.0f, 1.0f);
 				coneHeight = FMath::Pow(coneHeight, SuperVolcanoSteepness);
 				
 				float height = coneHeight * SuperVolcanoHeightKm * 100000.0f;
 				
-				// Кальдера на вершине
+				// РљР°Р»СЊРґРµСЂР° РЅР° РІРµСЂС€РёРЅРµ
 				if (SuperVolcanoCalderaDepthKm > 0.f)
 				{
 					const float calderaRadiusCm = SuperVolcanoCalderaRadiusKm * 100000.0f;
@@ -136,7 +136,7 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 		}
 	}
 
-	// === 2. УДАРНЫЕ КРАТЕРЫ ===
+	// === 2. РЈР”РђР РќР«Р• РљР РђРўР•Р Р« ===
 	
 	if (bEnableImpactCraters && ImpactCraterCount > 0 && ImpactCraterDepthKm > 0.f)
 	{
@@ -157,18 +157,18 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 				
 				if (distCm < craterRadiusCm)
 				{
-					// Внутри кратера - параболическая депрессия
+					// Р’РЅСѓС‚СЂРё РєСЂР°С‚РµСЂР° - РїР°СЂР°Р±РѕР»РёС‡РµСЃРєР°СЏ РґРµРїСЂРµСЃСЃРёСЏ
 					const float t = distCm / craterRadiusCm;
 					const float depth = (1.0f - t * t);
 					height = -depth * ImpactCraterDepthKm * 100000.0f;
 				}
 				else if (distCm < rimRadiusCm)
 				{
-					// Вал вокруг кратера
+					// Р’Р°Р» РІРѕРєСЂСѓРі РєСЂР°С‚РµСЂР°
 					const float rimDist = distCm - craterRadiusCm;
 					const float rimWidth = rimRadiusCm - craterRadiusCm;
 					const float t = rimDist / rimWidth;
-					const float rimProfile = FMath::Sin(t * PI); // Плавный вал
+					const float rimProfile = FMath::Sin(t * PI); // РџР»Р°РІРЅС‹Р№ РІР°Р»
 					height = rimProfile * ImpactCraterRimHeightKm * 100000.0f;
 				}
 				
@@ -177,30 +177,30 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 		}
 	}
 
-	// === 3. ГИГАНТСКИЙ КАНЬОН ===
+	// === 3. Р“РР“РђРќРўРЎРљРР™ РљРђРќР¬РћРќ ===
 	
 	if (bEnableGrandCanyon && CanyonDepthKm > 0.f)
 	{
-		// Каньон идёт вдоль экватора с извилинами
+		// РљР°РЅСЊРѕРЅ РёРґС‘С‚ РІРґРѕР»СЊ СЌРєРІР°С‚РѕСЂР° СЃ РёР·РІРёР»РёРЅР°РјРё
 		const FVector3f canyonStart = GeneratePOIPosition(3000, 1);
 		
-		// Вычисляем локальную систему координат для каньона
+		// Р’С‹С‡РёСЃР»СЏРµРј Р»РѕРєР°Р»СЊРЅСѓСЋ СЃРёСЃС‚РµРјСѓ РєРѕРѕСЂРґРёРЅР°С‚ РґР»СЏ РєР°РЅСЊРѕРЅР°
 		const FVector3f canyonDir = FVector3f::CrossProduct(canyonStart, FVector3f(0, 0, 1)).GetSafeNormal();
 		
-		// Проекция текущей точки на направление каньона
+		// РџСЂРѕРµРєС†РёСЏ С‚РµРєСѓС‰РµР№ С‚РѕС‡РєРё РЅР° РЅР°РїСЂР°РІР»РµРЅРёРµ РєР°РЅСЊРѕРЅР°
 		const float alongCanyon = FVector3f::DotProduct(SphereDir, canyonDir);
 		const float perpCanyon = FVector3f::DotProduct(SphereDir, canyonStart);
 		
-		// Конвертируем в "координаты каньона"
+		// РљРѕРЅРІРµСЂС‚РёСЂСѓРµРј РІ "РєРѕРѕСЂРґРёРЅР°С‚С‹ РєР°РЅСЊРѕРЅР°"
 		const float canyonAngle = FMath::Atan2(alongCanyon, perpCanyon);
 		const float canyonLength = FMath::DegreesToRadians(CanyonLengthDegrees);
 		
 		if (FMath::Abs(canyonAngle) < canyonLength * 0.5f)
 		{
-			// Извилистость через синусоиду
+			// РР·РІРёР»РёСЃС‚РѕСЃС‚СЊ С‡РµСЂРµР· СЃРёРЅСѓСЃРѕРёРґСѓ
 			const float wiggle = FMath::Sin(canyonAngle * 8.0f) * CanyonWindiness;
 			
-			// Расстояние от центральной линии каньона
+			// Р Р°СЃСЃС‚РѕСЏРЅРёРµ РѕС‚ С†РµРЅС‚СЂР°Р»СЊРЅРѕР№ Р»РёРЅРёРё РєР°РЅСЊРѕРЅР°
 			const float crossAngle = FMath::Acos(FMath::Clamp(FVector3f::DotProduct(SphereDir, canyonStart), -1.0f, 1.0f));
 			const float wiggleAngle = crossAngle + wiggle * 0.1f;
 			const float crossDistKm = wiggleAngle * PlanetRadiusKm;
@@ -214,18 +214,18 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 				float depth = 0.f;
 				if (t < 1.0f)
 				{
-					// V-образный профиль каньона
+					// V-РѕР±СЂР°Р·РЅС‹Р№ РїСЂРѕС„РёР»СЊ РєР°РЅСЊРѕРЅР°
 					depth = (1.0f - t);
-					depth = FMath::Pow(depth, 1.5f); // Немного параболический
+					depth = FMath::Pow(depth, 1.5f); // РќРµРјРЅРѕРіРѕ РїР°СЂР°Р±РѕР»РёС‡РµСЃРєРёР№
 				}
 				else
 				{
-					// Плавные края
+					// РџР»Р°РІРЅС‹Рµ РєСЂР°СЏ
 					const float edgeFade = 2.0f - t;
 					depth = FMath::Pow(edgeFade, 3.0f) * 0.3f;
 				}
 				
-				// Вариация глубины вдоль каньона
+				// Р’Р°СЂРёР°С†РёСЏ РіР»СѓР±РёРЅС‹ РІРґРѕР»СЊ РєР°РЅСЊРѕРЅР°
 				const float depthVariation = 0.7f + 0.3f * FMath::Sin(canyonAngle * 4.0f);
 				
 				totalPOIHeight -= depth * CanyonDepthKm * 100000.0f * depthVariation;
@@ -235,18 +235,21 @@ float ACubedSpherePlanetActor::GetPOIHeightCm(const FVector3f& SphereDir) const
 
 	return totalPOIHeight;
 }
-float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, const FVector3f& WarpedPos, float ContinentMask) const
+float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, float ContinentMask) const
 {
 	if (!bEnableMountains || ContinentMask <= KINDA_SMALL_NUMBER)
 	{
 		return 0.f;
 	}
 
-	// === 1. МАСКА РАСПРЕДЕЛЕНИЯ ГОР ===
+	// === 1. РњРђРЎРљРђ Р РђРЎРџР Р•Р”Р•Р›Р•РќРРЇ Р“РћР  ===
 	
-	FVector3f MountainMaskPos = SphereDir * MountainMaskFrequency;
+	const float DomainScale = FMath::Max(0.001f, MountainDomainScale);
+	const FVector3f MountainBasePos = SphereDir * DomainScale;
+
+	FVector3f MountainMaskPos = MountainBasePos * MountainMaskFrequency;
 	
-	// Domain warp для маски
+	// Domain warp РґР»СЏ РјР°СЃРєРё
 	if (MountainMaskWarpStrength > 0.f && MountainMaskWarpNoise)
 	{
 		const float wFreq = MountainMaskFrequency * 1.5f;
@@ -256,7 +259,7 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 		MountainMaskPos += FVector3f(wx, wy, wz) * MountainMaskWarpStrength;
 	}
 
-	// FBM для маски гор
+	// FBM РґР»СЏ РјР°СЃРєРё РіРѕСЂ
 	float mountainMask = 0.f;
 	float mAmp = 1.0f;
 	float mFreq = 1.0f;
@@ -274,10 +277,10 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 	
 	mountainMask = FMath::Clamp(mountainMask * 0.5f + 0.5f, 0.0f, 1.0f);
 	
-	// Bias к центру или краям континента
+	// Bias Рє С†РµРЅС‚СЂСѓ РёР»Рё РєСЂР°СЏРј РєРѕРЅС‚РёРЅРµРЅС‚Р°
 	const float continentBias = FMath::Lerp(
-		FMath::Pow(ContinentMask, 0.5f),           // Ближе к краям
-		FMath::Pow(ContinentMask, 2.0f),           // Ближе к центру
+		FMath::Pow(ContinentMask, 0.5f),           // Р‘Р»РёР¶Рµ Рє РєСЂР°СЏРј
+		FMath::Pow(ContinentMask, 2.0f),           // Р‘Р»РёР¶Рµ Рє С†РµРЅС‚СЂСѓ
 		MountainContinentBias
 	);
 	
@@ -287,7 +290,7 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 	mountainMask = (mountainMask - MountainMaskThreshold) / FMath::Max(KINDA_SMALL_NUMBER, 1.0f - MountainMaskThreshold);
 	mountainMask = FMath::Clamp(mountainMask, 0.0f, 1.0f);
 	
-	const float rawMountainMask = mountainMask; // Сохраняем для foothills
+	const float rawMountainMask = mountainMask; // РЎРѕС…СЂР°РЅСЏРµРј РґР»СЏ foothills
 	mountainMask = FMath::Pow(mountainMask, MountainMaskSharpness);
 	
 	if (mountainMask <= KINDA_SMALL_NUMBER && rawMountainMask <= KINDA_SMALL_NUMBER)
@@ -295,16 +298,16 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 		return 0.f;
 	}
 
-	// === 2. ВАРИАЦИЯ ВЫСОТЫ ГОР ===
+	// === 2. Р’РђР РРђР¦РРЇ Р’Р«РЎРћРўР« Р“РћР  ===
 	
 	float heightMultiplier = 1.0f;
 	if (MountainHeightVariation > 0.f && MountainHeightVarNoise)
 	{
 		const float hvFreq = MountainHeightVariationFrequency;
 		const float hvNoise = MountainHeightVarNoise->GetNoise(
-			WarpedPos.X * hvFreq,
-			WarpedPos.Y * hvFreq,
-			WarpedPos.Z * hvFreq
+			MountainBasePos.X * hvFreq,
+			MountainBasePos.Y * hvFreq,
+			MountainBasePos.Z * hvFreq
 		);
 		const float hvNorm = hvNoise * 0.5f + 0.5f; // [0..1]
 		heightMultiplier = FMath::Lerp(1.0f - MountainHeightVariation, 1.0f, hvNorm);
@@ -312,13 +315,13 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 
 	float totalHeight = 0.f;
 
-	// === 3. СКЛАДЧАТЫЕ ГОРНЫЕ ХРЕБТЫ (RIDGED) ===
+	// === 3. РЎРљР›РђР”Р§РђРўР«Р• Р“РћР РќР«Р• РҐР Р•Р‘РўР« (RIDGED) ===
 	
 	if (MountainRidgedHeightKm > 0.f && MountainRidgedNoise)
 	{
-		FVector3f ridgedPos = WarpedPos * MountainRidgedFrequency;
+		FVector3f ridgedPos = MountainBasePos * MountainRidgedFrequency;
 		
-		// Domain warp для искривления хребтов
+		// Domain warp РґР»СЏ РёСЃРєСЂРёРІР»РµРЅРёСЏ С…СЂРµР±С‚РѕРІ
 		if (MountainRidgedWarpStrength > 0.f && MountainRidgedWarpNoise)
 		{
 			const float rwFreq = MountainRidgedWarpFrequency;
@@ -355,7 +358,7 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 		
 		ridged = FMath::Clamp(ridged, 0.0f, 1.0f);
 		
-		// === 3.1 ЭРОЗИЯ СКЛОНОВ ===
+		// === 3.1 Р­Р РћР—РРЇ РЎРљР›РћРќРћР’ ===
 		
 		if (bEnableMountainErosion && MountainErosionNoise && MountainErosionStrength > 0.f)
 		{
@@ -372,19 +375,13 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 			}
 			
 			erosion = erosion * 0.5f + 0.5f; // [0..1]
-			
-			// Террасирование (создаёт ступеньки на склонах)
-			const float terraceSteps = 8.0f;
-			float terraced = FMath::Floor(ridged * terraceSteps) / terraceSteps;
-			terraced = FMath::Lerp(ridged, terraced, MountainErosionStrength * 0.3f);
-			
-			// Добавляем эрозионные детали
-			ridged = FMath::Lerp(ridged, terraced * erosion, MountainErosionStrength);
+			const float erosionMask = FMath::Lerp(1.0f, erosion, MountainErosionStrength);
+			ridged *= erosionMask;
 		}
 		
 		totalHeight += ridged * MountainRidgedHeightKm * 100000.0f * heightMultiplier;
 		
-		// === 3.2 СКАЛИСТЫЕ ДЕТАЛИ ===
+		// === 3.2 РЎРљРђР›РРЎРўР«Р• Р”Р•РўРђР›Р ===
 		
 		if (MountainRockyDetailHeightKm > 0.f && MountainRockyDetailNoise)
 		{
@@ -393,18 +390,43 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 			const float rockyNoise = MountainRockyDetailNoise->GetNoise(rdPos.X, rdPos.Y, rdPos.Z);
 			const float rocky = FMath::Abs(rockyNoise); // [0..1]
 			
-			// Детали сильнее на крутых склонах (где ridged высокий)
+			// Р”РµС‚Р°Р»Рё СЃРёР»СЊРЅРµРµ РЅР° РєСЂСѓС‚С‹С… СЃРєР»РѕРЅР°С… (РіРґРµ ridged РІС‹СЃРѕРєРёР№)
 			const float slopeInfluence = ridged;
 			totalHeight += rocky * MountainRockyDetailHeightKm * 100000.0f * slopeInfluence;
 		}
 	}
 
-	// === 4. ВУЛКАНИЧЕСКИЕ КОНУСЫ ===
+
+	// === 3.3 High-frequency slope detail ===
+	if (MountainSlopeDetailHeightKm > 0.f && MountainSlopeDetailNoise)
+	{
+		float detail = 0.f;
+		float dAmp = 1.0f;
+		float dFreq = MountainSlopeDetailFrequency;
+
+		for (int32 dOct = 0; dOct < MountainSlopeDetailOctaves; ++dOct)
+		{
+			const FVector3f dPos = MountainBasePos * dFreq;
+			float n = FMath::Abs(MountainSlopeDetailNoise->GetNoise(dPos.X, dPos.Y, dPos.Z));
+			n = FMath::Pow(n, MountainSlopeDetailSharpness);
+			detail += n * dAmp;
+
+			dFreq *= 2.0f;
+			dAmp *= 0.5f;
+		}
+
+		detail = FMath::Clamp(detail, 0.0f, 1.0f);
+
+		const float detailMask = FMath::Clamp(mountainMask, 0.0f, 1.0f);
+		totalHeight += detail * MountainSlopeDetailHeightKm * 100000.0f * detailMask;
+	}
+
+	// === 4. Р’РЈР›РљРђРќРР§Р•РЎРљРР• РљРћРќРЈРЎР« ===
 	
 	if (bEnableVolcanicPeaks && MountainVolcanicHeightKm > 0.f && MountainVolcanicNoise)
 	{
 		const float vFreq = MountainVolcanicFrequency;
-		const FVector3f vPos = WarpedPos * vFreq;
+		const FVector3f vPos = MountainBasePos * vFreq;
 		
 		const float cellNoise = MountainVolcanicNoise->GetNoise(vPos.X, vPos.Y, vPos.Z);
 		const float dist = FMath::Clamp(FMath::Abs(cellNoise), 0.0f, 1.0f);
@@ -416,27 +438,27 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 		totalHeight += cone * MountainVolcanicHeightKm * 100000.0f * 0.5f * heightMultiplier;
 	}
 
-	// === 5. ПРЕДГОРЬЯ ===
+	// === 5. РџР Р•Р”Р“РћР Р¬РЇ ===
 	
 	float foothillsHeight = 0.f;
 	if (bEnableFoothills && FoothillsHeightKm > 0.f && FoothillsNoise && rawMountainMask > KINDA_SMALL_NUMBER)
 	{
-		// Зона предгорий - переход от равнины к горам
+		// Р—РѕРЅР° РїСЂРµРґРіРѕСЂРёР№ - РїРµСЂРµС…РѕРґ РѕС‚ СЂР°РІРЅРёРЅС‹ Рє РіРѕСЂР°Рј
 		const float foothillZone = FMath::Clamp(
 			(rawMountainMask - (1.0f - FoothillsWidth)) / FMath::Max(KINDA_SMALL_NUMBER, FoothillsWidth),
 			0.0f,
 			1.0f
 		);
 		
-		// Инвертируем - предгорья на краях горной зоны
+		// РРЅРІРµСЂС‚РёСЂСѓРµРј - РїСЂРµРґРіРѕСЂСЊСЏ РЅР° РєСЂР°СЏС… РіРѕСЂРЅРѕР№ Р·РѕРЅС‹
 		const float foothillMask = (1.0f - mountainMask) * foothillZone;
 		
 		if (foothillMask > KINDA_SMALL_NUMBER)
 		{
 			const float fFreq = FoothillsFrequency;
-			const FVector3f fPos = WarpedPos * fFreq;
+			const FVector3f fPos = MountainBasePos * fFreq;
 			
-			// FBM для холмистой местности
+			// FBM РґР»СЏ С…РѕР»РјРёСЃС‚РѕР№ РјРµСЃС‚РЅРѕСЃС‚Рё
 			float hills = 0.f;
 			float fAmp = 1.0f;
 			float fOctFreq = 1.0f;
@@ -450,7 +472,7 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, c
 			}
 			
 			hills = FMath::Clamp(hills * 0.5f + 0.5f, 0.0f, 1.0f);
-			hills = FMath::Pow(hills, 1.5f); // Сглаживаем
+			hills = FMath::Pow(hills, 1.5f); // РЎРіР»Р°Р¶РёРІР°РµРј
 			
 			foothillsHeight = hills * FoothillsHeightKm * 100000.0f * foothillMask;
 		}
@@ -513,13 +535,13 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 		mask = FMath::Lerp(mask, mask * coast, FMath::Clamp(ContinentCoastInfluence, 0.0f, 1.0f));
 	}
 
-	// === НОВОЕ: Вариация береговой линии ===
+	// === РќРћР’РћР•: Р’Р°СЂРёР°С†РёСЏ Р±РµСЂРµРіРѕРІРѕР№ Р»РёРЅРёРё ===
 	float localShoreWidth = ContinentShoreWidth;
 	float localEdgeSharpness = ContinentMaskSharpness;
 
 	if (bEnableCoastalVariation && CoastalVariationNoise && CoastalDetailNoise)
 	{
-		// Крупная вариация (заливы, полуострова)
+		// РљСЂСѓРїРЅР°СЏ РІР°СЂРёР°С†РёСЏ (Р·Р°Р»РёРІС‹, РїРѕР»СѓРѕСЃС‚СЂРѕРІР°)
 		const float cvFreq = CoastalVariationFrequency;
 		const float coastalVar = CoastalVariationNoise->GetNoise(
 			WarpedPos.X * cvFreq, 
@@ -528,7 +550,7 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 		);
 		const float coastalVarNorm = coastalVar * 0.5f + 0.5f; // [0..1]
 
-		// Мелкие детали (фьорды, мелкие заливы)
+		// РњРµР»РєРёРµ РґРµС‚Р°Р»Рё (С„СЊРѕСЂРґС‹, РјРµР»РєРёРµ Р·Р°Р»РёРІС‹)
 		const float cdFreq = CoastalDetailFrequency;
 		const float coastalDetail = CoastalDetailNoise->GetNoise(
 			WarpedPos.X * cdFreq,
@@ -537,7 +559,7 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 		);
 		const float coastalDetailNorm = coastalDetail * 0.5f + 0.5f; // [0..1]
 
-		// Модуляция ширины берега (смешиваем крупную и мелкую вариацию)
+		// РњРѕРґСѓР»СЏС†РёСЏ С€РёСЂРёРЅС‹ Р±РµСЂРµРіР° (СЃРјРµС€РёРІР°РµРј РєСЂСѓРїРЅСѓСЋ Рё РјРµР»РєСѓСЋ РІР°СЂРёР°С†РёСЋ)
 		const float combinedVariation = FMath::Lerp(coastalVarNorm, coastalDetailNorm, 0.3f);
 		const float widthMod = FMath::Lerp(
 			1.0f - CoastalVariationStrength,
@@ -546,21 +568,21 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 		);
 		localShoreWidth *= widthMod;
 
-		// Мелкие детали также влияют на резкость краёв
+		// РњРµР»РєРёРµ РґРµС‚Р°Р»Рё С‚Р°РєР¶Рµ РІР»РёСЏСЋС‚ РЅР° СЂРµР·РєРѕСЃС‚СЊ РєСЂР°С‘РІ
 		const float detailMod = FMath::Lerp(
 			1.0f - CoastalDetailStrength,
 			1.0f + CoastalDetailStrength,
 			coastalDetailNorm
 		);
 		
-		// Применяем локальные "вмятины" к маске через мелкие детали
+		// РџСЂРёРјРµРЅСЏРµРј Р»РѕРєР°Р»СЊРЅС‹Рµ "РІРјСЏС‚РёРЅС‹" Рє РјР°СЃРєРµ С‡РµСЂРµР· РјРµР»РєРёРµ РґРµС‚Р°Р»Рё
 		mask *= FMath::Lerp(1.0f, detailMod, 0.5f);
 		
-		// Варьируем резкость края
+		// Р’Р°СЂСЊРёСЂСѓРµРј СЂРµР·РєРѕСЃС‚СЊ РєСЂР°СЏ
 		localEdgeSharpness *= FMath::Lerp(0.7f, 1.3f, coastalVarNorm);
 	}
 
-	// Threshold with smooth shoreline (используем локальные параметры)
+	// Threshold with smooth shoreline (РёСЃРїРѕР»СЊР·СѓРµРј Р»РѕРєР°Р»СЊРЅС‹Рµ РїР°СЂР°РјРµС‚СЂС‹)
 	const float threshold = FMath::Clamp(ContinentMaskThreshold, 0.0f, 1.0f);
 	const float shoreWidth = FMath::Clamp(localShoreWidth, 0.0f, 1.0f);
 	const bool bHasLowOverride = ContinentLowMaskOverride >= 0.0f;
@@ -570,7 +592,7 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 	const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, tHigh - tLow);
 	float s = FMath::Clamp((mask - tLow) * invRange, 0.0f, 1.0f);
 	
-	// Smoothstep с учётом локальной резкости
+	// Smoothstep СЃ СѓС‡С‘С‚РѕРј Р»РѕРєР°Р»СЊРЅРѕР№ СЂРµР·РєРѕСЃС‚Рё
 	s = FMath::Pow(s, CoastalEdgeSharpness);
 	s = s * s * (3.0f - 2.0f * s); // smoothstep
 	mask = s;
@@ -606,10 +628,10 @@ float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) 
 
 	float totalHeight = mask * (BaseHeightCm + detail * DetailHeightCm);
 	
-	// Добавляем горы поверх континентов
-	totalHeight += GetMountainHeightCm(SphereDir, WarpedPos, mask);
+	// Р”РѕР±Р°РІР»СЏРµРј РіРѕСЂС‹ РїРѕРІРµСЂС… РєРѕРЅС‚РёРЅРµРЅС‚РѕРІ
+	totalHeight += GetMountainHeightCm(SphereDir, mask);
 	
-	// Добавляем уникальные POI (не зависят от гор/континентов)
+	// Р”РѕР±Р°РІР»СЏРµРј СѓРЅРёРєР°Р»СЊРЅС‹Рµ POI (РЅРµ Р·Р°РІРёСЃСЏС‚ РѕС‚ РіРѕСЂ/РєРѕРЅС‚РёРЅРµРЅС‚РѕРІ)
 	totalHeight += GetPOIHeightCm(SphereDir);
 	
 	return totalHeight;
@@ -631,6 +653,8 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
+	const float ApproxEdgeLengthCm = Step * RadiusCm;
+	const float SampleDistanceCm = FMath::Max(1.0f, ApproxEdgeLengthCm * 0.75f);
 	const bool bUseSkirts = bEnableSkirts && SkirtDepthCm > 0.0f;
 	const int32 VertCount = VertEdge * VertEdge;
 
@@ -652,8 +676,6 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 		BaseTangents.SetNum(VertCount);
 		BaseUVs.SetNum(VertCount);
 	}
-
-	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
 
 	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
 	{
@@ -690,10 +712,11 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 			FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();
 			FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();
 
-			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, SampleAngleRad);
-			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, SampleAngleRad);
-			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, SampleAngleRad);
-			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, SampleAngleRad);
+			const float LocalSampleAngle = SampleDistanceCm / FMath::Max(KINDA_SMALL_NUMBER, P.Size());
+			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, LocalSampleAngle);
+			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, LocalSampleAngle);
+			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, LocalSampleAngle);
+			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, LocalSampleAngle);
 
 			const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
 			const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
@@ -812,6 +835,8 @@ void ACubedSpherePlanetActor::BuildChunk(
 	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
+	const float ApproxEdgeLengthCm = Step * RadiusCm;
+	const float SampleDistanceCm = FMath::Max(1.0f, ApproxEdgeLengthCm * 0.75f);
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
 	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
@@ -819,11 +844,9 @@ void ACubedSpherePlanetActor::BuildChunk(
 	Builder.EnableTexCoords();
 	Builder.EnablePolyGroups();
 
-	// Маленький угол для сэмпла нормали (в радианах).
-	// Чем больше — тем "грубее" нормаль, чем меньше — тем точнее, но шумнее.
-	// Обычно 0.05..0.2 градуса ок.
-	const float SampleAngleRad = FMath::DegreesToRadians(0.12f);
-
+	// РњР°Р»РµРЅСЊРєРёР№ СѓРіРѕР» РґР»СЏ СЃСЌРјРїР»Р° РЅРѕСЂРјР°Р»Рё (РІ СЂР°РґРёР°РЅР°С…).
+	// Р§РµРј Р±РѕР»СЊС€Рµ вЂ” С‚РµРј "РіСЂСѓР±РµРµ" РЅРѕСЂРјР°Р»СЊ, С‡РµРј РјРµРЅСЊС€Рµ вЂ” С‚РµРј С‚РѕС‡РЅРµРµ, РЅРѕ С€СѓРјРЅРµРµ.
+	// РћР±С‹С‡РЅРѕ 0.05..0.2 РіСЂР°РґСѓСЃР° РѕРє.
 	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
 	{
 		const FVector3f NDir = Dir.GetSafeNormal();
@@ -833,8 +856,8 @@ void ACubedSpherePlanetActor::BuildChunk(
 
 	auto RotateDirAroundTangent = [&](const FVector3f& Dir, const FVector3f& Tangent, float AngleRad) -> FVector3f
 	{
-		// Rodrigues: Dir*cos + (Tangent*sin) + axis*(axis·Dir)*(1-cos)
-		// Но Tangent у нас перпендикулярен Dir, поэтому последний член ~0.
+		// Rodrigues: Dir*cos + (Tangent*sin) + axis*(axisВ·Dir)*(1-cos)
+		// РќРѕ Tangent Сѓ РЅР°СЃ РїРµСЂРїРµРЅРґРёРєСѓР»СЏСЂРµРЅ Dir, РїРѕСЌС‚РѕРјСѓ РїРѕСЃР»РµРґРЅРёР№ С‡Р»РµРЅ ~0.
 		float s, c;
 		FMath::SinCos(&s, &c, AngleRad);
 		return (Dir * c + Tangent * s).GetSafeNormal();
@@ -848,7 +871,7 @@ void ACubedSpherePlanetActor::BuildChunk(
 		{
 			const float U = -HalfExtent + (ChunkX * ChunkSize) + X * Step;
 
-			// === БАЗОВАЯ ТОЧКА НА СФЕРЕ ===
+			// === Р‘РђР—РћР’РђРЇ РўРћР§РљРђ РќРђ РЎР¤Р•Р Р• ===
 			const FVector3f CubePoint =
 				FVector3f(FaceNormal) +
 				FVector3f(FaceRight) * U +
@@ -857,30 +880,31 @@ void ACubedSpherePlanetActor::BuildChunk(
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
 			const FVector3f P = PosFromDir(SphereDir);
 
-			// === КАСАТЕЛЬНЫЕ НА СФЕРЕ (НЕ ЗАВИСЯТ ОТ ГРАНИ КУБА → МЕНЬШЕ ШВОВ) ===
+			// === РљРђРЎРђРўР•Р›Р¬РќР«Р• РќРђ РЎР¤Р•Р Р• (РќР• Р—РђР’РРЎРЇРў РћРў Р“Р РђРќР РљРЈР‘Рђ в†’ РњР•РќР¬РЁР• РЁР’РћР’) ===
 			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
 			FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();   // tangent 1
 			FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();      // tangent 2
 
-			// Сэмплы вокруг текущего направления
-			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, SampleAngleRad);
-			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, SampleAngleRad);
-			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, SampleAngleRad);
-			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, SampleAngleRad);
+			// РЎСЌРјРїР»С‹ РІРѕРєСЂСѓРі С‚РµРєСѓС‰РµРіРѕ РЅР°РїСЂР°РІР»РµРЅРёСЏ
+			const float LocalSampleAngle = SampleDistanceCm / FMath::Max(KINDA_SMALL_NUMBER, P.Size());
+			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, LocalSampleAngle);
+			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, LocalSampleAngle);
+			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, LocalSampleAngle);
+			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, LocalSampleAngle);
 
 			const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
 			const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
 
-			// Нормаль по кроссу производных
+			// РќРѕСЂРјР°Р»СЊ РїРѕ РєСЂРѕСЃСЃСѓ РїСЂРѕРёР·РІРѕРґРЅС‹С…
 			FVector3f N = FVector3f::CrossProduct(Pu, Pv).GetSafeNormal();
 
-			// Гарантируем "наружу"
+			// Р“Р°СЂР°РЅС‚РёСЂСѓРµРј "РЅР°СЂСѓР¶Сѓ"
 			if (FVector3f::DotProduct(N, SphereDir) < 0.0f)
 			{
 				N *= -1.0f;
 			}
 
-			// Тангенс ортогонализуем относительно N
+			// РўР°РЅРіРµРЅСЃ РѕСЂС‚РѕРіРѕРЅР°Р»РёР·СѓРµРј РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅРѕ N
 			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
 
 			Builder.AddVertex(P)
@@ -1031,11 +1055,12 @@ void ACubedSpherePlanetActor::InitializeNoise()
 	static FastNoiseLite MountainRidgedInstance;
 	static FastNoiseLite MountainRidgedWarpInstance;
 	static FastNoiseLite MountainVolcanicInstance;
-	static FastNoiseLite MountainMaskInstance;
-	static FastNoiseLite MountainMaskWarpInstance;
-	static FastNoiseLite MountainErosionInstance;
-	static FastNoiseLite MountainRockyDetailInstance;
-	static FastNoiseLite FoothillsInstance;
+static FastNoiseLite MountainMaskInstance;
+static FastNoiseLite MountainMaskWarpInstance;
+static FastNoiseLite MountainErosionInstance;
+static FastNoiseLite MountainRockyDetailInstance;
+static FastNoiseLite MountainSlopeDetailInstance;
+static FastNoiseLite FoothillsInstance;
 	static FastNoiseLite MountainHeightVarInstance;
 
 	MountainRidgedNoise = &MountainRidgedInstance;
@@ -1082,6 +1107,12 @@ void ACubedSpherePlanetActor::InitializeNoise()
 	MountainRockyDetailNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
 	MountainRockyDetailNoise->SetFractalOctaves(2);
 	MountainRockyDetailNoise->SetFrequency(1.0f);
+
+	MountainSlopeDetailNoise = &MountainSlopeDetailInstance;
+	MountainSlopeDetailNoise->SetSeed(MountainSeed + 5555);
+	MountainSlopeDetailNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	MountainSlopeDetailNoise->SetFractalType(FastNoiseLite::FractalType_None);
+	MountainSlopeDetailNoise->SetFrequency(1.0f);
 
 	FoothillsNoise = &FoothillsInstance;
 	FoothillsNoise->SetSeed(MountainSeed + 3333);
@@ -1161,9 +1192,8 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
 	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
 	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
-	// Hardcoded 1m edge length within 2km of the camera.
-	const float TargetEdgeLengthCm = 100.0f;
-	const float TargetEdgeRangeCm = 200000.0f;
+	const float TargetEdgeLengthCm = FMath::Max(0.0f, TargetEdgeLengthMeters * 100.0f);
+	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
 	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm);
 	LODSystem->Tick(0.0f);
 }

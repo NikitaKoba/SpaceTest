@@ -300,6 +300,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Mountains")
 	bool bEnableMountains = true;
 
+	/** Scale mountain noise domain independent of continent scale. */
+	UPROPERTY(EditAnywhere, Category="Mountains", meta=(ClampMin="0.001", UIMin="0.001"))
+	float MountainDomainScale = 1.0f;
+
 	// Mountain distribution
 
 	/** Base frequency for mountain distribution mask. */
@@ -367,6 +371,22 @@ public:
 	/** Domain warp frequency for ridged pattern. */
 	UPROPERTY(EditAnywhere, Category="Mountains|Ridged", meta=(ClampMin="0.1", UIMin="0.1"))
 	float MountainRidgedWarpFrequency = 1.5f;
+
+	/** Height of high-frequency slope detail (km). */
+	UPROPERTY(EditAnywhere, Category="Mountains|Detail", meta=(ClampMin="0.0", UIMin="0.0"))
+	float MountainSlopeDetailHeightKm = 0.2f;
+
+	/** Base frequency for slope detail. */
+	UPROPERTY(EditAnywhere, Category="Mountains|Detail", meta=(ClampMin="0.1", UIMin="0.1"))
+	float MountainSlopeDetailFrequency = 12.0f;
+
+	/** Octaves for slope detail. */
+	UPROPERTY(EditAnywhere, Category="Mountains|Detail", meta=(ClampMin="1", UIMin="1"))
+	int32 MountainSlopeDetailOctaves = 3;
+
+	/** Sharpness for slope detail shaping. */
+	UPROPERTY(EditAnywhere, Category="Mountains|Detail", meta=(ClampMin="0.5", UIMin="0.5"))
+	float MountainSlopeDetailSharpness = 1.6f;
 
 	// Volcanic peaks
 
@@ -556,7 +576,7 @@ private:
 	static FVector3f CubeToSphere(const FVector3f& P);
 	float GetPlanetRadiusCm() const;
 	float GetContinentHeightCm(const FVector3f& SphereDir) const;
-	float GetMountainHeightCm(const FVector3f& SphereDir, const FVector3f& WarpedPos, float ContinentMask) const;
+	float GetMountainHeightCm(const FVector3f& SphereDir, float ContinentMask) const;
 	float GetPOIHeightCm(const FVector3f& SphereDir) const;
 	FVector3f GeneratePOIPosition(int32 Index, int32 TotalCount) const;
 	float GetDistanceToPointKm(const FVector3f& Point1, const FVector3f& Point2) const;
@@ -577,6 +597,7 @@ private:
 	FastNoiseLite* MountainMaskWarpNoise = nullptr;
 	FastNoiseLite* MountainErosionNoise = nullptr;
 	FastNoiseLite* MountainRockyDetailNoise = nullptr;
+	FastNoiseLite* MountainSlopeDetailNoise = nullptr;
 	FastNoiseLite* FoothillsNoise = nullptr;
 	FastNoiseLite* MountainHeightVarNoise = nullptr;
 };
