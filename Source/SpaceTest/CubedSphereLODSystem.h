@@ -122,7 +122,9 @@ private:
 	void SplitNode(int32 NodeIndex);
 	void MergeNode(int32 ParentIndex);
 	bool AreChildrenReadyToMerge(const FChunkNode& Node) const;
+	bool IsNodeCovered(int32 NodeIndex) const;
 	void RetireParentIfReady(int32 ParentIndex);
+	void TryRetireAncestors(int32 NodeIndex);
 
 	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);

@@ -526,6 +526,40 @@ bool FCubedSphereLODSystem::AreChildrenReadyToMerge(const FChunkNode& Node) cons
 	return true;
 }
 
+bool FCubedSphereLODSystem::IsNodeCovered(int32 NodeIndex) const
+{
+	if (!Nodes.IsValidIndex(NodeIndex))
+	{
+		return false;
+	}
+
+	const FChunkNode& Node = Nodes[NodeIndex];
+	if (!Node.bInUse)
+	{
+		return false;
+	}
+
+	if (Node.bHasMesh)
+	{
+		return true;
+	}
+
+	if (Node.bIsLeaf)
+	{
+		return false;
+	}
+
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		if (!IsNodeCovered(Node.Children[ChildSlot]))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 void FCubedSphereLODSystem::RetireParentIfReady(int32 ParentIndex)
 {
 	if (!Nodes.IsValidIndex(ParentIndex))
@@ -542,13 +576,7 @@ void FCubedSphereLODSystem::RetireParentIfReady(int32 ParentIndex)
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
 		const int32 ChildIndex = Parent.Children[ChildSlot];
-		if (!Nodes.IsValidIndex(ChildIndex))
-		{
-			return;
-		}
-
-		const FChunkNode& Child = Nodes[ChildIndex];
-		if (!Child.bInUse || !Child.bHasMesh)
+		if (!IsNodeCovered(ChildIndex))
 		{
 			return;
 		}
@@ -560,6 +588,16 @@ void FCubedSphereLODSystem::RetireParentIfReady(int32 ParentIndex)
 	}
 	Parent.bHasMesh = false;
 	Parent.bRetireAfterSplit = false;
+}
+
+void FCubedSphereLODSystem::TryRetireAncestors(int32 NodeIndex)
+{
+	int32 CurrentIndex = NodeIndex;
+	while (Nodes.IsValidIndex(CurrentIndex))
+	{
+		RetireParentIfReady(CurrentIndex);
+		CurrentIndex = Nodes[CurrentIndex].ParentIndex;
+	}
 }
 
 void FCubedSphereLODSystem::EnqueueBuild(int32 NodeIndex)
@@ -678,10 +716,7 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds()
 		Node.bBuildInProgress = false;
 		Node.PendingBuildVersion = 0;
 
-		if (Node.ParentIndex != INDEX_NONE)
-		{
-			RetireParentIfReady(Node.ParentIndex);
-		}
+		TryRetireAncestors(Node.ParentIndex);
 	}
 }
 
