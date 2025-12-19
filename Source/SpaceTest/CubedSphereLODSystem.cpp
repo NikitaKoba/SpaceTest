@@ -48,13 +48,13 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	FrameBudget = FMath::Max(1, MaxChunksPerFrame);
 	WarmupBudget = FMath::Max(1, WarmupChunksPerFrame);
 	ErrorScale = FMath::Max(0.01f, InErrorScale);
-	MaxConcurrentBuilds = WarmupBudget;
 
 	bStreamingEnabled = bEnableStreaming;
 	BaseActiveRangeCm = InBaseActiveRangeCm;
 	ActiveRangeBufferCm = InActiveBufferCm;
 	HyperdriveSpeedThreshold = InHyperSpeedThreshold;
 	HyperdriveRangeMultiplier = FMath::Max(1.0f, InHyperRangeMultiplier);
+	MaxConcurrentBuilds = bStreamingEnabled ? FrameBudget : WarmupBudget;
 
 	bEnableSkirts = bInEnableSkirts;
 	SkirtDepthScale = FMath::Max(0.0f, InSkirtDepthScale);

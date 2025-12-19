@@ -664,18 +664,17 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	Builder.EnableTexCoords();
 	Builder.EnablePolyGroups();
 
-	TArray<FVector3f> BasePositions;
-	TArray<FVector3f> BaseNormals;
-	TArray<FVector3f> BaseTangents;
-	TArray<FVector2f> BaseUVs;
+	TArray<FVector3f> Positions;
+	TArray<FVector3f> SphereDirs;
+	TArray<FVector3f> Normals;
+	TArray<FVector3f> Tangents;
+	TArray<FVector2f> UVs;
 
-	if (bUseSkirts)
-	{
-		BasePositions.SetNum(VertCount);
-		BaseNormals.SetNum(VertCount);
-		BaseTangents.SetNum(VertCount);
-		BaseUVs.SetNum(VertCount);
-	}
+	Positions.SetNumUninitialized(VertCount);
+	SphereDirs.SetNumUninitialized(VertCount);
+	Normals.SetNumUninitialized(VertCount);
+	Tangents.SetNumUninitialized(VertCount);
+	UVs.SetNumUninitialized(VertCount);
 
 	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
 	{
@@ -689,6 +688,29 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 		float s, c;
 		FMath::SinCos(&s, &c, AngleRad);
 		return (Dir * c + Tangent * s).GetSafeNormal();
+	};
+
+	auto ComputeEdgeNormal = [&](const FVector3f& SphereDir, const FVector3f& P, FVector3f& OutNormal, FVector3f& OutTangent)
+	{
+		const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
+		const FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();
+		const FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();
+
+		const float LocalSampleAngle = SampleDistanceCm / FMath::Max(KINDA_SMALL_NUMBER, P.Size());
+		const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, LocalSampleAngle);
+		const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, LocalSampleAngle);
+		const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, LocalSampleAngle);
+		const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, LocalSampleAngle);
+
+		const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
+		const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
+
+		OutNormal = FVector3f::CrossProduct(Pu, Pv).GetSafeNormal();
+		if (FVector3f::DotProduct(OutNormal, SphereDir) < 0.0f)
+		{
+			OutNormal *= -1.0f;
+		}
+		OutTangent = (T1 - OutNormal * FVector3f::DotProduct(T1, OutNormal)).GetSafeNormal();
 	};
 
 	for (int32 Y = 0; Y < VertEdge; ++Y)
@@ -708,43 +730,59 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
 			const FVector3f P = PosFromDir(SphereDir);
 
-			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
-			FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();
-			FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();
-
-			const float LocalSampleAngle = SampleDistanceCm / FMath::Max(KINDA_SMALL_NUMBER, P.Size());
-			const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, LocalSampleAngle);
-			const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, LocalSampleAngle);
-			const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, LocalSampleAngle);
-			const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, LocalSampleAngle);
-
-			const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
-			const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
-
-			FVector3f N = FVector3f::CrossProduct(Pu, Pv).GetSafeNormal();
-
-			if (FVector3f::DotProduct(N, SphereDir) < 0.0f)
-			{
-				N *= -1.0f;
-			}
-
-			FVector3f Tangent = (T1 - N * FVector3f::DotProduct(T1, N)).GetSafeNormal();
-			const FVector2f UV(
+			SphereDirs[Index] = SphereDir;
+			Positions[Index] = P;
+			UVs[Index] = FVector2f(
 				(U + HalfExtent) / (HalfExtent * 2.0f),
 				(V + HalfExtent) / (HalfExtent * 2.0f)
 			);
+		}
+	}
 
-			if (bUseSkirts)
+	for (int32 Y = 0; Y < VertEdge; ++Y)
+	{
+		for (int32 X = 0; X < VertEdge; ++X)
+		{
+			const int32 Index = Y * VertEdge + X;
+			FVector3f N = FVector3f::ZeroVector;
+			FVector3f T = FVector3f::ZeroVector;
+
+			const bool bIsEdge = (X == 0 || X == VertEdge - 1 || Y == 0 || Y == VertEdge - 1);
+			if (bIsEdge)
 			{
-				BasePositions[Index] = P;
-				BaseNormals[Index] = N;
-				BaseTangents[Index] = Tangent;
-				BaseUVs[Index] = UV;
+				ComputeEdgeNormal(SphereDirs[Index], Positions[Index], N, T);
+			}
+			else
+			{
+				const int32 X0 = X - 1;
+				const int32 X1 = X + 1;
+				const int32 Y0 = Y - 1;
+				const int32 Y1 = Y + 1;
+
+				const FVector3f DX = Positions[Y * VertEdge + X1] - Positions[Y * VertEdge + X0];
+				const FVector3f DY = Positions[Y1 * VertEdge + X] - Positions[Y0 * VertEdge + X];
+
+				N = FVector3f::CrossProduct(DY, DX).GetSafeNormal();
+				if (FVector3f::DotProduct(N, SphereDirs[Index]) < 0.0f)
+				{
+					N *= -1.0f;
+				}
+				T = (DX - N * FVector3f::DotProduct(DX, N)).GetSafeNormal();
 			}
 
-			Builder.AddVertex(P)
-				.SetNormalAndTangent(N, Tangent)
-				.SetTexCoord(UV);
+			Normals[Index] = N;
+			Tangents[Index] = T;
+		}
+	}
+
+	for (int32 Y = 0; Y < VertEdge; ++Y)
+	{
+		for (int32 X = 0; X < VertEdge; ++X)
+		{
+			const int32 Index = Y * VertEdge + X;
+			Builder.AddVertex(Positions[Index])
+				.SetNormalAndTangent(Normals[Index], Tangents[Index])
+				.SetTexCoord(UVs[Index]);
 		}
 	}
 
@@ -776,14 +814,14 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 			for (int32 i = 0; i < VertEdge; ++i)
 			{
 				const int32 BaseIndex = StartIndex + i * Stride;
-				const FVector3f& BasePos = BasePositions[BaseIndex];
+				const FVector3f& BasePos = Positions[BaseIndex];
 				const FVector3f Radial = BasePos.GetSafeNormal();
 				const FVector3f SkirtPos = BasePos - Radial * SkirtDepthCm;
 				const uint32 SkirtIndex = static_cast<uint32>(NextVertexIndex++);
 
 				Builder.AddVertex(SkirtPos)
-					.SetNormalAndTangent(BaseNormals[BaseIndex], BaseTangents[BaseIndex])
-					.SetTexCoord(BaseUVs[BaseIndex]);
+					.SetNormalAndTangent(Normals[BaseIndex], Tangents[BaseIndex])
+					.SetTexCoord(UVs[BaseIndex]);
 
 				OutIndices[i] = SkirtIndex;
 			}
