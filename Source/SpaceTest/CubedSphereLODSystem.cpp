@@ -407,16 +407,23 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 			continue;
 		}
 
+		const FVector ParentWorldCenter = PlanetTransform.TransformPosition(Parent.LocalCenter);
+		float ParentDistance = FVector::Distance(CamLocation, ParentWorldCenter) - Parent.BoundingRadiusCm * ActorScale;
+		ParentDistance = FMath::Max(100.0f, ParentDistance);
+		const float ParentSse = ComputeScreenSpaceError(Parent, ParentDistance, PixelsPerCm, ActorScale);
+
 		if (bUseTargetEdge)
 		{
-			const FVector WorldCenter = PlanetTransform.TransformPosition(Parent.LocalCenter);
-			float Distance = FVector::Distance(CamLocation, WorldCenter) - Parent.BoundingRadiusCm * ActorScale;
-			Distance = FMath::Max(100.0f, Distance);
 			const float ParentEdgeLengthCm = Parent.PatchSizeCm / EdgeCount;
-			if (Distance <= EdgeRangeHoldCm && ParentEdgeLengthCm > TargetEdgeLengthCm)
+			if (ParentDistance <= EdgeRangeHoldCm && ParentEdgeLengthCm > TargetEdgeLengthCm)
 			{
 				continue;
 			}
+		}
+
+		if (ParentSse >= MergeThreshold)
+		{
+			continue;
 		}
 
 		bool bCanMerge = true;
