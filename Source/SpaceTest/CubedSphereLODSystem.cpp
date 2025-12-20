@@ -57,7 +57,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	ActiveRangeBufferCm = InActiveBufferCm;
 	HyperdriveSpeedThreshold = InHyperSpeedThreshold;
 	HyperdriveRangeMultiplier = FMath::Max(1.0f, InHyperRangeMultiplier);
-	MaxConcurrentBuilds = FMath::Max(1, FrameBudget);
+	MaxConcurrentBuilds = FMath::Clamp(FrameBudget, 1, 4);
 
 	bEnableSkirts = bInEnableSkirts;
 	SkirtDepthScale = FMath::Max(0.0f, InSkirtDepthScale);
@@ -283,6 +283,17 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 	TSet<int32> BlockedParents;
 	SplitList.Reserve(Nodes.Num());
 
+	int32 ActiveSplits = 0;
+	for (const FChunkNode& Node : Nodes)
+	{
+		if (Node.bSplitInProgress)
+		{
+			++ActiveSplits;
+		}
+	}
+
+	const int32 MaxActiveSplits = FMath::Clamp(MaxConcurrentBuilds, 1, 4);
+
 	const float MergeThreshold = FMath::Max(0.0f, TargetErrorPixels - ErrorHysteresisPixels);
 	const float SplitThreshold = TargetErrorPixels + ErrorHysteresisPixels;
 	const float EdgeCount = static_cast<float>(FMath::Max(1, VerticesPerEdge - 1));
@@ -341,7 +352,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		const bool bSplitCooldown = (CurrentTimeSeconds - Node.LastSplitTime) < MinSecondsBeforeMerge;
 
 		const bool bParentMergePending = Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex) && Nodes[Node.ParentIndex].bMergeInProgress;
-		if (Node.bIsActive && Node.Level < MaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
+		if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < MaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
 		{
 			SplitList.Add({ Index, Distance, SmoothedSse });
 		}
@@ -444,8 +455,8 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		});
 	}
 
-	const int32 MaxSplitsThisEval = FMath::Max(1, FrameBudget);
-	const int32 SplitCount = FMath::Min(MaxSplitsThisEval, SplitList.Num());
+	const int32 SplitBudget = FMath::Max(0, MaxActiveSplits - ActiveSplits);
+	const int32 SplitCount = FMath::Min(SplitBudget, SplitList.Num());
 	for (int32 Index = 0; Index < SplitCount; ++Index)
 	{
 		const int32 NodeIndex = SplitList[Index].NodeIndex;
