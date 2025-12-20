@@ -22,6 +22,35 @@ public:
 	void Shutdown();
 
 private:
+	using FChunkStreamPtr = TSharedPtr<RealtimeMesh::FRealtimeMeshStreamSet, ESPMode::ThreadSafe>;
+
+	struct FChunkCacheKey
+	{
+		int32 FaceIndex = 0;
+		int32 Level = 0;
+		int32 ChunkX = 0;
+		int32 ChunkY = 0;
+
+		bool operator==(const FChunkCacheKey& Other) const
+		{
+			return FaceIndex == Other.FaceIndex
+				&& Level == Other.Level
+				&& ChunkX == Other.ChunkX
+				&& ChunkY == Other.ChunkY;
+		}
+	};
+
+	friend uint32 GetTypeHash(const FChunkCacheKey& Key)
+	{
+		return HashCombineFast(HashCombineFast(::GetTypeHash(Key.FaceIndex), ::GetTypeHash(Key.Level)),
+			HashCombineFast(::GetTypeHash(Key.ChunkX), ::GetTypeHash(Key.ChunkY)));
+	}
+
+	struct FChunkCacheEntry
+	{
+		FChunkStreamPtr Streams;
+	};
+
 	struct FChunkNode
 	{
 		int32 FaceIndex = 0;
@@ -62,7 +91,7 @@ private:
 		bool bMergeInProgress = false;
 
 		bool bHasStagedMesh = false;
-		RealtimeMesh::FRealtimeMeshStreamSet StagedStreams;
+		FChunkStreamPtr StagedStreams;
 
 		
 	};
@@ -88,7 +117,7 @@ private:
 	{
 		int32 NodeIndex = INDEX_NONE;
 		int32 BuildVersion = 0;
-		RealtimeMesh::FRealtimeMeshStreamSet Streams;
+		FChunkStreamPtr Streams;
 	};
 
 	ACubedSpherePlanetActor* Owner = nullptr;
@@ -113,6 +142,11 @@ private:
 	float SseSmoothingAlpha = 0.4f;
 	float MinSecondsBeforeMerge = 0.0f;
 	float CurrentTimeSeconds = 0.0f;
+	float BaseTargetErrorPixels = 0.0f;
+	float CurrentTargetErrorPixels = 0.0f;
+	float DynamicLoadFactor = 0.0f;
+	int32 BaseMaxSubdivisionLevel = 0;
+	int32 CurrentMaxSubdivisionLevel = 0;
 
 	int32 FrameBudget = 2;
 	int32 WarmupBudget = 12;
@@ -134,6 +168,8 @@ private:
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	bool bHasPrevCam = false;
+	TMap<FChunkCacheKey, FChunkCacheEntry> ChunkCache;
+	TArray<FChunkCacheKey> ChunkCacheOrder;
 
 	void CreateRootNodes();
 	int32 CreateNode(int32 FaceIndex, int32 Level, int32 ChunkX, int32 ChunkY, int32 ParentIndex);
@@ -155,6 +191,12 @@ private:
 	bool ShouldCastShadow(const FChunkNode& Node) const;
 	void ClearStagedMesh(FChunkNode& Node);
 	void ApplyStagedMesh(FChunkNode& Node);
+	void ClearChunkCache();
+	void TouchChunkCacheEntry(const FChunkCacheKey& Key);
+	bool TryGetCachedStreams(const FChunkCacheKey& Key, FChunkStreamPtr& OutStreams);
+	void StoreCachedStreams(const FChunkCacheKey& Key, const FChunkStreamPtr& Streams);
+	void TrimChunkCache(int32 MaxEntries);
+	void UpdateDynamicQuality(float DeltaSeconds);
 
 	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);

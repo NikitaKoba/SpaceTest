@@ -5,6 +5,7 @@
 #include "CubedSphereFaces.h"
 #include "Components/SceneComponent.h"
 #include "Materials/MaterialInterface.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
 
@@ -650,6 +651,8 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	bool bEnableSkirts,
 	float SkirtDepthCm) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(ACubedSpherePlanetActor_BuildChunkStreams);
+
 	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;

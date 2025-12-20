@@ -5,7 +5,52 @@
 #include "Engine/World.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/IConsoleManager.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RealtimeMeshSimple.h"
+
+namespace
+{
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_CacheEnable(
+		TEXT("planet.LOD.CacheEnable"),
+		1,
+		TEXT("Enable caching of generated chunk stream sets."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_CacheEntries(
+		TEXT("planet.LOD.CacheEntries"),
+		512,
+		TEXT("Max cached chunk stream sets."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_AutoQuality(
+		TEXT("planet.LOD.AutoQuality"),
+		1,
+		TEXT("Enable adaptive LOD quality based on build queue load."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_AutoQuality_QueueHighWatermark(
+		TEXT("planet.LOD.AutoQuality.QueueHighWatermark"),
+		48,
+		TEXT("Build queue size that maps to full quality degradation."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_AutoQuality_SseScaleMax(
+		TEXT("planet.LOD.AutoQuality.SseScaleMax"),
+		3.0f,
+		TEXT("Max multiplier for target SSE under load."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_AutoQuality_MaxSubdivDrop(
+		TEXT("planet.LOD.AutoQuality.MaxSubdivDrop"),
+		2,
+		TEXT("Max subdivision levels to drop under load."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_AutoQuality_RiseSpeed(
+		TEXT("planet.LOD.AutoQuality.RiseSpeed"),
+		4.0f,
+		TEXT("Interpolation speed when load increases."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_AutoQuality_FallSpeed(
+		TEXT("planet.LOD.AutoQuality.FallSpeed"),
+		1.5f,
+		TEXT("Interpolation speed when load decreases."));
+}
 
 
 FCubedSphereLODSystem::FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner)
@@ -28,11 +73,18 @@ void FCubedSphereLODSystem::Shutdown()
 	bBootstrapping = false;
 	bHasPrevCam = false;
 	CurrentTimeSeconds = 0.0f;
+	DynamicLoadFactor = 0.0f;
+	BaseTargetErrorPixels = 0.0f;
+	CurrentTargetErrorPixels = 0.0f;
+	BaseMaxSubdivisionLevel = 0;
+	CurrentMaxSubdivisionLevel = 0;
+	ClearChunkCache();
 }
 
 void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float InEvaluationInterval, float TargetSSE, float HysteresisPixels, float InErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bInEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm)
 {
 	Shutdown();
+	ClearChunkCache();
 
 	Mesh = &InMesh;
 	ChunksPerFace = FMath::Max(1, InChunksPerFace);
@@ -51,6 +103,8 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	const float SseAlpha = 1.0f - FMath::Exp(-EvaluationIntervalSeconds / FMath::Max(KINDA_SMALL_NUMBER, SseHalfLifeSeconds));
 	SseSmoothingAlpha = FMath::Clamp(SseAlpha, 0.05f, 1.0f);
 	MinSecondsBeforeMerge = FMath::Max(0.0f, EvaluationIntervalSeconds * 2.5f);
+	BaseTargetErrorPixels = TargetErrorPixels;
+	CurrentTargetErrorPixels = TargetErrorPixels;
 
 	bStreamingEnabled = bEnableStreaming;
 	BaseActiveRangeCm = InBaseActiveRangeCm;
@@ -96,6 +150,8 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 			MaxSubdivisionLevel = FMath::Clamp(FMath::Max(MaxSubdivisionLevel, RequiredLevel), 0, 18);
 		}
 	}
+	BaseMaxSubdivisionLevel = MaxSubdivisionLevel;
+	CurrentMaxSubdivisionLevel = MaxSubdivisionLevel;
 	if (bStreamingEnabled)
 	{
 		for (int32 Index = 0; Index < Nodes.Num(); ++Index)
@@ -191,6 +247,7 @@ void FCubedSphereLODSystem::ActivateNode(int32 NodeIndex, bool bMakeLeaf)
 	Node.bSplitInProgress = false;
 	Node.bMergeInProgress = false;
 	Node.bHasStagedMesh = false;
+	ClearStagedMesh(Node);
 	Node.bBuildInProgress = false;
 	Node.BuildVersion++;
 	Node.PendingBuildVersion = 0;
@@ -269,6 +326,34 @@ float FCubedSphereLODSystem::ComputeScreenSpaceError(const FChunkNode& Node, flo
 	return (ErrorCm / DistanceCm) * PixelsPerCm;
 }
 
+void FCubedSphereLODSystem::UpdateDynamicQuality(float DeltaSeconds)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereLODSystem_UpdateDynamicQuality);
+
+	if (!CVar_PlanetLOD_AutoQuality.GetValueOnGameThread())
+	{
+		CurrentTargetErrorPixels = BaseTargetErrorPixels;
+		CurrentMaxSubdivisionLevel = BaseMaxSubdivisionLevel;
+		DynamicLoadFactor = 0.0f;
+		return;
+	}
+
+	const int32 HighWatermark = FMath::Max(1, CVar_PlanetLOD_AutoQuality_QueueHighWatermark.GetValueOnGameThread());
+	const int32 QueueLoad = BuildQueue.Num() + InFlightBuilds;
+	const float TargetLoad = FMath::Clamp(static_cast<float>(QueueLoad) / static_cast<float>(HighWatermark), 0.0f, 1.0f);
+
+	const float RiseSpeed = FMath::Max(0.01f, CVar_PlanetLOD_AutoQuality_RiseSpeed.GetValueOnGameThread());
+	const float FallSpeed = FMath::Max(0.01f, CVar_PlanetLOD_AutoQuality_FallSpeed.GetValueOnGameThread());
+	const float Speed = (TargetLoad > DynamicLoadFactor) ? RiseSpeed : FallSpeed;
+	DynamicLoadFactor = FMath::FInterpTo(DynamicLoadFactor, TargetLoad, DeltaSeconds, Speed);
+
+	const float SseScaleMax = FMath::Max(1.0f, CVar_PlanetLOD_AutoQuality_SseScaleMax.GetValueOnGameThread());
+	CurrentTargetErrorPixels = FMath::Max(0.0f, BaseTargetErrorPixels * FMath::Lerp(1.0f, SseScaleMax, DynamicLoadFactor));
+
+	const int32 MaxSubdivDrop = FMath::Max(0, CVar_PlanetLOD_AutoQuality_MaxSubdivDrop.GetValueOnGameThread());
+	CurrentMaxSubdivisionLevel = FMath::Max(0, BaseMaxSubdivisionLevel - FMath::RoundToInt(DynamicLoadFactor * MaxSubdivDrop));
+}
+
 void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float PixelsPerCm, float ActorScale, float ActivateRange, float DeactivateRange, const FTransform& PlanetTransform)
 {
 	struct FSplitCandidate
@@ -294,8 +379,8 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 
 	const int32 MaxActiveSplits = FMath::Clamp(MaxConcurrentBuilds, 1, 4);
 
-	const float MergeThreshold = FMath::Max(0.0f, TargetErrorPixels - ErrorHysteresisPixels);
-	const float SplitThreshold = TargetErrorPixels + ErrorHysteresisPixels;
+	const float MergeThreshold = FMath::Max(0.0f, CurrentTargetErrorPixels - ErrorHysteresisPixels);
+	const float SplitThreshold = CurrentTargetErrorPixels + ErrorHysteresisPixels;
 	const float EdgeCount = static_cast<float>(FMath::Max(1, VerticesPerEdge - 1));
 	const bool bUseTargetEdge = TargetEdgeLengthCm > 0.0f && TargetEdgeRangeCm > 0.0f;
 	const float EdgeRangeHoldCm = TargetEdgeRangeCm + TargetEdgeRangeBufferCm;
@@ -352,7 +437,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		const bool bSplitCooldown = (CurrentTimeSeconds - Node.LastSplitTime) < MinSecondsBeforeMerge;
 
 		const bool bParentMergePending = Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex) && Nodes[Node.ParentIndex].bMergeInProgress;
-		if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < MaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
+		if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < CurrentMaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
 		{
 			SplitList.Add({ Index, Distance, SmoothedSse });
 		}
@@ -473,7 +558,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		}
 
 		const FChunkNode& Node = Nodes[NodeIndex];
-		if (!Node.bInUse || !Node.bIsLeaf || !Node.bIsActive || Node.Level >= MaxSubdivisionLevel)
+		if (!Node.bInUse || !Node.bIsLeaf || !Node.bIsActive || Node.Level >= CurrentMaxSubdivisionLevel)
 		{
 			continue;
 		}
@@ -490,7 +575,7 @@ void FCubedSphereLODSystem::SplitNode(int32 NodeIndex)
 	}
 
 	const FChunkNode NodeSnapshot = Nodes[NodeIndex];
-	if (!NodeSnapshot.bInUse || !NodeSnapshot.bIsLeaf || NodeSnapshot.Level >= MaxSubdivisionLevel)
+	if (!NodeSnapshot.bInUse || !NodeSnapshot.bIsLeaf || NodeSnapshot.Level >= CurrentMaxSubdivisionLevel)
 	{
 		return;
 	}
@@ -662,12 +747,7 @@ bool FCubedSphereLODSystem::AreChildrenReadyForSplitSwap(const FChunkNode& Node)
 
 void FCubedSphereLODSystem::ClearStagedMesh(FChunkNode& Node)
 {
-	if (!Node.bHasStagedMesh)
-	{
-		return;
-	}
-
-	Node.StagedStreams = RealtimeMesh::FRealtimeMeshStreamSet();
+	Node.StagedStreams.Reset();
 	Node.bHasStagedMesh = false;
 }
 
@@ -700,7 +780,7 @@ bool FCubedSphereLODSystem::ShouldCastShadow(const FChunkNode& Node) const
 
 void FCubedSphereLODSystem::ApplyStagedMesh(FChunkNode& Node)
 {
-	if (!Mesh || !Owner || !Node.bHasStagedMesh)
+	if (!Mesh || !Owner || !Node.bHasStagedMesh || !Node.StagedStreams.IsValid())
 	{
 		return;
 	}
@@ -708,20 +788,102 @@ void FCubedSphereLODSystem::ApplyStagedMesh(FChunkNode& Node)
 	const bool bCastShadow = ShouldCastShadow(Node);
 	FRealtimeMeshSectionConfig SectionConfig(0);
 	SectionConfig.bCastsShadow = bCastShadow;
+	const RealtimeMesh::FRealtimeMeshStreamSet& Streams = *Node.StagedStreams;
 
 	if (Node.bHasMesh)
 	{
-		Mesh->UpdateSectionGroup(Node.GroupKey, MoveTemp(Node.StagedStreams));
+		Mesh->UpdateSectionGroup(Node.GroupKey, Streams);
 		Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 	}
 	else
 	{
-		Mesh->CreateSectionGroup(Node.GroupKey, MoveTemp(Node.StagedStreams), FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+		Mesh->CreateSectionGroup(Node.GroupKey, Streams, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
 		Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 		Node.bHasMesh = true;
 	}
 
+	Node.StagedStreams.Reset();
 	Node.bHasStagedMesh = false;
+}
+
+void FCubedSphereLODSystem::ClearChunkCache()
+{
+	ChunkCache.Reset();
+	ChunkCacheOrder.Reset();
+}
+
+void FCubedSphereLODSystem::TouchChunkCacheEntry(const FChunkCacheKey& Key)
+{
+	const int32 ExistingIndex = ChunkCacheOrder.IndexOfByKey(Key);
+	if (ExistingIndex != INDEX_NONE)
+	{
+		ChunkCacheOrder.RemoveAt(ExistingIndex, 1, EAllowShrinking::No);
+	}
+
+	ChunkCacheOrder.Insert(Key, 0);
+}
+
+bool FCubedSphereLODSystem::TryGetCachedStreams(const FChunkCacheKey& Key, FChunkStreamPtr& OutStreams)
+{
+	if (!CVar_PlanetLOD_CacheEnable.GetValueOnGameThread())
+	{
+		return false;
+	}
+
+	FChunkCacheEntry* Entry = ChunkCache.Find(Key);
+	if (!Entry || !Entry->Streams.IsValid())
+	{
+		return false;
+	}
+
+	TouchChunkCacheEntry(Key);
+	OutStreams = Entry->Streams;
+	return true;
+}
+
+void FCubedSphereLODSystem::StoreCachedStreams(const FChunkCacheKey& Key, const FChunkStreamPtr& Streams)
+{
+	if (!CVar_PlanetLOD_CacheEnable.GetValueOnGameThread() || !Streams.IsValid())
+	{
+		return;
+	}
+
+	const int32 MaxEntries = FMath::Max(0, CVar_PlanetLOD_CacheEntries.GetValueOnGameThread());
+	if (MaxEntries <= 0)
+	{
+		ClearChunkCache();
+		return;
+	}
+
+	if (FChunkCacheEntry* Entry = ChunkCache.Find(Key))
+	{
+		Entry->Streams = Streams;
+		TouchChunkCacheEntry(Key);
+	}
+	else
+	{
+		FChunkCacheEntry NewEntry;
+		NewEntry.Streams = Streams;
+		ChunkCache.Add(Key, MoveTemp(NewEntry));
+		TouchChunkCacheEntry(Key);
+		TrimChunkCache(MaxEntries);
+	}
+}
+
+void FCubedSphereLODSystem::TrimChunkCache(int32 MaxEntries)
+{
+	while (ChunkCache.Num() > MaxEntries)
+	{
+		if (ChunkCacheOrder.Num() == 0)
+		{
+			break;
+		}
+
+		const int32 TailIndex = ChunkCacheOrder.Num() - 1;
+		const FChunkCacheKey Key = ChunkCacheOrder[TailIndex];
+		ChunkCacheOrder.RemoveAt(TailIndex, 1, EAllowShrinking::No);
+		ChunkCache.Remove(Key);
+	}
 }
 
 void FCubedSphereLODSystem::TryFinalizeSplit(int32 ParentIndex)
@@ -885,6 +1047,8 @@ void FCubedSphereLODSystem::EnqueueBuild(int32 NodeIndex)
 
 void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereLODSystem_ProcessBuildQueue);
+
 	if (!Owner || !Mesh)
 	{
 		return;
@@ -931,17 +1095,28 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 			continue;
 		}
 
-		const FChunkNode NodeCopy = Node;
 		const int32 NodeIndex = Request.NodeIndex;
 		const int32 BuildVersion = Request.BuildVersion;
+		const FChunkCacheKey CacheKey{ Node.FaceIndex, Node.Level, Node.ChunkX, Node.ChunkY };
+		FChunkStreamPtr CachedStreams;
+		if (TryGetCachedStreams(CacheKey, CachedStreams))
+		{
+			CompletedQueue.Enqueue({ NodeIndex, BuildVersion, CachedStreams });
+			Started++;
+			continue;
+		}
+
+		const FChunkNode NodeCopy = Node;
 		const float ChunkSize = GetChunkSize(NodeCopy.Level);
 		const float SkirtDepthCm = ComputeSkirtDepthCm(NodeCopy);
 		FPlatformAtomics::InterlockedIncrement(&InFlightBuilds);
 
 		Async(EAsyncExecution::ThreadPool, [this, NodeCopy, NodeIndex, BuildVersion, ChunkSize, SkirtDepthCm]()
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereLODSystem_BuildChunkAsync);
 			RealtimeMesh::FRealtimeMeshStreamSet StreamSet = Owner->BuildChunkStreams(NodeCopy.FaceNormal, NodeCopy.FaceRight, NodeCopy.FaceUp, NodeCopy.ChunkX, NodeCopy.ChunkY, 1.0f, ChunkSize, PlanetRadiusCm, VerticesPerEdge, bEnableSkirts, SkirtDepthCm);
-			CompletedQueue.Enqueue({ NodeIndex, BuildVersion, MoveTemp(StreamSet) });
+			FChunkStreamPtr Streams = MakeShared<RealtimeMesh::FRealtimeMeshStreamSet, ESPMode::ThreadSafe>(MoveTemp(StreamSet));
+			CompletedQueue.Enqueue({ NodeIndex, BuildVersion, MoveTemp(Streams) });
 			FPlatformAtomics::InterlockedDecrement(&InFlightBuilds);
 		});
 
@@ -951,6 +1126,8 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 
 void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereLODSystem_ProcessCompletedBuilds);
+
 	if (!Mesh || !Owner)
 	{
 		return;
@@ -978,6 +1155,13 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 			continue;
 		}
 
+		if (!Result.Streams.IsValid())
+		{
+			Node.bBuildInProgress = false;
+			Node.PendingBuildVersion = 0;
+			continue;
+		}
+
 		bool bStageOnly = Node.bMergeInProgress;
 		if (!bStageOnly && Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex))
 		{
@@ -985,21 +1169,28 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 			bStageOnly = ParentNode.bSplitInProgress;
 		}
 
+		const FChunkStreamPtr& StreamsPtr = Result.Streams;
+		const RealtimeMesh::FRealtimeMeshStreamSet& StreamsRef = *StreamsPtr;
+		const FChunkCacheKey CacheKey{ Node.FaceIndex, Node.Level, Node.ChunkX, Node.ChunkY };
+		StoreCachedStreams(CacheKey, StreamsPtr);
+
 		if (bStageOnly)
 		{
 			Node.bHasStagedMesh = true;
-			Node.StagedStreams = MoveTemp(Result.Streams);
+			Node.StagedStreams = StreamsPtr;
 		}
 		else if (Node.bHasMesh)
 		{
-			Mesh->UpdateSectionGroup(Node.GroupKey, MoveTemp(Result.Streams));
+			TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereLODSystem_CommitChunk);
+			Mesh->UpdateSectionGroup(Node.GroupKey, StreamsRef);
 			FRealtimeMeshSectionConfig SectionConfig(0);
 			SectionConfig.bCastsShadow = ShouldCastShadow(Node);
 			Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 		}
 		else
 		{
-			Mesh->CreateSectionGroup(Node.GroupKey, MoveTemp(Result.Streams), FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+			TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereLODSystem_CommitChunk);
+			Mesh->CreateSectionGroup(Node.GroupKey, StreamsRef, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
 			FRealtimeMeshSectionConfig SectionConfig(0);
 			SectionConfig.bCastsShadow = ShouldCastShadow(Node);
 			Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
@@ -1074,6 +1265,8 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 		ActivateRange = FMath::Max(ActivateRange, TargetEdgeRangeCm);
 	}
 	const float DeactivateRange = ActivateRange + ActiveRangeBufferCm;
+
+	UpdateDynamicQuality(DeltaSeconds);
 
 	if (!bBootstrapping || TargetEdgeLengthCm > 0.0f)
 	{
