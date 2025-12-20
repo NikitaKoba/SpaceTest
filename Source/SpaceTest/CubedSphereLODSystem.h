@@ -152,6 +152,7 @@ private:
 	bool AreChildrenReadyForSplitSwap(const FChunkNode& Node) const;
 	void TryFinalizeSplit(int32 ParentIndex);
 	void TryFinalizeMerge(int32 ParentIndex);
+	bool ShouldCastShadow(const FChunkNode& Node) const;
 	void ClearStagedMesh(FChunkNode& Node);
 	void ApplyStagedMesh(FChunkNode& Node);
 

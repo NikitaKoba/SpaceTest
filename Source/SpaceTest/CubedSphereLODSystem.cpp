@@ -671,6 +671,33 @@ void FCubedSphereLODSystem::ClearStagedMesh(FChunkNode& Node)
 	Node.bHasStagedMesh = false;
 }
 
+bool FCubedSphereLODSystem::ShouldCastShadow(const FChunkNode& Node) const
+{
+	if (!Owner || !Owner->bEnableChunkShadows)
+	{
+		return false;
+	}
+
+	if (Owner->ShadowCastRangeKm <= 0.0f)
+	{
+		return true;
+	}
+
+	if (!bHasPrevCam)
+	{
+		return true;
+	}
+
+	const float ShadowRangeCm = Owner->ShadowCastRangeKm * 100000.0f;
+	const FTransform PlanetTransform = Owner->GetActorTransform();
+	const float ActorScale = PlanetTransform.GetScale3D().GetMax();
+	const FVector WorldCenter = PlanetTransform.TransformPosition(Node.LocalCenter);
+	float Distance = FVector::Distance(LastCamLocation, WorldCenter) - Node.BoundingRadiusCm * ActorScale;
+	Distance = FMath::Max(100.0f, Distance);
+
+	return Distance <= ShadowRangeCm;
+}
+
 void FCubedSphereLODSystem::ApplyStagedMesh(FChunkNode& Node)
 {
 	if (!Mesh || !Owner || !Node.bHasStagedMesh)
@@ -678,14 +705,19 @@ void FCubedSphereLODSystem::ApplyStagedMesh(FChunkNode& Node)
 		return;
 	}
 
+	const bool bCastShadow = ShouldCastShadow(Node);
+	FRealtimeMeshSectionConfig SectionConfig(0);
+	SectionConfig.bCastsShadow = bCastShadow;
+
 	if (Node.bHasMesh)
 	{
 		Mesh->UpdateSectionGroup(Node.GroupKey, MoveTemp(Node.StagedStreams));
+		Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 	}
 	else
 	{
 		Mesh->CreateSectionGroup(Node.GroupKey, MoveTemp(Node.StagedStreams), FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
-		Mesh->UpdateSectionConfig(Node.SectionKey, FRealtimeMeshSectionConfig(0), Owner->bGenerateCollision);
+		Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 		Node.bHasMesh = true;
 	}
 
@@ -961,11 +993,16 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 		else if (Node.bHasMesh)
 		{
 			Mesh->UpdateSectionGroup(Node.GroupKey, MoveTemp(Result.Streams));
+			FRealtimeMeshSectionConfig SectionConfig(0);
+			SectionConfig.bCastsShadow = ShouldCastShadow(Node);
+			Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 		}
 		else
 		{
 			Mesh->CreateSectionGroup(Node.GroupKey, MoveTemp(Result.Streams), FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
-			Mesh->UpdateSectionConfig(Node.SectionKey, FRealtimeMeshSectionConfig(0), Owner->bGenerateCollision);
+			FRealtimeMeshSectionConfig SectionConfig(0);
+			SectionConfig.bCastsShadow = ShouldCastShadow(Node);
+			Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, Owner->bGenerateCollision);
 			Node.bHasMesh = true;
 		}
 

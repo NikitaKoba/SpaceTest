@@ -114,6 +114,16 @@ public:
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0", UIMin="0.0"))
 	float SkirtMinDepthMeters = 1.0f;
 
+	// --- Shadows ---
+
+	/** Enable shadow casting for planet chunks. */
+	UPROPERTY(EditAnywhere, Category="Shadows")
+	bool bEnableChunkShadows = true;
+
+	/** Shadow casting range around camera in km (0 = no cull). */
+	UPROPERTY(EditAnywhere, Category="Shadows", meta=(ClampMin="0.0", UIMin="0.0"))
+	float ShadowCastRangeKm = 25.0f;
+
 	/** Enable distance-based streaming: только чанки в радиусе активны, остальные выгружаются. */
 	UPROPERTY(EditAnywhere, Category="Streaming")
 	bool bEnableChunkStreaming = true;
