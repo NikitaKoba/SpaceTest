@@ -6,6 +6,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "RealtimeMeshSimple.h"
 
@@ -50,6 +51,41 @@ namespace
 		TEXT("planet.LOD.AutoQuality.FallSpeed"),
 		1.5f,
 		TEXT("Interpolation speed when load decreases."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_ViewBiasEnable(
+		TEXT("planet.LOD.ViewBiasEnable"),
+		1,
+		TEXT("Bias chunk build priority toward camera view direction."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_ViewBiasScale(
+		TEXT("planet.LOD.ViewBiasScale"),
+		50000.0f,
+		TEXT("Priority boost scale for chunks inside the view direction."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_ViewSplitCull(
+		TEXT("planet.LOD.ViewSplitCull"),
+		1,
+		TEXT("Only allow LOD splits for chunks inside the view cone."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_ViewConeScale(
+		TEXT("planet.LOD.ViewConeScale"),
+		1.2f,
+		TEXT("Multiplier for camera half-FOV used by view-based LOD culling."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_MaxConcurrentBuilds(
+		TEXT("planet.LOD.MaxConcurrentBuilds"),
+		2,
+		TEXT("Max number of in-flight chunk builds."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_CommitMaxPerFrame(
+		TEXT("planet.LOD.CommitMaxPerFrame"),
+		1,
+		TEXT("Max number of chunk mesh commits per frame."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_CommitTimeBudgetMs(
+		TEXT("planet.LOD.CommitTimeBudgetMs"),
+		2.0f,
+		TEXT("Time budget in ms for committing completed chunk meshes per frame. 0 disables time limit."));
 }
 
 
@@ -72,6 +108,8 @@ void FCubedSphereLODSystem::Shutdown()
 	InFlightBuilds = 0;
 	bBootstrapping = false;
 	bHasPrevCam = false;
+	LastCamForward = FVector::ForwardVector;
+	LastCamHalfFovRad = PI * 0.25f;
 	CurrentTimeSeconds = 0.0f;
 	DynamicLoadFactor = 0.0f;
 	BaseTargetErrorPixels = 0.0f;
@@ -130,6 +168,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 
 	bBootstrapping = true;
 	bHasPrevCam = false;
+	MaxConcurrentBuilds = FMath::Clamp(CVar_PlanetLOD_MaxConcurrentBuilds.GetValueOnGameThread(), 1, 4);
 
 	CreateRootNodes();
 	if (TargetEdgeLengthCm > 0.0f && VerticesPerEdge > 1)
@@ -364,6 +403,13 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		float Sse = 0.0f;
 	};
 
+	const bool bViewCullSplits = CVar_PlanetLOD_ViewSplitCull.GetValueOnGameThread() != 0;
+	const float ViewConeScale = FMath::Max(0.1f, CVar_PlanetLOD_ViewConeScale.GetValueOnGameThread());
+	const float HalfFovRad = FMath::Max(0.01f, LastCamHalfFovRad);
+	const float ViewConeHalfRad = FMath::Clamp(HalfFovRad * ViewConeScale, 0.01f, PI);
+	const float CosViewCone = FMath::Cos(ViewConeHalfRad);
+	const FVector CamForward = LastCamForward.GetSafeNormal();
+
 	TArray<FSplitCandidate> SplitList;
 	TSet<int32> MergeParents;
 	TSet<int32> BlockedParents;
@@ -395,12 +441,22 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		}
 
 		const FVector WorldCenter = PlanetTransform.TransformPosition(Node.LocalCenter);
-		float Distance = FVector::Distance(CamLocation, WorldCenter) - Node.BoundingRadiusCm * ActorScale;
+		const FVector ToNode = WorldCenter - CamLocation;
+		const float DistanceToCenter = ToNode.Size();
+		float Distance = DistanceToCenter - Node.BoundingRadiusCm * ActorScale;
 		Distance = FMath::Max(100.0f, Distance);
 		Node.LastDistanceCm = Distance;
 		const float EdgeLengthCm = Node.PatchSizeCm / EdgeCount;
 		const bool bNeedsEdgeDetail = bUseTargetEdge && Distance <= TargetEdgeRangeCm && EdgeLengthCm > TargetEdgeLengthCm;
 		const bool bHoldEdgeDetail = bUseTargetEdge && Distance <= EdgeRangeHoldCm && EdgeLengthCm > TargetEdgeLengthCm;
+
+		bool bInView = true;
+		if (bViewCullSplits)
+		{
+			const FVector DirToNode = (DistanceToCenter > KINDA_SMALL_NUMBER) ? (ToNode / DistanceToCenter) : CamForward;
+			const float ViewDot = FVector::DotProduct(DirToNode, CamForward);
+			bInView = ViewDot >= CosViewCone;
+		}
 
 		bool bForceActive = Node.bSplitInProgress || Node.bMergeInProgress;
 		if (Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex))
@@ -438,7 +494,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		const bool bSplitCooldown = (CurrentTimeSeconds - Node.LastSplitTime) < MinSecondsBeforeMerge;
 
 		const bool bParentMergePending = Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex) && Nodes[Node.ParentIndex].bMergeInProgress;
-		if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < CurrentMaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
+		if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < CurrentMaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && bInView && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
 		{
 			SplitList.Add({ Index, Distance, SmoothedSse });
 		}
@@ -1037,6 +1093,20 @@ void FCubedSphereLODSystem::EnqueueBuild(int32 NodeIndex)
 		}
 	}
 	Priority += Node.LastSSE * 1000.0f;
+	if (CVar_PlanetLOD_ViewBiasEnable.GetValueOnGameThread() != 0 && bHasPrevCam)
+	{
+		const FTransform PlanetTransform = Owner->GetActorTransform();
+		const FVector WorldCenter = PlanetTransform.TransformPosition(Node.LocalCenter);
+		const FVector ToNode = WorldCenter - LastCamLocation;
+		const float DistToCenter = ToNode.Size();
+		if (DistToCenter > KINDA_SMALL_NUMBER)
+		{
+			const FVector DirToNode = ToNode / DistToCenter;
+			const float ViewDot = FVector::DotProduct(DirToNode, LastCamForward.GetSafeNormal());
+			const float ViewScale = CVar_PlanetLOD_ViewBiasScale.GetValueOnGameThread();
+			Priority += ViewDot * ViewScale;
+		}
+	}
 
 	FChunkBuildRequest Request;
 	Request.NodeIndex = NodeIndex;
@@ -1134,6 +1204,9 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 		return;
 	}
 
+	const float TimeBudgetSeconds = FMath::Max(0.0f, CVar_PlanetLOD_CommitTimeBudgetMs.GetValueOnGameThread()) / 1000.0f;
+	const double StartSeconds = (TimeBudgetSeconds > 0.0f) ? FPlatformTime::Seconds() : 0.0;
+
 	FChunkBuildResult Result;
 	int32 Processed = 0;
 	while (Processed < Budget && CompletedQueue.Dequeue(Result))
@@ -1209,6 +1282,11 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 		{
 			TryFinalizeMerge(Result.NodeIndex);
 		}
+
+		if (TimeBudgetSeconds > 0.0f && (FPlatformTime::Seconds() - StartSeconds) >= TimeBudgetSeconds)
+		{
+			break;
+		}
 	}
 }
 
@@ -1231,6 +1309,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 	FVector CamLocation;
 	FRotator CamRotation;
 	PC->GetPlayerViewPoint(CamLocation, CamRotation);
+	LastCamForward = CamRotation.Vector();
 
 	float CameraSpeed = 0.0f;
 	if (APawn* Pawn = PC->GetPawn())
@@ -1254,6 +1333,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 
 	const float FOV = PC->PlayerCameraManager ? PC->PlayerCameraManager->GetFOVAngle() : 90.0f;
 	const float PixelsPerCm = ViewY / (2.0f * FMath::Tan(FMath::DegreesToRadians(FOV) * 0.5f));
+	LastCamHalfFovRad = FMath::DegreesToRadians(FMath::Max(10.0f, FOV)) * 0.5f;
 
 	const FTransform PlanetTransform = Owner->GetActorTransform();
 	const float ActorScale = PlanetTransform.GetScale3D().GetMax();
@@ -1268,6 +1348,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 	const float DeactivateRange = ActivateRange + ActiveRangeBufferCm;
 
 	UpdateDynamicQuality(DeltaSeconds);
+	MaxConcurrentBuilds = FMath::Clamp(CVar_PlanetLOD_MaxConcurrentBuilds.GetValueOnGameThread(), 1, 4);
 
 	if (!bBootstrapping || TargetEdgeLengthCm > 0.0f)
 	{
@@ -1281,7 +1362,8 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 
 	const int32 BuildBudget = bBootstrapping ? FMath::Min(WarmupBudget, FrameBudget * 2) : FrameBudget;
 	ProcessBuildQueue(BuildBudget);
-	const int32 CompletedBudget = FMath::Max(1, FMath::Min(BuildBudget, MaxConcurrentBuilds));
+	const int32 CommitBudget = FMath::Max(1, FMath::Min(BuildBudget, CVar_PlanetLOD_CommitMaxPerFrame.GetValueOnGameThread()));
+	const int32 CompletedBudget = FMath::Max(1, FMath::Min(CommitBudget, MaxConcurrentBuilds));
 	ProcessCompletedBuilds(CompletedBudget);
 
 	if (bBootstrapping)

@@ -168,6 +168,8 @@ private:
 	float TargetEdgeRangeBufferCm = 0.0f;
 
 	FVector LastCamLocation = FVector::ZeroVector;
+	FVector LastCamForward = FVector::ForwardVector;
+	float LastCamHalfFovRad = PI * 0.25f;
 	bool bHasPrevCam = false;
 	TMap<FChunkCacheKey, FChunkCacheEntry> ChunkCache;
 	TArray<FChunkCacheKey> ChunkCacheOrder;
