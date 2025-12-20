@@ -81,7 +81,7 @@ void FCubedSphereLODSystem::Shutdown()
 	ClearChunkCache();
 }
 
-void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float InEvaluationInterval, float TargetSSE, float HysteresisPixels, float InErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bInEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm)
+void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float InEvaluationInterval, float TargetSSE, float HysteresisPixels, float InErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InCruiseRangeMultiplier, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bInEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm)
 {
 	Shutdown();
 	ClearChunkCache();
@@ -109,8 +109,9 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	bStreamingEnabled = bEnableStreaming;
 	BaseActiveRangeCm = InBaseActiveRangeCm;
 	ActiveRangeBufferCm = InActiveBufferCm;
+	CruiseRangeMultiplier = FMath::Max(0.01f, InCruiseRangeMultiplier);
 	HyperdriveSpeedThreshold = InHyperSpeedThreshold;
-	HyperdriveRangeMultiplier = FMath::Max(1.0f, InHyperRangeMultiplier);
+	HyperdriveRangeMultiplier = FMath::Max(CruiseRangeMultiplier, FMath::Max(1.0f, InHyperRangeMultiplier));
 	MaxConcurrentBuilds = FMath::Clamp(FrameBudget, 1, 4);
 
 	bEnableSkirts = bInEnableSkirts;
@@ -1258,7 +1259,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 	const float ActorScale = PlanetTransform.GetScale3D().GetMax();
 
 	const float SpeedFactor = (HyperdriveSpeedThreshold > 0.0f) ? FMath::Clamp(CameraSpeed / HyperdriveSpeedThreshold, 0.0f, 10.0f) : 0.0f;
-	const float RangeScale = 1.0f + SpeedFactor * (HyperdriveRangeMultiplier - 1.0f);
+	const float RangeScale = CruiseRangeMultiplier + SpeedFactor * (HyperdriveRangeMultiplier - CruiseRangeMultiplier);
 	float ActivateRange = BaseActiveRangeCm * RangeScale;
 	if (TargetEdgeRangeCm > 0.0f)
 	{

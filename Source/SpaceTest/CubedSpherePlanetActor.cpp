@@ -1230,11 +1230,12 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	LODSystem = MakeUnique<FCubedSphereLODSystem>(*this);
 	const float RangeCm = ActiveRangeKm * 100000.0f;
 	const float BufferCm = ActiveRangeBufferKm * 100000.0f;
+	const float CruiseMultiplier = FMath::Max(0.01f, CruiseRangeMultiplier);
 	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
 	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
 	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
 	const float TargetEdgeLengthCm = FMath::Max(0.0f, TargetEdgeLengthMeters * 100.0f);
 	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
-	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm);
+	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm);
 	LODSystem->Tick(0.0f);
 }

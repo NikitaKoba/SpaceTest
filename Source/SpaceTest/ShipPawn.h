@@ -43,6 +43,8 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="HUD", meta=(AllowPrivateAccess="true"))
 	UShipCursorPilotComponent* CursorPilot = nullptr;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="HUD")
+	bool bShowSpeedHUD = true;
 	// Components
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Ship", meta=(AllowPrivateAccess="true"))
 	UStaticMeshComponent* ShipMesh;
@@ -124,6 +126,17 @@ public:
 	float MinTurnScale = 0.1f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Mass", meta=(ClampMin="0.5", ClampMax="50.0"))
 	float MaxTurnScale = 4.0f;
+	// Mouse wheel throttle scale (applies to cruise only unless enabled for hyper).
+	UPROPERTY(ReplicatedUsing=OnRep_ThrustSpeedScale, EditAnywhere, BlueprintReadWrite, Category="Flight|Throttle", meta=(ClampMin="0.05", ClampMax="10.0"))
+	float ThrustSpeedScale = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Throttle", meta=(ClampMin="0.05", ClampMax="10.0"))
+	float ThrustSpeedScaleMin = 0.3f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Throttle", meta=(ClampMin="0.1", ClampMax="20.0"))
+	float ThrustSpeedScaleMax = 4.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Throttle", meta=(ClampMin="0.01", ClampMax="2.0"))
+	float ThrustSpeedScaleStep = 0.1f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Flight|Throttle")
+	bool bThrottleAffectsHyper = false;
 	// Health
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ship|Health", meta=(ClampMin="1.0"))
 	float MaxHealth = 100.f;
@@ -250,6 +263,7 @@ private:
 	void Axis_Roll        (float V);
 	void Axis_MouseYaw    (float V);
 	void Axis_MousePitch  (float V);
+	void Axis_ThrustSpeedAdjust(float V);
 	void Action_ToggleFA();
 	void Action_ToggleHyperDrive();
 	void HandleDeath(AActor* DamageCauser);
@@ -259,6 +273,10 @@ private:
 	void OnRep_Shield();
 	UFUNCTION()
 	void OnRep_Team();
+	UFUNCTION()
+	void OnRep_ThrustSpeedScale();
+	UFUNCTION(Server, Reliable)
+	void ServerSetThrustSpeedScale(float NewScale);
 	// Role-based tuning helpers
 	float GetShipSpeedMultiplier() const;
 	float GetShipTurnMultiplier() const;

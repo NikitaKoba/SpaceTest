@@ -136,6 +136,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.0"))
 	float ActiveRangeBufferKm = 200.0f;
 
+	/** Base active range multiplier in normal flight. */
+	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.1"))
+	float CruiseRangeMultiplier = 1.0f;
+
 	/** Скорость (км/с), с которой считаем, что включен гиперрежим, радиус масштабируется. */
 	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.1"))
 	float HyperdriveSpeedThresholdKmPerSec = 30.0f;

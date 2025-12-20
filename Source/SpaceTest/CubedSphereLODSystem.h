@@ -17,7 +17,7 @@ class FCubedSphereLODSystem
 public:
 	explicit FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner);
 
-	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm);
+	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InCruiseRangeMultiplier, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm);
 	void Tick(float DeltaSeconds);
 	void Shutdown();
 
@@ -156,6 +156,7 @@ private:
 	bool bStreamingEnabled = false;
 	float BaseActiveRangeCm = 0.0f;
 	float ActiveRangeBufferCm = 0.0f;
+	float CruiseRangeMultiplier = 1.0f;
 	float HyperdriveSpeedThreshold = 0.0f;
 	float HyperdriveRangeMultiplier = 1.0f;
 

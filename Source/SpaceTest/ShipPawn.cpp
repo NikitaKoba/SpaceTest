@@ -294,7 +294,25 @@ void AShipPawn::Tick(float DeltaSeconds)
 	S.Vel = ShipMesh->GetComponentVelocity();
 	PushCamSample(S);
 
-	
+	if (bShowSpeedHUD && IsLocallyControlled())
+	{
+		UWorld* World = GetWorld();
+		if (World && World->GetNetMode() != NM_DedicatedServer && GEngine)
+		{
+			const FVector Vel = ShipMesh ? ShipMesh->GetComponentVelocity() : GetVelocity();
+			const float SpeedUUps = Vel.Size();
+			const float SpeedMps = SpeedUUps / 100.0f;
+			const float SpeedKmps = SpeedMps / 1000.0f;
+			const float SpeedKmph = SpeedMps * 3.6f;
+
+			static const int32 SpeedHudKey = 22001;
+			GEngine->AddOnScreenDebugMessage(
+				SpeedHudKey,
+				0.0f,
+				FColor::Cyan,
+				FString::Printf(TEXT("Speed: %.1f m/s | %.3f km/s | %.1f km/h"), SpeedMps, SpeedKmps, SpeedKmph));
+		}
+	}
 
 	// After hyper exit, kill residual velocity and ignore thrust for a short cooldown.
 	if (HyperExitThrottleLockTime > 0.f)
@@ -462,6 +480,7 @@ void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 	PlayerInputComponent->BindAxis(TEXT("Roll"),          this, &AShipPawn::Axis_Roll);
 	PlayerInputComponent->BindAxis(TEXT("Turn"),          this, &AShipPawn::Axis_MouseYaw);
 	PlayerInputComponent->BindAxis(TEXT("LookUp"),        this, &AShipPawn::Axis_MousePitch);
+	PlayerInputComponent->BindAxis(TEXT("ThrustSpeedAdjust"), this, &AShipPawn::Axis_ThrustSpeedAdjust);
 	PlayerInputComponent->BindAction(TEXT("ToggleFlightAssist"), IE_Pressed, this, &AShipPawn::Action_ToggleFA);
 	PlayerInputComponent->BindAction(TEXT("ToggleHyperDrive"),   IE_Pressed, this, &AShipPawn::Action_ToggleHyperDrive);
 	PlayerInputComponent->BindAction(TEXT("FirePrimary"), IE_Pressed,  this, &AShipPawn::Action_FirePressed);
@@ -821,6 +840,37 @@ void AShipPawn::Axis_MousePitch(float V)
 		if (Net)    Net->AddMouseDelta(0.f, V);
 	}
 }
+void AShipPawn::Axis_ThrustSpeedAdjust(float V)
+{
+	if (!IsLocallyControlled() || FMath::IsNearlyZero(V))
+	{
+		return;
+	}
+
+	const float Step = FMath::Max(0.001f, ThrustSpeedScaleStep);
+	const float MinScale = FMath::Max(0.01f, ThrustSpeedScaleMin);
+	const float MaxScale = FMath::Max(MinScale, ThrustSpeedScaleMax);
+	const float NewScale = FMath::Clamp(ThrustSpeedScale + V * Step, MinScale, MaxScale);
+
+	if (FMath::IsNearlyEqual(NewScale, ThrustSpeedScale, 1e-4f))
+	{
+		return;
+	}
+
+	ThrustSpeedScale = NewScale;
+	ApplyFlightProfile(bHyperDriveActive);
+
+	if (!HasAuthority())
+	{
+		ServerSetThrustSpeedScale(ThrustSpeedScale);
+	}
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage((uint64)this + 888, 1.2f, FColor::Cyan,
+			FString::Printf(TEXT("THRUST SPEED: %.0f%%"), ThrustSpeedScale * 100.f));
+	}
+}
 void AShipPawn::Action_ToggleFA()
 {
 	if (Flight) Flight->ToggleFlightAssist();
@@ -998,6 +1048,21 @@ void AShipPawn::OnRep_Shield()
 void AShipPawn::OnRep_Team()
 {
 }
+void AShipPawn::OnRep_ThrustSpeedScale()
+{
+	const float MinScale = FMath::Max(0.01f, ThrustSpeedScaleMin);
+	const float MaxScale = FMath::Max(MinScale, ThrustSpeedScaleMax);
+	ThrustSpeedScale = FMath::Clamp(ThrustSpeedScale, MinScale, MaxScale);
+	ApplyFlightProfile(bHyperDriveActive);
+}
+
+void AShipPawn::ServerSetThrustSpeedScale_Implementation(float NewScale)
+{
+	const float MinScale = FMath::Max(0.01f, ThrustSpeedScaleMin);
+	const float MaxScale = FMath::Max(MinScale, ThrustSpeedScaleMax);
+	ThrustSpeedScale = FMath::Clamp(NewScale, MinScale, MaxScale);
+	ApplyFlightProfile(bHyperDriveActive);
+}
 
 void AShipPawn::ApplyDamage(float Amount, AActor* DamageCauser)
 {
@@ -1089,6 +1154,7 @@ void AShipPawn::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetim
 	DOREPLIFETIME(AShipPawn, Health);
 	DOREPLIFETIME(AShipPawn, Shield);
 	DOREPLIFETIME(AShipPawn, TeamId);
+	DOREPLIFETIME(AShipPawn, ThrustSpeedScale);
 }
 
 float AShipPawn::GetShipSpeedMultiplier() const
@@ -1112,7 +1178,11 @@ void AShipPawn::ApplyFlightProfile(bool bHyper)
 	const float TurnMult  = GetShipTurnMultiplier();
 	const float MassKg    = Flight->GetCachedMassKg();
 	const float MassComp  = FMath::Clamp(MassReferenceKg / FMath::Max(1.f, MassKg), MinMassCompScale, MaxMassCompScale);
-	const float SpeedScale= FMath::Clamp(SpeedMult * MassComp, MinSpeedScale, MaxSpeedScale);
+	const float ThrottleScaleRaw = (bHyper && !bThrottleAffectsHyper) ? 1.0f : ThrustSpeedScale;
+	const float ThrottleMin = FMath::Max(0.01f, ThrustSpeedScaleMin);
+	const float ThrottleMax = FMath::Max(ThrottleMin, ThrustSpeedScaleMax);
+	const float ThrottleScale = FMath::Clamp(ThrottleScaleRaw, ThrottleMin, ThrottleMax);
+	const float SpeedScale= FMath::Clamp(SpeedMult * MassComp * ThrottleScale, MinSpeedScale, MaxSpeedScale);
 	const float TurnScale = FMath::Clamp(TurnMult  * MassComp, MinTurnScale,  MaxTurnScale);
 	const float TurnAccelScale = FMath::Sqrt(TurnScale); // softer accel to avoid loop/overshoot
 
