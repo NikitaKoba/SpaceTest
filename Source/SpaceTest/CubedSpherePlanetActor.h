@@ -9,6 +9,8 @@ class FastNoiseLite;
 class URealtimeMeshComponent;
 class URealtimeMeshSimple;
 class UMaterialInterface;
+class USkyAtmosphereComponent;
+class UVolumetricCloudComponent;
 namespace RealtimeMesh
 {
 	struct FRealtimeMeshStreamSet;
@@ -31,6 +33,50 @@ public:
 	/** Planet radius in kilometers. */
 	UPROPERTY(EditAnywhere, Category="Planet", meta=(ClampMin="1.0", UIMin="1.0"))
 	float PlanetRadiusKm = 3000.0f;
+
+	// --- Atmosphere ---
+
+	/** Base atmosphere height in kilometers above sea level. */
+	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="1.0", UIMin="1.0"))
+	float AtmosphereHeightKm = 140.0f;
+
+	/** Add max surface height so tall terrain stays inside the atmosphere shell. */
+	UPROPERTY(EditAnywhere, Category="Atmosphere")
+	bool bExtendAtmosphereToSurface = true;
+
+	/** Use ContinentHeightKm as the zero-altitude reference for atmosphere and clouds. */
+	UPROPERTY(EditAnywhere, Category="Atmosphere")
+	bool bUseContinentHeightAsSurfaceZero = true;
+
+	/** Extra offset added to the surface zero reference (km). */
+	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="0.0", UIMin="0.0"))
+	float SurfaceZeroOffsetKm = 0.0f;
+
+	/** If set, overrides the atmosphere outer radius (km from planet center). */
+	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="0.0", UIMin="0.0"))
+	float AtmosphereOuterRadiusKm = 0.0f;
+
+	/** Optional override for Rayleigh scale height (km). 0 = auto from atmosphere height. */
+	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="0.0", UIMin="0.0"))
+	float RayleighScaleHeightKm = 0.0f;
+
+	/** Optional override for Mie scale height (km). 0 = auto from atmosphere height. */
+	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="0.0", UIMin="0.0"))
+	float MieScaleHeightKm = 0.0f;
+
+	/** Extra padding above estimated max surface height (km). */
+	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="0.0", UIMin="0.0"))
+	float AtmosphereHeightPaddingKm = 40.0f;
+
+	// --- Clouds ---
+
+	/** Cloud layer bottom altitude in km. */
+	UPROPERTY(EditAnywhere, Category="Clouds", meta=(ClampMin="0.0", UIMin="0.0"))
+	float CloudBottomKm = 8.0f;
+
+	/** Cloud layer thickness in km. */
+	UPROPERTY(EditAnywhere, Category="Clouds", meta=(ClampMin="0.1", UIMin="0.1"))
+	float CloudThicknessKm = 4.0f;
 
 	/** Number of chunks per cube face (NxN). */
 	UPROPERTY(EditAnywhere, Category="Planet", meta=(ClampMin="1", UIMin="1"))
@@ -575,6 +621,12 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	URealtimeMeshComponent* RuntimeMesh = nullptr;
 
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	USkyAtmosphereComponent* SkyAtmosphere = nullptr;
+
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	UVolumetricCloudComponent* VolumetricCloud = nullptr;
+
 	TUniquePtr<FCubedSphereLODSystem> LODSystem;
 
 	void BuildPlanetMesh();
@@ -582,6 +634,8 @@ private:
 	URealtimeMeshSimple* ResetRuntimeMesh();
 	void InitializeNoise();
 	void StartLODSystem();
+	void UpdateAtmosphere();
+	void ApplySkyCVars();
 
 	TArray<int32> GetOrderedLODVertices() const;
 	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
@@ -592,6 +646,7 @@ private:
 	float GetContinentHeightCm(const FVector3f& SphereDir) const;
 	float GetMountainHeightCm(const FVector3f& SphereDir, float ContinentMask) const;
 	float GetPOIHeightCm(const FVector3f& SphereDir) const;
+	float GetEstimatedMaxSurfaceHeightKm() const;
 	FVector3f GeneratePOIPosition(int32 Index, int32 TotalCount) const;
 	float GetDistanceToPointKm(const FVector3f& Point1, const FVector3f& Point2) const;
 

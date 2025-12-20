@@ -4,8 +4,12 @@
 #include "CubedSphereLODSystem.h"
 #include "CubedSphereFaces.h"
 #include "Components/SceneComponent.h"
+#include "Components/SkyAtmosphereComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Components/VolumetricCloudComponent.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
 
@@ -22,6 +26,13 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 	RuntimeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	RuntimeMesh->SetGenerateOverlapEvents(false);
 
+	SkyAtmosphere = CreateDefaultSubobject<USkyAtmosphereComponent>(TEXT("SkyAtmosphere"));
+	SkyAtmosphere->SetupAttachment(SceneRoot);
+	SkyAtmosphere->TransformMode = ESkyAtmosphereTransformMode::PlanetCenterAtComponentTransform;
+
+	VolumetricCloud = CreateDefaultSubobject<UVolumetricCloudComponent>(TEXT("VolumetricCloud"));
+	VolumetricCloud->SetupAttachment(SceneRoot);
+
 	LODVerticesPerEdge = {9, 17, 33, 65};
 }
 
@@ -29,12 +40,15 @@ void ACubedSpherePlanetActor::BeginPlay()
 {
 	Super::BeginPlay();
 	StartLODSystem();
+	UpdateAtmosphere();
+	ApplySkyCVars();
 }
 
 void ACubedSpherePlanetActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	BuildPlanetMesh();
+	UpdateAtmosphere();
 }
 
 void ACubedSpherePlanetActor::Tick(float DeltaSeconds)
@@ -51,6 +65,119 @@ float ACubedSpherePlanetActor::GetPlanetRadiusCm() const
 {
 	// 1 km = 100000 cm
 	return FMath::Max(1.0f, PlanetRadiusKm * 100000.0f);
+}
+
+float ACubedSpherePlanetActor::GetEstimatedMaxSurfaceHeightKm() const
+{
+	float heightKm = 0.0f;
+
+	if (bEnableContinents)
+	{
+		heightKm += FMath::Max(0.0f, ContinentHeightKm);
+		heightKm += FMath::Max(0.0f, ContinentDetailHeightKm);
+		heightKm += FMath::Max(0.0f, ContinentShelfHeightKm);
+	}
+
+	if (bEnableMountains)
+	{
+		heightKm += FMath::Max(0.0f, MountainRidgedHeightKm);
+		heightKm += FMath::Max(0.0f, MountainRockyDetailHeightKm);
+		heightKm += FMath::Max(0.0f, MountainSlopeDetailHeightKm);
+
+		if (bEnableVolcanicPeaks)
+		{
+			heightKm += FMath::Max(0.0f, MountainVolcanicHeightKm);
+		}
+
+		if (bEnableFoothills)
+		{
+			heightKm += FMath::Max(0.0f, FoothillsHeightKm);
+		}
+	}
+
+	if (bEnablePOI)
+	{
+		if (bEnableSuperVolcanoes)
+		{
+			heightKm += FMath::Max(0.0f, SuperVolcanoHeightKm);
+		}
+
+		if (bEnableImpactCraters)
+		{
+			heightKm += FMath::Max(0.0f, ImpactCraterRimHeightKm);
+		}
+	}
+
+	return heightKm;
+}
+
+void ACubedSpherePlanetActor::UpdateAtmosphere()
+{
+	if (SkyAtmosphere)
+	{
+		SkyAtmosphere->SetRelativeLocation(FVector::ZeroVector);
+		SkyAtmosphere->TransformMode = ESkyAtmosphereTransformMode::PlanetCenterAtComponentTransform;
+
+		const float ContinentZeroKm =
+			(bUseContinentHeightAsSurfaceZero && bEnableContinents) ? FMath::Max(0.0f, ContinentHeightKm) : 0.0f;
+		const float SurfaceZeroKm = FMath::Max(0.0f, ContinentZeroKm + SurfaceZeroOffsetKm);
+
+		const float BottomRadiusKm = FMath::Max(1.0f, PlanetRadiusKm + SurfaceZeroKm);
+		const float RawSurfaceHeightKm = GetEstimatedMaxSurfaceHeightKm();
+		const float EffectiveSurfaceHeightKm = FMath::Max(0.0f, RawSurfaceHeightKm - SurfaceZeroKm);
+		const float SurfaceExtensionKm = bExtendAtmosphereToSurface ? EffectiveSurfaceHeightKm : 0.0f;
+		float EffectiveAtmosphereHeightKm =
+			AtmosphereHeightKm + SurfaceExtensionKm + AtmosphereHeightPaddingKm;
+
+		if (AtmosphereOuterRadiusKm > KINDA_SMALL_NUMBER)
+		{
+			EffectiveAtmosphereHeightKm = FMath::Max(
+				1.0f,
+				AtmosphereOuterRadiusKm - BottomRadiusKm
+			);
+		}
+
+		SkyAtmosphere->BottomRadius = BottomRadiusKm;
+		SkyAtmosphere->AtmosphereHeight = FMath::Max(1.0f, EffectiveAtmosphereHeightKm);
+
+		const float AutoRayleighKm = FMath::Clamp(EffectiveAtmosphereHeightKm * 0.25f, 8.0f, 120.0f);
+		const float AutoMieKm = FMath::Clamp(EffectiveAtmosphereHeightKm * 0.08f, 1.0f, 80.0f);
+		SkyAtmosphere->RayleighExponentialDistribution =
+			(RayleighScaleHeightKm > KINDA_SMALL_NUMBER) ? RayleighScaleHeightKm : AutoRayleighKm;
+		SkyAtmosphere->MieExponentialDistribution =
+			(MieScaleHeightKm > KINDA_SMALL_NUMBER) ? MieScaleHeightKm : AutoMieKm;
+		SkyAtmosphere->MultiScatteringFactor = 1.2f;
+
+		SkyAtmosphere->AerialPerspectiveStartDepth = 0.0f;
+		SkyAtmosphere->AerialPespectiveViewDistanceScale = 0.3f;
+
+		SkyAtmosphere->MarkRenderStateDirty();
+	}
+
+	if (VolumetricCloud)
+	{
+		VolumetricCloud->SetRelativeLocation(FVector::ZeroVector);
+		const float ContinentZeroKm =
+			(bUseContinentHeightAsSurfaceZero && bEnableContinents) ? FMath::Max(0.0f, ContinentHeightKm) : 0.0f;
+		const float SurfaceZeroKm = FMath::Max(0.0f, ContinentZeroKm + SurfaceZeroOffsetKm);
+		VolumetricCloud->LayerBottomAltitude = FMath::Max(0.0f, CloudBottomKm + SurfaceZeroKm);
+		VolumetricCloud->LayerHeight = FMath::Max(0.1f, CloudThicknessKm);
+		VolumetricCloud->bUsePerSampleAtmosphericLightTransmittance = true;
+	}
+}
+
+void ACubedSpherePlanetActor::ApplySkyCVars()
+{
+	UWorld* World = GetWorld();
+	if (!GEngine || !World)
+	{
+		return;
+	}
+
+	GEngine->Exec(World, TEXT("r.SkyAtmosphere.FastSkyLUT 0"));
+	GEngine->Exec(World, TEXT("r.SkyAtmosphere.AerialPerspectiveLUT.FastApplyOnOpaque 0"));
+	GEngine->Exec(World, TEXT("r.SkyAtmosphere.AerialPerspectiveLUT.Depth 512"));
+	GEngine->Exec(World, TEXT("r.SkyAtmosphere.AerialPerspective.StartDepth 0"));
 }
 
 FVector3f ACubedSpherePlanetActor::CubeToSphere(const FVector3f& P)
