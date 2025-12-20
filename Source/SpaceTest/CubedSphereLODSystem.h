@@ -54,6 +54,16 @@ private:
 		bool bBuildInProgress = false;
 
 		float LastSSE = 0.0f;
+		float LastSplitTime = -1e9f;
+		
+		// внутри struct FChunkNode добавь:
+		bool bSplitInProgress = false;
+		bool bMergeInProgress = false;
+
+		bool bHasStagedMesh = false;
+		RealtimeMesh::FRealtimeMeshStreamSet StagedStreams;
+
+		
 	};
 
 	struct FChunkBuildRequest
@@ -87,6 +97,9 @@ private:
 	float TargetErrorPixels = 3.0f;
 	float ErrorHysteresisPixels = 0.5f;
 	float ErrorScale = 1.0f;
+	float SseSmoothingAlpha = 0.4f;
+	float MinSecondsBeforeMerge = 0.0f;
+	float CurrentTimeSeconds = 0.0f;
 
 	int32 FrameBudget = 2;
 	int32 WarmupBudget = 12;
@@ -104,6 +117,7 @@ private:
 	float SkirtMinDepthCm = 0.0f;
 	float TargetEdgeLengthCm = 0.0f;
 	float TargetEdgeRangeCm = 0.0f;
+	float TargetEdgeRangeBufferCm = 0.0f;
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	bool bHasPrevCam = false;
@@ -129,4 +143,5 @@ private:
 	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);
 	void ProcessCompletedBuilds();
+	
 };
