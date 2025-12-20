@@ -54,6 +54,7 @@ private:
 		bool bBuildInProgress = false;
 
 		float LastSSE = 0.0f;
+		float LastDistanceCm = 0.0f;
 		float LastSplitTime = -1e9f;
 		
 		// внутри struct FChunkNode добавь:
@@ -70,6 +71,17 @@ private:
 	{
 		int32 NodeIndex = INDEX_NONE;
 		int32 BuildVersion = 0;
+		float Priority = 0.0f;
+		uint64 Sequence = 0;
+
+		bool operator<(const FChunkBuildRequest& Other) const
+		{
+			if (!FMath::IsNearlyEqual(Priority, Other.Priority))
+			{
+				return Priority < Other.Priority;
+			}
+			return Sequence > Other.Sequence;
+		}
 	};
 
 	struct FChunkBuildResult
@@ -83,8 +95,9 @@ private:
 	URealtimeMeshSimple* Mesh = nullptr;
 
 	TArray<FChunkNode> Nodes;
-	TQueue<FChunkBuildRequest> BuildQueue;
+	TArray<FChunkBuildRequest> BuildQueue;
 	TQueue<FChunkBuildResult, EQueueMode::Mpsc> CompletedQueue;
+	uint64 NextBuildSequence = 1;
 
 	int32 ChunksPerFace = 0;
 	float PlanetRadiusCm = 0.0f;
@@ -136,12 +149,14 @@ private:
 	void SplitNode(int32 NodeIndex);
 	void MergeNode(int32 ParentIndex);
 	bool AreChildrenReadyToMerge(const FChunkNode& Node) const;
-	bool IsNodeCovered(int32 NodeIndex) const;
-	void RetireParentIfReady(int32 ParentIndex);
-	void TryRetireAncestors(int32 NodeIndex);
+	bool AreChildrenReadyForSplitSwap(const FChunkNode& Node) const;
+	void TryFinalizeSplit(int32 ParentIndex);
+	void TryFinalizeMerge(int32 ParentIndex);
+	void ClearStagedMesh(FChunkNode& Node);
+	void ApplyStagedMesh(FChunkNode& Node);
 
 	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);
-	void ProcessCompletedBuilds();
+	void ProcessCompletedBuilds(int32 Budget);
 	
 };

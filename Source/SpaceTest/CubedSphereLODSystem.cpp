@@ -7,6 +7,7 @@
 #include "GameFramework/PlayerController.h"
 #include "RealtimeMeshSimple.h"
 
+
 FCubedSphereLODSystem::FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner)
 	: Owner(&InOwner)
 {
@@ -16,11 +17,8 @@ void FCubedSphereLODSystem::Shutdown()
 {
 	Mesh = nullptr;
 	Nodes.Reset();
-	while (!BuildQueue.IsEmpty())
-	{
-		FChunkBuildRequest Dummy;
-		BuildQueue.Dequeue(Dummy);
-	}
+	BuildQueue.Reset();
+	NextBuildSequence = 1;
 	while (!CompletedQueue.IsEmpty())
 	{
 		FChunkBuildResult DummyResult;
@@ -59,7 +57,7 @@ void FCubedSphereLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 InChun
 	ActiveRangeBufferCm = InActiveBufferCm;
 	HyperdriveSpeedThreshold = InHyperSpeedThreshold;
 	HyperdriveRangeMultiplier = FMath::Max(1.0f, InHyperRangeMultiplier);
-	MaxConcurrentBuilds = bStreamingEnabled ? FrameBudget : WarmupBudget;
+	MaxConcurrentBuilds = FMath::Max(1, FrameBudget);
 
 	bEnableSkirts = bInEnableSkirts;
 	SkirtDepthScale = FMath::Max(0.0f, InSkirtDepthScale);
@@ -152,10 +150,15 @@ int32 FCubedSphereLODSystem::CreateNode(int32 FaceIndex, int32 Level, int32 Chun
 	Node.bIsActive = true;
 	Node.bHasMesh = false;
 	Node.bRetireAfterSplit = false;
+	Node.bSplitInProgress = false;
+	Node.bMergeInProgress = false;
+	ClearStagedMesh(Node);
+	Node.bHasStagedMesh = false;
 	Node.BuildVersion = 0;
 	Node.PendingBuildVersion = 0;
 	Node.bBuildInProgress = false;
 	Node.LastSSE = 0.0f;
+	Node.LastDistanceCm = 0.0f;
 	Node.LastSplitTime = -1e9f;
 
 	const FCubedSphereFace& Face = Faces[FaceIndex];
@@ -185,10 +188,14 @@ void FCubedSphereLODSystem::ActivateNode(int32 NodeIndex, bool bMakeLeaf)
 	Node.bIsActive = true;
 	Node.bHasMesh = false;
 	Node.bRetireAfterSplit = false;
+	Node.bSplitInProgress = false;
+	Node.bMergeInProgress = false;
+	Node.bHasStagedMesh = false;
 	Node.bBuildInProgress = false;
 	Node.BuildVersion++;
 	Node.PendingBuildVersion = 0;
 	Node.LastSSE = 0.0f;
+	Node.LastDistanceCm = 0.0f;
 	Node.LastSplitTime = -1e9f;
 }
 
@@ -264,7 +271,14 @@ float FCubedSphereLODSystem::ComputeScreenSpaceError(const FChunkNode& Node, flo
 
 void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float PixelsPerCm, float ActorScale, float ActivateRange, float DeactivateRange, const FTransform& PlanetTransform)
 {
-	TArray<int32> SplitList;
+	struct FSplitCandidate
+	{
+		int32 NodeIndex = INDEX_NONE;
+		float Distance = 0.0f;
+		float Sse = 0.0f;
+	};
+
+	TArray<FSplitCandidate> SplitList;
 	TSet<int32> MergeParents;
 	TSet<int32> BlockedParents;
 	SplitList.Reserve(Nodes.Num());
@@ -286,13 +300,24 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		const FVector WorldCenter = PlanetTransform.TransformPosition(Node.LocalCenter);
 		float Distance = FVector::Distance(CamLocation, WorldCenter) - Node.BoundingRadiusCm * ActorScale;
 		Distance = FMath::Max(100.0f, Distance);
+		Node.LastDistanceCm = Distance;
 		const float EdgeLengthCm = Node.PatchSizeCm / EdgeCount;
 		const bool bNeedsEdgeDetail = bUseTargetEdge && Distance <= TargetEdgeRangeCm && EdgeLengthCm > TargetEdgeLengthCm;
 		const bool bHoldEdgeDetail = bUseTargetEdge && Distance <= EdgeRangeHoldCm && EdgeLengthCm > TargetEdgeLengthCm;
 
+		bool bForceActive = Node.bSplitInProgress || Node.bMergeInProgress;
+		if (Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex))
+		{
+			const FChunkNode& ParentNode = Nodes[Node.ParentIndex];
+			if (ParentNode.bSplitInProgress || ParentNode.bMergeInProgress)
+			{
+				bForceActive = true;
+			}
+		}
+
 		const bool bIsRoot = Node.Level == 0;
-		const bool bShouldActivate = bIsRoot || !bStreamingEnabled || Distance <= ActivateRange;
-		const bool bShouldDeactivate = bStreamingEnabled && !bIsRoot && Distance > DeactivateRange;
+		const bool bShouldActivate = bForceActive || bIsRoot || !bStreamingEnabled || Distance <= ActivateRange;
+		const bool bShouldDeactivate = bStreamingEnabled && !bIsRoot && !bForceActive && Distance > DeactivateRange;
 
 		if (bShouldActivate && !Node.bIsActive)
 		{
@@ -303,7 +328,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 			Node.bIsActive = false;
 		}
 
-		if (Node.bIsActive && Node.bIsLeaf && !Node.bHasMesh && !Node.bBuildInProgress)
+		if (Node.bIsActive && Node.bIsLeaf && !Node.bHasMesh && !Node.bHasStagedMesh && !Node.bBuildInProgress)
 		{
 			EnqueueBuild(Index);
 		}
@@ -312,24 +337,13 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		const float SmoothedSse = (Node.LastSSE > 0.0f) ? FMath::Lerp(Node.LastSSE, RawSse, SseSmoothingAlpha) : RawSse;
 		Node.LastSSE = SmoothedSse;
 
-		bool bHasCoverage = Node.bHasMesh;
-		if (!bHasCoverage)
-		{
-			int32 AncestorIndex = Node.ParentIndex;
-			while (Nodes.IsValidIndex(AncestorIndex))
-			{
-				if (Nodes[AncestorIndex].bHasMesh)
-				{
-					bHasCoverage = true;
-					break;
-				}
-				AncestorIndex = Nodes[AncestorIndex].ParentIndex;
-			}
-		}
+		const bool bHasCoverage = Node.bHasMesh;
+		const bool bSplitCooldown = (CurrentTimeSeconds - Node.LastSplitTime) < MinSecondsBeforeMerge;
 
-		if (Node.bIsActive && Node.Level < MaxSubdivisionLevel && bHasCoverage && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
+		const bool bParentMergePending = Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex) && Nodes[Node.ParentIndex].bMergeInProgress;
+		if (Node.bIsActive && Node.Level < MaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
 		{
-			SplitList.Add(Index);
+			SplitList.Add({ Index, Distance, SmoothedSse });
 		}
 
 		if (Node.Level > 0)
@@ -342,7 +356,15 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 			const bool bMergeCandidate = (!Node.bIsActive) || (SmoothedSse < MergeThreshold);
 			if (bMergeCandidate && Node.ParentIndex != INDEX_NONE && !bHoldEdgeDetail)
 			{
-				MergeParents.Add(Node.ParentIndex);
+				const int32 ParentIndex = Node.ParentIndex;
+				if (Nodes.IsValidIndex(ParentIndex))
+				{
+					const FChunkNode& ParentNode = Nodes[ParentIndex];
+					if (!ParentNode.bSplitInProgress && !ParentNode.bMergeInProgress)
+					{
+						MergeParents.Add(ParentIndex);
+					}
+				}
 			}
 		}
 	}
@@ -359,7 +381,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		}
 
 		FChunkNode& Parent = Nodes[ParentIndex];
-		if (!Parent.bInUse || Parent.bIsLeaf)
+		if (!Parent.bInUse || Parent.bIsLeaf || Parent.bSplitInProgress || Parent.bMergeInProgress)
 		{
 			continue;
 		}
@@ -410,8 +432,23 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 		}
 	}
 
-	for (int32 NodeIndex : SplitList)
+	if (SplitList.Num() > 1)
 	{
+		SplitList.Sort([](const FSplitCandidate& A, const FSplitCandidate& B)
+		{
+			if (!FMath::IsNearlyEqual(A.Distance, B.Distance, 1.0f))
+			{
+				return A.Distance < B.Distance;
+			}
+			return A.Sse > B.Sse;
+		});
+	}
+
+	const int32 MaxSplitsThisEval = FMath::Max(1, FrameBudget);
+	const int32 SplitCount = FMath::Min(MaxSplitsThisEval, SplitList.Num());
+	for (int32 Index = 0; Index < SplitCount; ++Index)
+	{
+		const int32 NodeIndex = SplitList[Index].NodeIndex;
 		if (!Nodes.IsValidIndex(NodeIndex))
 		{
 			continue;
@@ -440,12 +477,21 @@ void FCubedSphereLODSystem::SplitNode(int32 NodeIndex)
 		return;
 	}
 
+	if (!NodeSnapshot.bHasMesh)
+	{
+		return;
+	}
+
+	if (NodeSnapshot.bSplitInProgress || NodeSnapshot.bMergeInProgress)
+	{
+		return;
+	}
+
 	const int32 ChildLevel = NodeSnapshot.Level + 1;
 	const int32 BaseX = NodeSnapshot.ChunkX * 2;
 	const int32 BaseY = NodeSnapshot.ChunkY * 2;
 	const int32 FaceIndex = NodeSnapshot.FaceIndex;
 	const bool bParentActive = NodeSnapshot.bIsActive;
-	const bool bParentHasMesh = NodeSnapshot.bHasMesh;
 	int32 ExistingChildren[4] = { NodeSnapshot.Children[0], NodeSnapshot.Children[1], NodeSnapshot.Children[2], NodeSnapshot.Children[3] };
 
 	const int32 Offsets[4][2] =
@@ -485,7 +531,11 @@ void FCubedSphereLODSystem::SplitNode(int32 NodeIndex)
 	}
 
 	Nodes[NodeIndex].bIsLeaf = false;
-	Nodes[NodeIndex].bRetireAfterSplit = bParentHasMesh;
+	Nodes[NodeIndex].bRetireAfterSplit = false;
+	Nodes[NodeIndex].bSplitInProgress = true;
+	Nodes[NodeIndex].bMergeInProgress = false;
+	Nodes[NodeIndex].bHasStagedMesh = false;
+	ClearStagedMesh(Nodes[NodeIndex]);
 	Nodes[NodeIndex].LastSplitTime = CurrentTimeSeconds;
 
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
@@ -498,11 +548,16 @@ void FCubedSphereLODSystem::SplitNode(int32 NodeIndex)
 
 		FChunkNode& Child = Nodes[ChildIndex];
 		Child.bIsActive = bParentActive;
+		Child.LastDistanceCm = NodeSnapshot.LastDistanceCm;
 		Child.bHasMesh = false;
+		Child.bHasStagedMesh = false;
+		ClearStagedMesh(Child);
+		Child.bSplitInProgress = false;
+		Child.bMergeInProgress = false;
 		Child.bBuildInProgress = false;
-		Child.BuildVersion++;
 		Child.PendingBuildVersion = 0;
 		Child.LastSSE = 0.0f;
+		Child.LastDistanceCm = 0.0f;
 
 		if (Child.bIsActive)
 		{
@@ -524,6 +579,172 @@ void FCubedSphereLODSystem::MergeNode(int32 ParentIndex)
 		return;
 	}
 
+	Parent.bIsActive = true;
+	Parent.bMergeInProgress = true;
+	Parent.bSplitInProgress = false;
+
+	if (Parent.bHasMesh || Parent.bHasStagedMesh)
+	{
+		TryFinalizeMerge(ParentIndex);
+		return;
+	}
+
+	if (!Parent.bBuildInProgress)
+	{
+		EnqueueBuild(ParentIndex);
+	}
+
+	TryFinalizeMerge(ParentIndex);
+}
+
+bool FCubedSphereLODSystem::AreChildrenReadyToMerge(const FChunkNode& Node) const
+{
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		const int32 ChildIndex = Node.Children[ChildSlot];
+		if (!Nodes.IsValidIndex(ChildIndex))
+		{
+			return false;
+		}
+
+		const FChunkNode& Child = Nodes[ChildIndex];
+		if (!Child.bInUse || !Child.bIsLeaf || !Child.bHasMesh || Child.bSplitInProgress || Child.bMergeInProgress)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool FCubedSphereLODSystem::AreChildrenReadyForSplitSwap(const FChunkNode& Node) const
+{
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		const int32 ChildIndex = Node.Children[ChildSlot];
+		if (!Nodes.IsValidIndex(ChildIndex))
+		{
+			return false;
+		}
+
+		const FChunkNode& Child = Nodes[ChildIndex];
+		if (!Child.bInUse || !Child.bIsLeaf)
+		{
+			return false;
+		}
+
+		if (!Child.bHasMesh && !Child.bHasStagedMesh)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void FCubedSphereLODSystem::ClearStagedMesh(FChunkNode& Node)
+{
+	if (!Node.bHasStagedMesh)
+	{
+		return;
+	}
+
+	Node.StagedStreams = RealtimeMesh::FRealtimeMeshStreamSet();
+	Node.bHasStagedMesh = false;
+}
+
+void FCubedSphereLODSystem::ApplyStagedMesh(FChunkNode& Node)
+{
+	if (!Mesh || !Owner || !Node.bHasStagedMesh)
+	{
+		return;
+	}
+
+	if (Node.bHasMesh)
+	{
+		Mesh->UpdateSectionGroup(Node.GroupKey, MoveTemp(Node.StagedStreams));
+	}
+	else
+	{
+		Mesh->CreateSectionGroup(Node.GroupKey, MoveTemp(Node.StagedStreams), FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+		Mesh->UpdateSectionConfig(Node.SectionKey, FRealtimeMeshSectionConfig(0), Owner->bGenerateCollision);
+		Node.bHasMesh = true;
+	}
+
+	Node.bHasStagedMesh = false;
+}
+
+void FCubedSphereLODSystem::TryFinalizeSplit(int32 ParentIndex)
+{
+	if (!Nodes.IsValidIndex(ParentIndex))
+	{
+		return;
+	}
+
+	FChunkNode& Parent = Nodes[ParentIndex];
+	if (!Parent.bInUse || !Parent.bSplitInProgress)
+	{
+		return;
+	}
+
+	if (!AreChildrenReadyForSplitSwap(Parent))
+	{
+		return;
+	}
+
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		const int32 ChildIndex = Parent.Children[ChildSlot];
+		if (!Nodes.IsValidIndex(ChildIndex))
+		{
+			continue;
+		}
+
+		FChunkNode& Child = Nodes[ChildIndex];
+		if (Child.bHasStagedMesh)
+		{
+			ApplyStagedMesh(Child);
+		}
+		Child.bIsActive = true;
+	}
+
+	if (Parent.bHasMesh && Mesh)
+	{
+		Mesh->RemoveSectionGroup(Parent.GroupKey);
+	}
+	Parent.bHasMesh = false;
+	Parent.bRetireAfterSplit = false;
+	Parent.bSplitInProgress = false;
+}
+
+void FCubedSphereLODSystem::TryFinalizeMerge(int32 ParentIndex)
+{
+	if (!Nodes.IsValidIndex(ParentIndex))
+	{
+		return;
+	}
+
+	FChunkNode& Parent = Nodes[ParentIndex];
+	if (!Parent.bInUse || !Parent.bMergeInProgress)
+	{
+		return;
+	}
+
+	if (!AreChildrenReadyToMerge(Parent))
+	{
+		return;
+	}
+
+	if (!Parent.bHasMesh && !Parent.bHasStagedMesh)
+	{
+		return;
+	}
+
+	if (Parent.bHasStagedMesh)
+	{
+		ApplyStagedMesh(Parent);
+	}
+
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
 		const int32 ChildIndex = Parent.Children[ChildSlot];
@@ -539,117 +760,24 @@ void FCubedSphereLODSystem::MergeNode(int32 ParentIndex)
 		}
 
 		Child.bHasMesh = false;
+		Child.bHasStagedMesh = false;
 		Child.bInUse = false;
 		Child.bIsLeaf = false;
 		Child.bIsActive = false;
 		Child.bRetireAfterSplit = false;
+		Child.bSplitInProgress = false;
+		Child.bMergeInProgress = false;
 		Child.bBuildInProgress = false;
 		Child.BuildVersion++;
 		Child.PendingBuildVersion = 0;
+		ClearStagedMesh(Child);
 	}
 
 	Parent.bIsLeaf = true;
-	Parent.bRetireAfterSplit = false;
 	Parent.bIsActive = true;
-
-	if (!Parent.bHasMesh)
-	{
-		EnqueueBuild(ParentIndex);
-	}
-}
-
-bool FCubedSphereLODSystem::AreChildrenReadyToMerge(const FChunkNode& Node) const
-{
-	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
-	{
-		const int32 ChildIndex = Node.Children[ChildSlot];
-		if (!Nodes.IsValidIndex(ChildIndex))
-		{
-			return false;
-		}
-
-		const FChunkNode& Child = Nodes[ChildIndex];
-		if (!Child.bInUse || !Child.bIsLeaf)
-		{
-			return false;
-		}
-	}
-
-	return true;
-}
-
-bool FCubedSphereLODSystem::IsNodeCovered(int32 NodeIndex) const
-{
-	if (!Nodes.IsValidIndex(NodeIndex))
-	{
-		return false;
-	}
-
-	const FChunkNode& Node = Nodes[NodeIndex];
-	if (!Node.bInUse)
-	{
-		return false;
-	}
-
-	if (Node.bHasMesh)
-	{
-		return true;
-	}
-
-	if (Node.bIsLeaf)
-	{
-		return false;
-	}
-
-	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
-	{
-		if (!IsNodeCovered(Node.Children[ChildSlot]))
-		{
-			return false;
-		}
-	}
-
-	return true;
-}
-
-void FCubedSphereLODSystem::RetireParentIfReady(int32 ParentIndex)
-{
-	if (!Nodes.IsValidIndex(ParentIndex))
-	{
-		return;
-	}
-
-	FChunkNode& Parent = Nodes[ParentIndex];
-	if (!Parent.bRetireAfterSplit || !Parent.bHasMesh)
-	{
-		return;
-	}
-
-	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
-	{
-		const int32 ChildIndex = Parent.Children[ChildSlot];
-		if (!IsNodeCovered(ChildIndex))
-		{
-			return;
-		}
-	}
-
-	if (Mesh)
-	{
-		Mesh->RemoveSectionGroup(Parent.GroupKey);
-	}
-	Parent.bHasMesh = false;
 	Parent.bRetireAfterSplit = false;
-}
-
-void FCubedSphereLODSystem::TryRetireAncestors(int32 NodeIndex)
-{
-	int32 CurrentIndex = NodeIndex;
-	while (Nodes.IsValidIndex(CurrentIndex))
-	{
-		RetireParentIfReady(CurrentIndex);
-		CurrentIndex = Nodes[CurrentIndex].ParentIndex;
-	}
+	Parent.bMergeInProgress = false;
+	Parent.LastSplitTime = CurrentTimeSeconds;
 }
 
 void FCubedSphereLODSystem::EnqueueBuild(int32 NodeIndex)
@@ -660,7 +788,8 @@ void FCubedSphereLODSystem::EnqueueBuild(int32 NodeIndex)
 	}
 
 	FChunkNode& Node = Nodes[NodeIndex];
-	if (!Node.bInUse || !Node.bIsLeaf || Node.bBuildInProgress || Node.bHasMesh)
+	const bool bCanBuild = Node.bIsLeaf || Node.bMergeInProgress;
+	if (!Node.bInUse || !bCanBuild || Node.bBuildInProgress || Node.bHasMesh || Node.bHasStagedMesh)
 	{
 		return;
 	}
@@ -668,7 +797,40 @@ void FCubedSphereLODSystem::EnqueueBuild(int32 NodeIndex)
 	Node.BuildVersion++;
 	Node.PendingBuildVersion = Node.BuildVersion;
 	Node.bBuildInProgress = true;
-	BuildQueue.Enqueue({ NodeIndex, Node.BuildVersion });
+	float DistanceForPriority = Node.LastDistanceCm;
+	if (DistanceForPriority <= 0.0f && Owner && bHasPrevCam)
+	{
+		const FTransform PlanetTransform = Owner->GetActorTransform();
+		const float ActorScale = PlanetTransform.GetScale3D().GetMax();
+		const FVector WorldCenter = PlanetTransform.TransformPosition(Node.LocalCenter);
+		DistanceForPriority = FVector::Distance(LastCamLocation, WorldCenter) - Node.BoundingRadiusCm * ActorScale;
+		DistanceForPriority = FMath::Max(100.0f, DistanceForPriority);
+	}
+	if (DistanceForPriority <= 0.0f)
+	{
+		DistanceForPriority = BIG_NUMBER;
+	}
+
+	float Priority = -DistanceForPriority;
+	if (Node.bMergeInProgress)
+	{
+		Priority += 1.0e9f;
+	}
+	if (Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex))
+	{
+		if (Nodes[Node.ParentIndex].bSplitInProgress)
+		{
+			Priority += 1.0e9f;
+		}
+	}
+	Priority += Node.LastSSE * 1000.0f;
+
+	FChunkBuildRequest Request;
+	Request.NodeIndex = NodeIndex;
+	Request.BuildVersion = Node.BuildVersion;
+	Request.Priority = Priority;
+	Request.Sequence = NextBuildSequence++;
+	BuildQueue.HeapPush(Request);
 }
 
 void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
@@ -678,17 +840,31 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 		return;
 	}
 
-	int32 Processed = 0;
-	FChunkBuildRequest Request;
-	while (Processed < Budget && BuildQueue.Dequeue(Request))
+	if (BuildQueue.Num() == 0)
 	{
+		return;
+	}
+
+	const int32 ConcurrentLimit = FMath::Max(1, MaxConcurrentBuilds);
+	int32 Started = 0;
+	while (BuildQueue.Num() > 0 && Started < Budget)
+	{
+		if (InFlightBuilds >= ConcurrentLimit)
+		{
+			break;
+		}
+
+		FChunkBuildRequest Request;
+		BuildQueue.HeapPop(Request);
+
 		if (!Nodes.IsValidIndex(Request.NodeIndex))
 		{
 			continue;
 		}
 
 		FChunkNode& Node = Nodes[Request.NodeIndex];
-		if (!Node.bInUse || !Node.bIsLeaf || Node.PendingBuildVersion != Request.BuildVersion)
+		const bool bCanBuild = Node.bIsLeaf || Node.bMergeInProgress;
+		if (!Node.bInUse || !bCanBuild || Node.PendingBuildVersion != Request.BuildVersion)
 		{
 			if (Node.PendingBuildVersion == Request.BuildVersion)
 			{
@@ -698,17 +874,11 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 			continue;
 		}
 
-		if (bStreamingEnabled && !Node.bIsActive && Node.Level > 0)
+		if (bStreamingEnabled && !Node.bIsActive && Node.Level > 0 && !Node.bMergeInProgress)
 		{
 			Node.bBuildInProgress = false;
 			Node.PendingBuildVersion = 0;
 			continue;
-		}
-
-		const int32 ConcurrentLimit = bBootstrapping ? FMath::Max(MaxConcurrentBuilds, WarmupBudget) : MaxConcurrentBuilds;
-		if (InFlightBuilds >= ConcurrentLimit)
-		{
-			break;
 		}
 
 		const FChunkNode NodeCopy = Node;
@@ -725,11 +895,11 @@ void FCubedSphereLODSystem::ProcessBuildQueue(int32 Budget)
 			FPlatformAtomics::InterlockedDecrement(&InFlightBuilds);
 		});
 
-		Processed++;
+		Started++;
 	}
 }
 
-void FCubedSphereLODSystem::ProcessCompletedBuilds()
+void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 {
 	if (!Mesh || !Owner)
 	{
@@ -737,15 +907,18 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds()
 	}
 
 	FChunkBuildResult Result;
-	while (CompletedQueue.Dequeue(Result))
+	int32 Processed = 0;
+	while (Processed < Budget && CompletedQueue.Dequeue(Result))
 	{
+		Processed++;
 		if (!Nodes.IsValidIndex(Result.NodeIndex))
 		{
 			continue;
 		}
 
 		FChunkNode& Node = Nodes[Result.NodeIndex];
-		if (!Node.bInUse || !Node.bIsLeaf || Node.PendingBuildVersion != Result.BuildVersion)
+		const bool bCanBuild = Node.bIsLeaf || Node.bMergeInProgress;
+		if (!Node.bInUse || !bCanBuild || Node.PendingBuildVersion != Result.BuildVersion)
 		{
 			if (Node.PendingBuildVersion == Result.BuildVersion)
 			{
@@ -755,13 +928,25 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds()
 			continue;
 		}
 
-		if (Node.bHasMesh)
+		bool bStageOnly = Node.bMergeInProgress;
+		if (!bStageOnly && Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex))
 		{
-			Mesh->UpdateSectionGroup(Node.GroupKey, Result.Streams);
+			const FChunkNode& ParentNode = Nodes[Node.ParentIndex];
+			bStageOnly = ParentNode.bSplitInProgress;
+		}
+
+		if (bStageOnly)
+		{
+			Node.bHasStagedMesh = true;
+			Node.StagedStreams = MoveTemp(Result.Streams);
+		}
+		else if (Node.bHasMesh)
+		{
+			Mesh->UpdateSectionGroup(Node.GroupKey, MoveTemp(Result.Streams));
 		}
 		else
 		{
-			Mesh->CreateSectionGroup(Node.GroupKey, Result.Streams, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+			Mesh->CreateSectionGroup(Node.GroupKey, MoveTemp(Result.Streams), FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
 			Mesh->UpdateSectionConfig(Node.SectionKey, FRealtimeMeshSectionConfig(0), Owner->bGenerateCollision);
 			Node.bHasMesh = true;
 		}
@@ -769,7 +954,14 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds()
 		Node.bBuildInProgress = false;
 		Node.PendingBuildVersion = 0;
 
-		TryRetireAncestors(Node.ParentIndex);
+		if (Node.ParentIndex != INDEX_NONE)
+		{
+			TryFinalizeSplit(Node.ParentIndex);
+		}
+		if (Node.bMergeInProgress)
+		{
+			TryFinalizeMerge(Result.NodeIndex);
+		}
 	}
 }
 
@@ -838,9 +1030,10 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 		}
 	}
 
-	const int32 Budget = bBootstrapping ? WarmupBudget : FrameBudget;
-	ProcessBuildQueue(Budget);
-	ProcessCompletedBuilds();
+	const int32 BuildBudget = bBootstrapping ? FMath::Min(WarmupBudget, FrameBudget * 2) : FrameBudget;
+	ProcessBuildQueue(BuildBudget);
+	const int32 CompletedBudget = FMath::Max(1, FMath::Min(BuildBudget, MaxConcurrentBuilds));
+	ProcessCompletedBuilds(CompletedBudget);
 
 	if (bBootstrapping)
 	{
@@ -859,7 +1052,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 		}
 		else
 		{
-			bBootstrapDone = BuildQueue.IsEmpty() && CompletedQueue.IsEmpty() && InFlightBuilds == 0;
+			bBootstrapDone = BuildQueue.Num() == 0 && CompletedQueue.IsEmpty() && InFlightBuilds == 0;
 		}
 
 		if (bBootstrapDone)
