@@ -180,8 +180,17 @@ void ACubedSpherePlanetActor::UpdateClouds()
 	}
 
 	VolumetricCloud->SetRelativeLocation(FVector::ZeroVector);
-	VolumetricCloud->SetLayerBottomAltitude(FMath::Max(0.0f, CloudBottomKm));
-	VolumetricCloud->SetLayerHeight(FMath::Max(0.1f, CloudThicknessKm));
+
+	if (bOverrideCloudLayerSettings)
+	{
+		VolumetricCloud->SetLayerBottomAltitude(FMath::Max(0.0f, CloudBottomKm));
+		VolumetricCloud->SetLayerHeight(FMath::Max(0.1f, CloudThicknessKm));
+	}
+	else
+	{
+		CloudBottomKm = FMath::Max(0.0f, VolumetricCloud->LayerBottomAltitude);
+		CloudThicknessKm = FMath::Max(0.1f, VolumetricCloud->LayerHeight);
+	}
 	VolumetricCloud->SetbUsePerSampleAtmosphericLightTransmittance(true);
 	VolumetricCloud->SetPlanetRadius(PlanetRadiusKm);
 

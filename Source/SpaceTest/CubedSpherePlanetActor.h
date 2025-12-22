@@ -84,6 +84,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Clouds", meta=(ClampMin="0.1", UIMin="0.1"))
 	float CloudThicknessKm = 4.0f;
 
+	/** If true, CloudBottomKm/CloudThicknessKm override the component settings. */
+	UPROPERTY(EditAnywhere, Category="Clouds")
+	bool bOverrideCloudLayerSettings = true;
+
 	/** Volumetric cloud material (UDS defaults are auto-assigned if available). */
 	UPROPERTY(EditAnywhere, Category="Clouds")
 	UMaterialInterface* CloudMaterial = nullptr;
