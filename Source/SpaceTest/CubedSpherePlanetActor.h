@@ -9,8 +9,10 @@ class FastNoiseLite;
 class URealtimeMeshComponent;
 class URealtimeMeshSimple;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class USkyAtmosphereComponent;
 class UVolumetricCloudComponent;
+class UTexture2D;
 namespace RealtimeMesh
 {
 	struct FRealtimeMeshStreamSet;
@@ -44,9 +46,13 @@ public:
 	UPROPERTY(EditAnywhere, Category="Atmosphere")
 	bool bExtendAtmosphereToSurface = true;
 
-	/** Use ContinentHeightKm as the zero-altitude reference for atmosphere and clouds. */
+	/** Use ContinentHeightKm as the zero-altitude reference for atmosphere. */
 	UPROPERTY(EditAnywhere, Category="Atmosphere")
 	bool bUseContinentHeightAsSurfaceZero = true;
+
+	/** Keep atmosphere bottom at PlanetRadiusKm to avoid a gap above oceans. */
+	UPROPERTY(EditAnywhere, Category="Atmosphere")
+	bool bAtmosphereBottomAtPlanetRadius = true;
 
 	/** Extra offset added to the surface zero reference (km). */
 	UPROPERTY(EditAnywhere, Category="Atmosphere", meta=(ClampMin="0.0", UIMin="0.0"))
@@ -70,13 +76,61 @@ public:
 
 	// --- Clouds ---
 
-	/** Cloud layer bottom altitude in km. */
+	/** Cloud layer bottom altitude (km above ground). */
 	UPROPERTY(EditAnywhere, Category="Clouds", meta=(ClampMin="0.0", UIMin="0.0"))
 	float CloudBottomKm = 8.0f;
 
-	/** Cloud layer thickness in km. */
+	/** Cloud layer thickness (km). */
 	UPROPERTY(EditAnywhere, Category="Clouds", meta=(ClampMin="0.1", UIMin="0.1"))
 	float CloudThicknessKm = 4.0f;
+
+	/** Volumetric cloud material (UDS defaults are auto-assigned if available). */
+	UPROPERTY(EditAnywhere, Category="Clouds")
+	UMaterialInterface* CloudMaterial = nullptr;
+
+	/** Enable procedural coverage map to vary cloud density across the planet. */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation")
+	bool bEnableCloudCoverageMap = true;
+
+	/** Coverage map width (pixels). */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="64", UIMin="64"))
+	int32 CloudCoverageMapWidth = 512;
+
+	/** Coverage map height (pixels). */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="32", UIMin="32"))
+	int32 CloudCoverageMapHeight = 256;
+
+	/** Seed for coverage noise. */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation")
+	int32 CloudCoverageSeed = 4242;
+
+	/** Base frequency for coverage noise (lower = larger cloud regions). */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="0.001", UIMin="0.001"))
+	float CloudCoverageFrequency = 0.8f;
+
+	/** Octaves for FBM coverage noise. */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="1", UIMin="1"))
+	int32 CloudCoverageOctaves = 3;
+
+	/** Lacunarity for FBM coverage noise. */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="1.0", UIMin="1.0"))
+	float CloudCoverageLacunarity = 2.0f;
+
+	/** Gain for FBM coverage noise. */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="0.0", UIMin="0.0"))
+	float CloudCoverageGain = 0.5f;
+
+	/** Threshold for cloud coverage (higher = more empty regions). */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float CloudCoverageThreshold = 0.55f;
+
+	/** Contrast for coverage mask (higher = sharper cloud edges). */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation", meta=(ClampMin="0.1", UIMin="0.1"))
+	float CloudCoverageSharpness = 1.5f;
+
+	/** Texture parameter name to feed the generated coverage map into the cloud material. */
+	UPROPERTY(EditAnywhere, Category="Clouds|Variation")
+	FName CloudCoverageTextureParam = TEXT("WeatherMap");
 
 	/** Number of chunks per cube face (NxN). */
 	UPROPERTY(EditAnywhere, Category="Planet", meta=(ClampMin="1", UIMin="1"))
@@ -148,6 +202,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0", UIMin="0.0"))
 	float TargetEdgeRangeKm = 5.0f;
 
+	/** Allow target edge length to raise MaxSubdivisionLevel automatically. */
+	UPROPERTY(EditAnywhere, Category="LOD")
+	bool bAutoIncreaseSubdivisionForTargetEdge = false;
+
+	/** Optional cap for auto subdivision (0 = legacy 18). */
+	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0", UIMin="0"))
+	int32 AutoSubdivisionLevelCap = 0;
+
 	/** Enable skirts to hide cracks between subdivision levels. */
 	UPROPERTY(EditAnywhere, Category="LOD")
 	bool bEnableChunkSkirts = true;
@@ -185,6 +247,14 @@ public:
 	/** Base active range multiplier in normal flight. */
 	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.1"))
 	float CruiseRangeMultiplier = 1.0f;
+
+	/** Clamp active range to the horizon distance near the surface. */
+	UPROPERTY(EditAnywhere, Category="Streaming")
+	bool bClampActiveRangeToHorizon = true;
+
+	/** Extra km beyond the horizon to keep active. */
+	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.0", UIMin="0.0"))
+	float HorizonRangePaddingKm = 30.0f;
 
 	/** Скорость (км/с), с которой считаем, что включен гиперрежим, радиус масштабируется. */
 	UPROPERTY(EditAnywhere, Category="Streaming", meta=(ClampMin="0.1"))
@@ -627,6 +697,12 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	UVolumetricCloudComponent* VolumetricCloud = nullptr;
 
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CloudMaterialInstance = nullptr;
+
+	UPROPERTY(Transient)
+	UTexture2D* CloudCoverageTexture = nullptr;
+
 	TUniquePtr<FCubedSphereLODSystem> LODSystem;
 
 	void BuildPlanetMesh();
@@ -635,6 +711,8 @@ private:
 	void InitializeNoise();
 	void StartLODSystem();
 	void UpdateAtmosphere();
+	void UpdateClouds();
+	void UpdateCloudCoverageMap();
 	void ApplySkyCVars();
 
 	TArray<int32> GetOrderedLODVertices() const;

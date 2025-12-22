@@ -197,6 +197,7 @@ void UShipNetComponent::OnHyperDriveExited()
 
 	PendingInputs.Reset();
 	bHaveOwnerRecon = false;
+	bReconErrInit = false;
 }
 
 void UShipNetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -717,7 +718,10 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	if (CVar_ShipNet_OwnerRecon.GetValueOnAnyThread() == 0)
 		return;
 	if (!bHaveOwnerRecon || !ShipMesh || DeltaSeconds <= 0.f || !GetWorld())
+	{
+		bReconErrInit = false;
 		return;
+	}
 
 	// --- СЃРµСЂРІРµСЂРЅРѕРµ РІСЂРµРјСЏ РІ РєР»РёРµРЅС‚СЃРєРёС… СЃРµРєСѓРЅРґР°С… + Р»Р°Рі РІРїРµСЂС‘Рґ ---
 	const double Now     = (double)GetWorld()->GetTimeSeconds();
@@ -763,20 +767,43 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	// --- РїРѕСЂРѕРіРё Р¶С‘СЃС‚РєРѕР№ СЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё ---
 		const bool bHyper = (Ship && Ship->IsHyperDriveActive());
 
-	float PosSnap_Soft = 15000.f;   // 80 m (cm)
-	float VelSnap_Soft = 50000.f;  // 300 m/s (cm/s)
-	float AngSnap_Soft = 6.0;     // ~230 deg/s
+const float ErrSmoothSpeed = FMath::Max(0.0f, OwnerReconErrorSmoothSpeed);
+if (ErrSmoothSpeed > 0.0f)
+{
+	if (!bReconErrInit)
+	{
+		ReconPosErrEma = PosErr;
+		ReconVelErrEma = VelErr;
+		ReconAngErrEma = AngErr;
+		bReconErrInit = true;
+	}
+	else
+	{
+		ReconPosErrEma = FMath::FInterpTo(ReconPosErrEma, PosErr, DeltaSeconds, ErrSmoothSpeed);
+		ReconVelErrEma = FMath::FInterpTo(ReconVelErrEma, VelErr, DeltaSeconds, ErrSmoothSpeed);
+		ReconAngErrEma = FMath::FInterpTo(ReconAngErrEma, AngErr, DeltaSeconds, ErrSmoothSpeed);
+	}
+}
 
-	const float HyperScale = bHyper ? 8.0f : 1.0f;
-	PosSnap_Soft *= HyperScale;
-	VelSnap_Soft *= HyperScale;
+const double PosErrEval = (ErrSmoothSpeed > 0.0f) ? ReconPosErrEma : PosErr;
+const double VelErrEval = (ErrSmoothSpeed > 0.0f) ? ReconVelErrEma : VelErr;
+const double AngErrEval = (ErrSmoothSpeed > 0.0f) ? ReconAngErrEma : AngErr;
 
-	const float PosSnap_Hard = PosSnap_Soft * (bHyper ? 6.0f : 3.0f);
-	const float VelSnap_Hard = VelSnap_Soft * (bHyper ? 6.0f : 3.0f);
-	const float AngSnap_Hard = AngSnap_Soft * 2.5f;
+float PosSnap_Soft = FMath::Max(0.0f, OwnerSoftSnapDistance);
+float VelSnap_Soft = FMath::Max(0.0f, OwnerSoftSnapVelocity);
+float AngSnap_Soft = FMath::Max(0.0f, OwnerSoftSnapAngRad);
 
-	const bool bHardSnap = (PosErr > PosSnap_Hard) || (VelErr > VelSnap_Hard) || (AngErr > AngSnap_Hard);
-	const bool bSoftSnap = !bHardSnap && ((PosErr > PosSnap_Soft) || (VelErr > VelSnap_Soft) || (AngErr > AngSnap_Soft));
+const float HyperScale = bHyper ? FMath::Max(1.0f, OwnerHyperSnapScale) : 1.0f;
+PosSnap_Soft *= HyperScale;
+VelSnap_Soft *= HyperScale;
+
+const float HardScale = bHyper ? FMath::Max(1.0f, OwnerHardSnapHyperScale) : FMath::Max(1.0f, OwnerHardSnapScale);
+const float PosSnap_Hard = FMath::Max(OwnerHardSnapDistance, PosSnap_Soft * HardScale);
+const float VelSnap_Hard = FMath::Max(OwnerHardSnapVelocity, VelSnap_Soft * HardScale);
+const float AngSnap_Hard = FMath::Max(OwnerHardSnapAngRad, AngSnap_Soft * FMath::Max(1.0f, OwnerHardSnapAngScale));
+
+const bool bHardSnap = (PosErrEval > PosSnap_Hard) || (VelErrEval > VelSnap_Hard) || (AngErrEval > AngSnap_Hard);
+const bool bSoftSnap = !bHardSnap && ((PosErrEval > PosSnap_Soft) || (VelErrEval > VelSnap_Soft) || (AngErrEval > AngSnap_Soft));
 
 	const bool bLocalPawn = OwPawn && OwPawn->IsLocallyControlled();
 	const bool bHudEnabled = bLocalPawn && bReconHUD && (CVar_ShipNet_ReconHUD.GetValueOnAnyThread() != 0);
@@ -785,9 +812,9 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	{
 		if (!bHudEnabled || !GEngine) return;
 
-		ReconHUD_LastPosErrM   = float(PosErr / 100.0);
-		ReconHUD_LastVelErrMps = float(VelErr / 100.0);
-		ReconHUD_LastAngErrRad = float(AngErr);
+		ReconHUD_LastPosErrM   = float(PosErrEval / 100.0);
+		ReconHUD_LastVelErrMps = float(VelErrEval / 100.0);
+		ReconHUD_LastAngErrRad = float(AngErrEval);
 		if (bSoftSnap) ++ReconHUD_SoftCount;
 		if (bHardSnap) ++ReconHUD_HardCount;
 		ReconHUD_LastUpdateTime = Now;
@@ -818,12 +845,12 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 		UE_LOG(LogShipNet, Warning,
 			TEXT("[HARD SNAP] %s | PosErr=%.0f m | VelErr=%.0f m/s | AngErr=%.1f rad/s"),
 			*GetNameSafe(Ship),
-			PosErr / 100.0,
-			VelErr / 100.0,
-			AngErr);
+			PosErrEval / 100.0,
+			VelErrEval / 100.0,
+			AngErrEval);
 		
 		// Анти-рывок: если ошибка не космическая, делаем сильный бленд вместо телепорта.
-		const bool bCanBlendHard = (PosErr < 200000.0); // <2 км
+		const bool bCanBlendHard = (PosErrEval < 200000.0); // <2 км
 		if (bCanBlendHard)
 		{
 			const FVector Delta = LocS - LocC;
@@ -852,9 +879,9 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	// --- РјСЏРіРєР°СЏ СЂРµРєРѕРЅСЃРёР»СЏС†РёСЏ (РєСЂРёС‚РёС‡РµСЃРєРё РґРµРјРїС„РёСЂРѕРІР°РЅРЅС‹Р№ PD) ---
 	// tiny-error skip to avoid micro-jitter
 	const bool bTinyErr =
-		(PosErr < 200.0) &&     // < 2 м
-		(VelErr < 150.0) &&     // < 1.5 м/с
-		(AngErr < 0.10);        // < ~6°/с
+		(PosErrEval < FMath::Max(0.0f, OwnerReconDeadzonePosCm)) &&
+		(VelErrEval < FMath::Max(0.0f, OwnerReconDeadzoneVelCm)) &&
+		(AngErrEval < FMath::Max(0.0f, OwnerReconDeadzoneAngRad));
 
 	// если ошибка совсем маленькая и нет soft/hard — вообще ничего не делаем
 	if (!bSoftSnap && bTinyErr)
@@ -872,14 +899,18 @@ void UShipNetComponent::OwnerReconcile_Tick(float DeltaSeconds)
 	// ------------------------------------
 
 	// Мягкая реконсиляция — ВСЕГДА, если ошибка не tiny и не hard
-	const float TauPos   = bSoftSnap ? (bHyper ? 0.30f : 0.18f) : 0.30f;
-	const float TauAng   = bSoftSnap ? 0.22f : 0.20f;
-	const float AlphaPos = 1.f - FMath::Exp(-DeltaSeconds / TauPos);
-	const float AlphaAng = 1.f - FMath::Exp(-DeltaSeconds / TauAng);
+	const float TauPos   = bSoftSnap ? (bHyper ? OwnerReconTau : OwnerReconTauSoft) : OwnerReconTau;
+	const float TauAng   = bSoftSnap ? OwnerReconTauAngSoft : OwnerReconTauAng;
+	const float SafeTauPos = FMath::Max(0.001f, TauPos);
+	const float SafeTauAng = FMath::Max(0.001f, TauAng);
+	const float AlphaPos = 1.f - FMath::Exp(-DeltaSeconds / SafeTauPos);
+	const float AlphaAng = 1.f - FMath::Exp(-DeltaSeconds / SafeTauAng);
 
 	const FVector Vtgt = VelS + (LocS - LocC) / FMath::Max(1e-3f, TauPos);
 
-	const float MAX_VEL_NUDGE = bSoftSnap ? (bHyper ? 60000.f : 25000.f) : 8000.f;
+	const float MAX_VEL_NUDGE = bSoftSnap
+		? (bHyper ? OwnerMaxVelNudgeSoftHyper : OwnerMaxVelNudgeSoft)
+		: OwnerMaxVelNudge;
 	FVector Vnew = FMath::Lerp(VelC, Vtgt, AlphaPos);
 	const FVector Nudge = Vnew - VelC;
 	if (Nudge.Size() > MAX_VEL_NUDGE)

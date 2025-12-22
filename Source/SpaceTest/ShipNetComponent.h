@@ -161,9 +161,27 @@ public:
 	UPROPERTY() double LastSnapServerTime = 0.0;
 
 	// Владельческая мягкая реконсиляция
-	UPROPERTY(EditAnywhere) float OwnerReconTau       = 0.12f;
-	UPROPERTY(EditAnywhere) float OwnerHardSnapDistance = 200.f;  // см
-	UPROPERTY(EditAnywhere) float OwnerMaxVelNudge   = 8000.f;    // см/с за секунду
+	UPROPERTY(EditAnywhere) float OwnerReconTau       = 0.30f;
+	UPROPERTY(EditAnywhere) float OwnerReconTauSoft   = 0.18f;
+	UPROPERTY(EditAnywhere) float OwnerReconTauAng    = 0.20f;
+	UPROPERTY(EditAnywhere) float OwnerReconTauAngSoft = 0.22f;
+	UPROPERTY(EditAnywhere) float OwnerSoftSnapDistance = 15000.f;
+	UPROPERTY(EditAnywhere) float OwnerSoftSnapVelocity = 50000.f;
+	UPROPERTY(EditAnywhere) float OwnerSoftSnapAngRad = 6.0f;
+	UPROPERTY(EditAnywhere) float OwnerHardSnapDistance = 45000.f;
+	UPROPERTY(EditAnywhere) float OwnerHardSnapVelocity = 150000.f;
+	UPROPERTY(EditAnywhere) float OwnerHardSnapAngRad = 15.0f;
+	UPROPERTY(EditAnywhere) float OwnerHyperSnapScale = 8.0f;
+	UPROPERTY(EditAnywhere) float OwnerHardSnapScale = 3.0f;
+	UPROPERTY(EditAnywhere) float OwnerHardSnapHyperScale = 6.0f;
+	UPROPERTY(EditAnywhere) float OwnerHardSnapAngScale = 2.5f;
+	UPROPERTY(EditAnywhere) float OwnerMaxVelNudge   = 8000.f;
+	UPROPERTY(EditAnywhere) float OwnerMaxVelNudgeSoft = 25000.f;
+	UPROPERTY(EditAnywhere) float OwnerMaxVelNudgeSoftHyper = 60000.f;
+	UPROPERTY(EditAnywhere) float OwnerReconDeadzonePosCm = 200.f;
+	UPROPERTY(EditAnywhere) float OwnerReconDeadzoneVelCm = 150.f;
+	UPROPERTY(EditAnywhere) float OwnerReconDeadzoneAngRad = 0.10f;
+	UPROPERTY(EditAnywhere) float OwnerReconErrorSmoothSpeed = 6.0f;
 
 	// On-screen reconcile HUD (client-only)
 	UPROPERTY(EditAnywhere, Category="Flight|Debug") bool bReconHUD = true;
@@ -224,6 +242,10 @@ protected:
 	float  ReconHUD_LastAngErrRad = 0.f;
 	int32  ReconHUD_SoftCount = 0;
 	int32  ReconHUD_HardCount = 0;
+	float  ReconPosErrEma = 0.f;
+	float  ReconVelErrEma = 0.f;
+	float  ReconAngErrEma = 0.f;
+	bool   bReconErrInit = false;
 
 	// Адаптивный delay: окно смещений
 	TStaticArray<double, 64> DelaySamples;

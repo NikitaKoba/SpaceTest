@@ -5,11 +5,14 @@
 #include "CubedSphereFaces.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
-#include "Materials/MaterialInterface.h"
-#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Components/VolumetricCloudComponent.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "UObject/ConstructorHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Engine/Texture2D.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
 
@@ -33,6 +36,16 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 	VolumetricCloud = CreateDefaultSubobject<UVolumetricCloudComponent>(TEXT("VolumetricCloud"));
 	VolumetricCloud->SetupAttachment(SceneRoot);
 
+	if (!CloudMaterial)
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> UDSCloudMaterial(
+			TEXT("/UltraDynamicSky/Materials/Material_Instances/Volumetric_Clouds_default.Volumetric_Clouds_default"));
+		if (UDSCloudMaterial.Succeeded())
+		{
+			CloudMaterial = UDSCloudMaterial.Object;
+		}
+	}
+
 	LODVerticesPerEdge = {9, 17, 33, 65};
 }
 
@@ -41,6 +54,7 @@ void ACubedSpherePlanetActor::BeginPlay()
 	Super::BeginPlay();
 	StartLODSystem();
 	UpdateAtmosphere();
+	UpdateClouds();
 	ApplySkyCVars();
 }
 
@@ -49,6 +63,7 @@ void ACubedSpherePlanetActor::OnConstruction(const FTransform& Transform)
 	Super::OnConstruction(Transform);
 	BuildPlanetMesh();
 	UpdateAtmosphere();
+	UpdateClouds();
 }
 
 void ACubedSpherePlanetActor::Tick(float DeltaSeconds)
@@ -122,9 +137,10 @@ void ACubedSpherePlanetActor::UpdateAtmosphere()
 			(bUseContinentHeightAsSurfaceZero && bEnableContinents) ? FMath::Max(0.0f, ContinentHeightKm) : 0.0f;
 		const float SurfaceZeroKm = FMath::Max(0.0f, ContinentZeroKm + SurfaceZeroOffsetKm);
 
-		const float BottomRadiusKm = FMath::Max(1.0f, PlanetRadiusKm + SurfaceZeroKm);
+		const float SurfaceZeroForAtmosphereKm = bAtmosphereBottomAtPlanetRadius ? 0.0f : SurfaceZeroKm;
+		const float BottomRadiusKm = FMath::Max(1.0f, PlanetRadiusKm + SurfaceZeroForAtmosphereKm);
 		const float RawSurfaceHeightKm = GetEstimatedMaxSurfaceHeightKm();
-		const float EffectiveSurfaceHeightKm = FMath::Max(0.0f, RawSurfaceHeightKm - SurfaceZeroKm);
+		const float EffectiveSurfaceHeightKm = FMath::Max(0.0f, RawSurfaceHeightKm - SurfaceZeroForAtmosphereKm);
 		const float SurfaceExtensionKm = bExtendAtmosphereToSurface ? EffectiveSurfaceHeightKm : 0.0f;
 		float EffectiveAtmosphereHeightKm =
 			AtmosphereHeightKm + SurfaceExtensionKm + AtmosphereHeightPaddingKm;
@@ -154,15 +170,126 @@ void ACubedSpherePlanetActor::UpdateAtmosphere()
 		SkyAtmosphere->MarkRenderStateDirty();
 	}
 
-	if (VolumetricCloud)
+}
+
+void ACubedSpherePlanetActor::UpdateClouds()
+{
+	if (!VolumetricCloud)
 	{
-		VolumetricCloud->SetRelativeLocation(FVector::ZeroVector);
-		const float ContinentZeroKm =
-			(bUseContinentHeightAsSurfaceZero && bEnableContinents) ? FMath::Max(0.0f, ContinentHeightKm) : 0.0f;
-		const float SurfaceZeroKm = FMath::Max(0.0f, ContinentZeroKm + SurfaceZeroOffsetKm);
-		VolumetricCloud->LayerBottomAltitude = FMath::Max(0.0f, CloudBottomKm + SurfaceZeroKm);
-		VolumetricCloud->LayerHeight = FMath::Max(0.1f, CloudThicknessKm);
-		VolumetricCloud->bUsePerSampleAtmosphericLightTransmittance = true;
+		return;
+	}
+
+	VolumetricCloud->SetRelativeLocation(FVector::ZeroVector);
+	VolumetricCloud->SetLayerBottomAltitude(FMath::Max(0.0f, CloudBottomKm));
+	VolumetricCloud->SetLayerHeight(FMath::Max(0.1f, CloudThicknessKm));
+	VolumetricCloud->SetbUsePerSampleAtmosphericLightTransmittance(true);
+	VolumetricCloud->SetPlanetRadius(PlanetRadiusKm);
+
+	if (CloudMaterial)
+	{
+		if (bEnableCloudCoverageMap)
+		{
+			CloudMaterialInstance = UMaterialInstanceDynamic::Create(CloudMaterial, this);
+			VolumetricCloud->SetMaterial(CloudMaterialInstance);
+		}
+		else
+		{
+			CloudMaterialInstance = nullptr;
+			VolumetricCloud->SetMaterial(CloudMaterial);
+		}
+	}
+
+	UpdateCloudCoverageMap();
+}
+
+void ACubedSpherePlanetActor::UpdateCloudCoverageMap()
+{
+	if (!bEnableCloudCoverageMap || !VolumetricCloud || !CloudMaterialInstance)
+	{
+		return;
+	}
+
+	const int32 Width = FMath::Max(2, CloudCoverageMapWidth);
+	const int32 Height = FMath::Max(2, CloudCoverageMapHeight);
+
+	if (!CloudCoverageTexture || CloudCoverageTexture->GetSizeX() != Width || CloudCoverageTexture->GetSizeY() != Height)
+	{
+		CloudCoverageTexture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
+		if (!CloudCoverageTexture)
+		{
+			return;
+		}
+
+		CloudCoverageTexture->CompressionSettings = TC_Grayscale;
+		CloudCoverageTexture->SRGB = false;
+#if WITH_EDITORONLY_DATA
+		CloudCoverageTexture->MipGenSettings = TMGS_NoMipmaps;
+#endif
+		CloudCoverageTexture->Filter = TF_Bilinear;
+		CloudCoverageTexture->AddressX = TA_Wrap;
+		CloudCoverageTexture->AddressY = TA_Clamp;
+	}
+
+	TArray<FColor> Pixels;
+	Pixels.SetNum(Width * Height);
+
+	FastNoiseLite CoverageNoise;
+	CoverageNoise.SetSeed(CloudCoverageSeed);
+	CoverageNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+	CoverageNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+	CoverageNoise.SetFractalOctaves(FMath::Max(1, CloudCoverageOctaves));
+	CoverageNoise.SetFractalLacunarity(FMath::Max(1.0f, CloudCoverageLacunarity));
+	CoverageNoise.SetFractalGain(FMath::Clamp(CloudCoverageGain, 0.0f, 1.0f));
+	CoverageNoise.SetFrequency(FMath::Max(0.0001f, CloudCoverageFrequency));
+
+	const float Threshold = FMath::Clamp(CloudCoverageThreshold, 0.0f, 1.0f);
+	const float Sharpness = FMath::Max(0.1f, CloudCoverageSharpness);
+	const float InvRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, 1.0f - Threshold);
+
+	for (int32 Y = 0; Y < Height; ++Y)
+	{
+		const float V = (Height > 1) ? static_cast<float>(Y) / static_cast<float>(Height - 1) : 0.0f;
+		const float Theta = V * PI;
+		float SinTheta = 0.0f;
+		float CosTheta = 1.0f;
+		FMath::SinCos(&SinTheta, &CosTheta, Theta);
+
+		for (int32 X = 0; X < Width; ++X)
+		{
+			const float U = (Width > 1) ? static_cast<float>(X) / static_cast<float>(Width - 1) : 0.0f;
+			const float Phi = U * 2.0f * PI;
+			float SinPhi = 0.0f;
+			float CosPhi = 1.0f;
+			FMath::SinCos(&SinPhi, &CosPhi, Phi);
+
+			const FVector3f Dir(
+				SinTheta * CosPhi,
+				SinTheta * SinPhi,
+				CosTheta
+			);
+
+			float coverage = CoverageNoise.GetNoise(Dir.X, Dir.Y, Dir.Z) * 0.5f + 0.5f;
+			coverage = (coverage - Threshold) * InvRange;
+			coverage = FMath::Clamp(coverage, 0.0f, 1.0f);
+			coverage = FMath::Pow(coverage, Sharpness);
+
+			const uint8 Value = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(coverage * 255.0f), 0, 255));
+			Pixels[Y * Width + X] = FColor(Value, Value, Value, 255);
+		}
+	}
+
+	if (CloudCoverageTexture && CloudCoverageTexture->GetPlatformData() && CloudCoverageTexture->GetPlatformData()->Mips.Num() > 0)
+	{
+		FTexture2DMipMap& Mip = CloudCoverageTexture->GetPlatformData()->Mips[0];
+		void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
+		FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num() * sizeof(FColor));
+		Mip.BulkData.Unlock();
+		CloudCoverageTexture->UpdateResource();
+	}
+
+	if (!CloudCoverageTextureParam.IsNone())
+	{
+		CloudMaterialInstance->SetTextureParameterValue(CloudCoverageTextureParam, CloudCoverageTexture);
 	}
 }
 
@@ -1363,6 +1490,6 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
 	const float TargetEdgeLengthCm = FMath::Max(0.0f, TargetEdgeLengthMeters * 100.0f);
 	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
-	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm);
+	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm, bAutoIncreaseSubdivisionForTargetEdge, AutoSubdivisionLevelCap);
 	LODSystem->Tick(0.0f);
 }

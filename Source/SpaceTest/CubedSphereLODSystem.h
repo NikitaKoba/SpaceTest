@@ -17,7 +17,7 @@ class FCubedSphereLODSystem
 public:
 	explicit FCubedSphereLODSystem(ACubedSpherePlanetActor& InOwner);
 
-	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InCruiseRangeMultiplier, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm);
+	void Initialize(URealtimeMeshSimple& InMesh, int32 InChunksPerFace, float InPlanetRadiusCm, int32 InVerticesPerEdge, int32 InMaxSubdivisionLevel, int32 MaxChunksPerFrame, int32 WarmupChunksPerFrame, float EvaluationInterval, float TargetSSE, float HysteresisPixels, float ErrorScale, bool bEnableStreaming, float InBaseActiveRangeCm, float InActiveBufferCm, float InCruiseRangeMultiplier, float InHyperSpeedThreshold, float InHyperRangeMultiplier, bool bEnableSkirts, float InSkirtDepthScale, float InSkirtMinDepthCm, float InTargetEdgeLengthCm, float InTargetEdgeRangeCm, bool bInAutoIncreaseSubdivisionForTargetEdge, int32 InAutoSubdivisionLevelCap);
 	void Tick(float DeltaSeconds);
 	void Shutdown();
 
@@ -166,6 +166,10 @@ private:
 	float TargetEdgeLengthCm = 0.0f;
 	float TargetEdgeRangeCm = 0.0f;
 	float TargetEdgeRangeBufferCm = 0.0f;
+	bool bAutoIncreaseSubdivisionForTargetEdge = false;
+	int32 AutoSubdivisionLevelCap = 0;
+	int32 ActiveSplitCount = 0;
+	int32 EvalNodeCursor = 0;
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	FVector LastCamForward = FVector::ForwardVector;
@@ -177,6 +181,7 @@ private:
 	void CreateRootNodes();
 	int32 CreateNode(int32 FaceIndex, int32 Level, int32 ChunkX, int32 ChunkY, int32 ParentIndex);
 	void ActivateNode(int32 NodeIndex, bool bMakeLeaf);
+	void SetSplitInProgress(FChunkNode& Node, bool bInProgress);
 
 	void UpdateNodeBounds(FChunkNode& Node);
 	float GetChunkSize(int32 Level) const;
