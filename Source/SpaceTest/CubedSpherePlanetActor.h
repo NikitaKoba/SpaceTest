@@ -152,6 +152,20 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet")
 	UMaterialInterface* PlanetMaterial = nullptr;
 
+	// --- Ocean ---
+
+	/** Enable ocean surface mesh. */
+	UPROPERTY(EditAnywhere, Category="Ocean")
+	bool bEnableOcean = true;
+
+	/** Ocean surface offset above planet radius (km). */
+	UPROPERTY(EditAnywhere, Category="Ocean", meta=(ClampMin="0.0", UIMin="0.0"))
+	float OceanSurfaceOffsetKm = 0.0f;
+
+	/** Material applied to the ocean surface. */
+	UPROPERTY(EditAnywhere, Category="Ocean")
+	UMaterialInterface* OceanMaterial = nullptr;
+
 	// --- LOD ---
 
 	/** Enable SSE-driven LOD system (runtime only). */
@@ -696,6 +710,9 @@ private:
 	URealtimeMeshComponent* RuntimeMesh = nullptr;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
+	URealtimeMeshComponent* OceanMesh = nullptr;
+
+	UPROPERTY(VisibleAnywhere, Category="Components")
 	USkyAtmosphereComponent* SkyAtmosphere = nullptr;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
@@ -710,8 +727,10 @@ private:
 	TUniquePtr<FCubedSphereLODSystem> LODSystem;
 
 	void BuildPlanetMesh();
+	void BuildOceanMesh();
 	void BuildPlanetPreview(int32 LodIndex);
 	URealtimeMeshSimple* ResetRuntimeMesh();
+	URealtimeMeshSimple* ResetOceanMesh();
 	void InitializeNoise();
 	void StartLODSystem();
 	void UpdateAtmosphere();
@@ -723,8 +742,10 @@ private:
 	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
 
 	void BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
+	void BuildOceanChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
 	static FVector3f CubeToSphere(const FVector3f& P);
 	float GetPlanetRadiusCm() const;
+	float GetOceanRadiusCm() const;
 	float GetContinentHeightCm(const FVector3f& SphereDir) const;
 	float GetMountainHeightCm(const FVector3f& SphereDir, float ContinentMask) const;
 	float GetPOIHeightCm(const FVector3f& SphereDir) const;

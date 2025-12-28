@@ -29,6 +29,12 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 	RuntimeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	RuntimeMesh->SetGenerateOverlapEvents(false);
 
+	OceanMesh = CreateDefaultSubobject<URealtimeMeshComponent>(TEXT("OceanMesh"));
+	OceanMesh->SetupAttachment(SceneRoot);
+	OceanMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	OceanMesh->SetGenerateOverlapEvents(false);
+	OceanMesh->SetCastShadow(false);
+
 	SkyAtmosphere = CreateDefaultSubobject<USkyAtmosphereComponent>(TEXT("SkyAtmosphere"));
 	SkyAtmosphere->SetupAttachment(SceneRoot);
 	SkyAtmosphere->TransformMode = ESkyAtmosphereTransformMode::PlanetCenterAtComponentTransform;
@@ -80,6 +86,12 @@ float ACubedSpherePlanetActor::GetPlanetRadiusCm() const
 {
 	// 1 km = 100000 cm
 	return FMath::Max(1.0f, PlanetRadiusKm * 100000.0f);
+}
+
+float ACubedSpherePlanetActor::GetOceanRadiusCm() const
+{
+	const float OffsetCm = FMath::Max(0.0f, OceanSurfaceOffsetKm) * 100000.0f;
+	return GetPlanetRadiusCm() + OffsetCm;
 }
 
 float ACubedSpherePlanetActor::GetEstimatedMaxSurfaceHeightKm() const
@@ -1242,10 +1254,85 @@ void ACubedSpherePlanetActor::BuildChunk(
 	Mesh.UpdateSectionConfig(SectionKey, FRealtimeMeshSectionConfig(0), bGenerateCollision);
 }
 
+void ACubedSpherePlanetActor::BuildOceanChunk(
+	URealtimeMeshSimple& Mesh,
+	int32 SectionId,
+	const FVector& FaceNormal,
+	const FVector& FaceRight,
+	const FVector& FaceUp,
+	int32 ChunkX,
+	int32 ChunkY,
+	float HalfExtent,
+	float ChunkSize,
+	float RadiusCm,
+	int32 VerticesPerEdge) const
+{
+	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
+	const int32 QuadEdge = VertEdge - 1;
+	const float Step = ChunkSize / QuadEdge;
+
+	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
+	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
+	Builder.EnableTangents();
+	Builder.EnableTexCoords();
+	Builder.EnablePolyGroups();
+
+	for (int32 Y = 0; Y < VertEdge; ++Y)
+	{
+		const float V = -HalfExtent + (ChunkY * ChunkSize) + Y * Step;
+
+		for (int32 X = 0; X < VertEdge; ++X)
+		{
+			const float U = -HalfExtent + (ChunkX * ChunkSize) + X * Step;
+
+			const FVector3f CubePoint =
+				FVector3f(FaceNormal) +
+				FVector3f(FaceRight) * U +
+				FVector3f(FaceUp) * V;
+
+			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
+			const FVector3f P = SphereDir * RadiusCm;
+			const FVector3f N = SphereDir;
+
+			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
+			const FVector3f Tangent = FVector3f::CrossProduct(RefUp, N).GetSafeNormal();
+
+			Builder.AddVertex(P)
+				.SetNormalAndTangent(N, Tangent)
+				.SetTexCoord(FVector2f(
+					(U + HalfExtent) / (HalfExtent * 2.0f),
+					(V + HalfExtent) / (HalfExtent * 2.0f)
+				));
+		}
+	}
+
+	for (int32 Y = 0; Y < QuadEdge; ++Y)
+	{
+		for (int32 X = 0; X < QuadEdge; ++X)
+		{
+			const uint32 I0 = Y * VertEdge + X;
+			const uint32 I1 = I0 + 1;
+			const uint32 I2 = I0 + VertEdge;
+			const uint32 I3 = I2 + 1;
+
+			Builder.AddTriangle(I0, I2, I1, 0);
+			Builder.AddTriangle(I1, I2, I3, 0);
+		}
+	}
+
+	const FRealtimeMeshSectionGroupKey GroupKey =
+		FRealtimeMeshSectionGroupKey::Create(0, FName(*FString::Printf(TEXT("OceanChunk_%d"), SectionId)));
+	const FRealtimeMeshSectionKey SectionKey = FRealtimeMeshSectionKey::CreateForPolyGroup(GroupKey, 0);
+
+	Mesh.CreateSectionGroup(GroupKey, StreamSet, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+	Mesh.UpdateSectionConfig(SectionKey, FRealtimeMeshSectionConfig(0), false);
+}
+
 
 void ACubedSpherePlanetActor::BuildPlanetMesh()
 {
 	BuildPlanetPreview(PreviewLODLevel);
+	BuildOceanMesh();
 }
 
 TArray<int32> ACubedSpherePlanetActor::GetOrderedLODVertices() const
@@ -1303,6 +1390,35 @@ URealtimeMeshSimple* ACubedSpherePlanetActor::ResetRuntimeMesh()
 	}
 
 	RuntimeMesh->SetCollisionEnabled(bGenerateCollision ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+
+	return Mesh;
+}
+
+URealtimeMeshSimple* ACubedSpherePlanetActor::ResetOceanMesh()
+{
+	if (!OceanMesh)
+	{
+		return nullptr;
+	}
+
+	if (URealtimeMesh* Existing = OceanMesh->GetRealtimeMesh())
+	{
+		Existing->Reset();
+	}
+
+	URealtimeMeshSimple* Mesh = OceanMesh->InitializeRealtimeMesh<URealtimeMeshSimple>();
+	if (!Mesh)
+	{
+		return nullptr;
+	}
+
+	if (OceanMaterial)
+	{
+		Mesh->SetupMaterialSlot(0, FName(TEXT("Ocean")));
+		OceanMesh->SetMaterial(0, OceanMaterial);
+	}
+
+	OceanMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	return Mesh;
 }
@@ -1472,6 +1588,51 @@ void ACubedSpherePlanetActor::BuildPlanetPreview(int32 LodIndex)
 	}
 }
 
+void ACubedSpherePlanetActor::BuildOceanMesh()
+{
+	if (!OceanMesh)
+	{
+		return;
+	}
+
+	if (!bEnableOcean || !OceanMaterial)
+	{
+		if (URealtimeMesh* Existing = OceanMesh->GetRealtimeMesh())
+		{
+			Existing->Reset();
+		}
+		OceanMesh->SetVisibility(false);
+		return;
+	}
+
+	OceanMesh->SetVisibility(true);
+
+	URealtimeMeshSimple* Mesh = ResetOceanMesh();
+	if (!Mesh)
+	{
+		return;
+	}
+
+	const int32 FaceChunks = FMath::Max(1, ChunksPerFace);
+	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
+	const float RadiusCm = GetOceanRadiusCm();
+	const float HalfExtent = 1.0f;
+	const float ChunkSize = (HalfExtent * 2.0f) / FaceChunks;
+
+	int32 SectionId = 0;
+	for (const FCubedSphereFace& Face : Faces)
+	{
+		for (int32 ChunkY = 0; ChunkY < FaceChunks; ++ChunkY)
+		{
+			for (int32 ChunkX = 0; ChunkX < FaceChunks; ++ChunkX)
+			{
+				BuildOceanChunk(*Mesh, SectionId, Face.Normal, Face.Right, Face.Up, ChunkX, ChunkY, HalfExtent, ChunkSize, RadiusCm, VerticesPerEdge);
+				++SectionId;
+			}
+		}
+	}
+}
+
 void ACubedSpherePlanetActor::StartLODSystem()
 {
 	LODSystem.Reset();
@@ -1501,4 +1662,5 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
 	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm, bAutoIncreaseSubdivisionForTargetEdge, AutoSubdivisionLevelCap);
 	LODSystem->Tick(0.0f);
+	BuildOceanMesh();
 }
