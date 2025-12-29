@@ -19,7 +19,9 @@ public class SpaceTest : ModuleRules
 			"Renderer",
 			"PhysicsCore",
 			"ProceduralMeshComponent",
-			"RealtimeMeshComponent"
+			"RealtimeMeshComponent",
+			"PlanetaryOceans",
+			"PlanetaryOceansMesh"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] {

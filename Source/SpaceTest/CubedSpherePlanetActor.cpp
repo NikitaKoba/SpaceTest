@@ -2,16 +2,20 @@
 
 #include "FastNoiseLite.h"
 #include "CubedSphereLODSystem.h"
+#include "CubedSphereOceanLODSystem.h"
 #include "CubedSphereFaces.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "Components/VolumetricCloudComponent.h"
+#include "SphereMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "UObject/ConstructorHelpers.h"
+#include "UObject/UnrealType.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "Engine/Texture2D.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
@@ -34,6 +38,14 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 	OceanMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	OceanMesh->SetGenerateOverlapEvents(false);
 	OceanMesh->SetCastShadow(false);
+
+	PlanetaryOceanMesh = CreateDefaultSubobject<USphereMeshComponent>(TEXT("PlanetaryOceanMesh"));
+	PlanetaryOceanMesh->SetupAttachment(SceneRoot);
+	PlanetaryOceanMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	PlanetaryOceanMesh->SetGenerateOverlapEvents(false);
+	PlanetaryOceanMesh->SetCastShadow(false);
+	PlanetaryOceanMesh->SetVisibility(false);
+	PlanetaryOceanMesh->SetComponentTickEnabled(false);
 
 	SkyAtmosphere = CreateDefaultSubobject<USkyAtmosphereComponent>(TEXT("SkyAtmosphere"));
 	SkyAtmosphere->SetupAttachment(SceneRoot);
@@ -59,6 +71,12 @@ void ACubedSpherePlanetActor::BeginPlay()
 {
 	Super::BeginPlay();
 	StartLODSystem();
+	StartOceanLODSystem();
+	SyncPlanetaryOceanMesh(true);
+	if (IsUsingPlanetaryPluginOcean() && !PlanetaryWavesController)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Planetary ocean enabled but PlanetaryWavesController is not assigned."));
+	}
 	UpdateAtmosphere();
 	UpdateClouds();
 	ApplySkyCVars();
@@ -68,6 +86,7 @@ void ACubedSpherePlanetActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	BuildPlanetMesh();
+	SyncPlanetaryOceanMesh(true);
 	UpdateAtmosphere();
 	UpdateClouds();
 }
@@ -76,11 +95,39 @@ void ACubedSpherePlanetActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (LODSystem)
+	if (bPlanetaryOceanRebuildPending && IsUsingPlanetaryPluginOcean())
+	{
+		if (PrimePlanetaryOceanMeshForRebuild())
+		{
+			bPlanetaryOceanRebuildPending = false;
+			RequestPlanetaryOceanRebuild(true);
+		}
+	}
+
+	const UWorld* World = GetWorld();
+	const bool bIsGameWorld = World && World->IsGameWorld();
+	if (bIsGameWorld)
+	{
+		UpdateOceanOriginShift();
+	}
+
+	if (bIsGameWorld && LODSystem)
 	{
 		LODSystem->Tick(DeltaSeconds);
 	}
+
+	if (bIsGameWorld && OceanLODSystem)
+	{
+		OceanLODSystem->Tick(DeltaSeconds);
+	}
 }
+
+#if WITH_EDITOR
+bool ACubedSpherePlanetActor::ShouldTickIfViewportsOnly() const
+{
+	return true;
+}
+#endif
 
 float ACubedSpherePlanetActor::GetPlanetRadiusCm() const
 {
@@ -326,6 +373,253 @@ void ACubedSpherePlanetActor::ApplySkyCVars()
 	GEngine->Exec(World, TEXT("r.SkyAtmosphere.AerialPerspectiveLUT.FastApplyOnOpaque 0"));
 	GEngine->Exec(World, TEXT("r.SkyAtmosphere.AerialPerspectiveLUT.Depth 512"));
 	GEngine->Exec(World, TEXT("r.SkyAtmosphere.AerialPerspective.StartDepth 0"));
+}
+
+FVector ACubedSpherePlanetActor::GetPrimaryViewLocation() const
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return FVector::ZeroVector;
+	}
+
+	if (World->ViewLocationsRenderedLastFrame.Num() > 0)
+	{
+		return World->ViewLocationsRenderedLastFrame[0];
+	}
+
+	if (APlayerController* PC = World->GetFirstPlayerController())
+	{
+		FVector CamLocation;
+		FRotator CamRotation;
+		PC->GetPlayerViewPoint(CamLocation, CamRotation);
+		return CamLocation;
+	}
+
+	return FVector::ZeroVector;
+}
+
+FVector3f ACubedSpherePlanetActor::GetOceanMeshLocalOrigin() const
+{
+	if (!bEnableOceanOriginShift || !bHasOceanOriginShift)
+	{
+		return FVector3f::ZeroVector;
+	}
+
+	return FVector3f(OceanMeshLocalOrigin);
+}
+
+bool ACubedSpherePlanetActor::IsUsingPlanetaryPluginOcean() const
+{
+	return bUsePlanetaryPluginOcean && bEnableOcean && OceanMaterial && PlanetaryOceanMesh;
+}
+
+void ACubedSpherePlanetActor::RequestPlanetaryOceanRebuild(bool bMainThread)
+{
+	if (!PlanetaryOceanMesh)
+	{
+		return;
+	}
+
+	UFunction* RebuildFunction = PlanetaryOceanMesh->FindFunction(TEXT("RebuildMesh"));
+	if (!RebuildFunction)
+	{
+		return;
+	}
+
+	struct FRebuildParams
+	{
+		bool bMainThread;
+	};
+
+	FRebuildParams Params{ bMainThread };
+	PlanetaryOceanMesh->ProcessEvent(RebuildFunction, &Params);
+}
+
+bool ACubedSpherePlanetActor::PrimePlanetaryOceanMeshForRebuild()
+{
+	if (!PlanetaryOceanMesh)
+	{
+		return false;
+	}
+
+	const UWorld* World = GetWorld();
+	if (!World || World->ViewLocationsRenderedLastFrame.Num() == 0)
+	{
+		return false;
+	}
+
+	const FVector ViewLocation = World->ViewLocationsRenderedLastFrame[0];
+	if (ViewLocation.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const auto SetVectorProperty = [](UObject* Target, const FName& PropertyName, const FVector& Value) -> bool
+	{
+		FStructProperty* Property = FindFProperty<FStructProperty>(Target->GetClass(), PropertyName);
+		if (!Property || Property->Struct != TBaseStructure<FVector>::Get())
+		{
+			return false;
+		}
+
+		void* PropValue = Property->ContainerPtrToValuePtr<void>(Target);
+		Property->CopyCompleteValue(PropValue, &Value);
+		return true;
+	};
+
+	const auto SetBoolProperty = [](UObject* Target, const FName& PropertyName, bool bValue) -> void
+	{
+		FBoolProperty* Property = FindFProperty<FBoolProperty>(Target->GetClass(), PropertyName);
+		if (!Property)
+		{
+			return;
+		}
+
+		void* PropValue = Property->ContainerPtrToValuePtr<void>(Target);
+		Property->SetPropertyValue(PropValue, bValue);
+	};
+
+	if (!SetVectorProperty(PlanetaryOceanMesh, TEXT("ViewLocation"), ViewLocation))
+	{
+		return false;
+	}
+
+	SetVectorProperty(PlanetaryOceanMesh, TEXT("PrevGeometryUpdateLocation"), ViewLocation);
+	SetVectorProperty(PlanetaryOceanMesh, TEXT("OriginShiftLocation"), ViewLocation);
+	SetBoolProperty(PlanetaryOceanMesh, TEXT("bFrozen"), false);
+
+	return true;
+}
+
+void ACubedSpherePlanetActor::SyncPlanetaryOceanMesh(bool bForceRebuild)
+{
+	if (!PlanetaryOceanMesh)
+	{
+		return;
+	}
+
+	const bool bUsePlugin = IsUsingPlanetaryPluginOcean();
+	PlanetaryOceanMesh->SetVisibility(bUsePlugin);
+	PlanetaryOceanMesh->SetComponentTickEnabled(bUsePlugin);
+	if (OceanMesh)
+	{
+		const bool bUseRuntimeOcean = !bUsePlugin && bEnableOcean && OceanMaterial;
+		OceanMesh->SetVisibility(bUseRuntimeOcean);
+	}
+
+	if (!bUsePlugin)
+	{
+		return;
+	}
+
+	PlanetaryOceanMesh->OceanMaterial = OceanMaterial;
+	PlanetaryOceanMesh->SetMaterial(0, OceanMaterial);
+
+	const double RadiusCm = static_cast<double>(GetOceanRadiusCm());
+	const bool bRadiusChanged = !FMath::IsNearlyEqual(PlanetaryOceanLastRadiusCm, RadiusCm, 0.1);
+	const bool bResolutionChanged = PlanetaryOceanLastResolution != PlanetaryOceanResolution;
+	const bool bMinSizeChanged = !FMath::IsNearlyEqual(PlanetaryOceanLastPolygonMinSizeCm, PlanetaryOceanPolygonMinSizeCm, 0.01);
+
+	PlanetaryOceanMesh->Radius = RadiusCm;
+	PlanetaryOceanMesh->Resolution = PlanetaryOceanResolution;
+	PlanetaryOceanMesh->PolygonMinSize = PlanetaryOceanPolygonMinSizeCm;
+	PlanetaryOceanMesh->TickRate = PlanetaryOceanTickRate;
+	PlanetaryOceanMesh->GeometryUpdateDistanceCm = PlanetaryOceanGeometryUpdateDistanceCm;
+	PlanetaryOceanMesh->OriginShiftDistanceCm = PlanetaryOceanOriginShiftDistanceCm;
+	PlanetaryOceanMesh->bNodesBackFaceCulling = bPlanetaryOceanBackfaceCulling;
+	PlanetaryOceanMesh->CullingStartDistance = PlanetaryOceanCullingStartDistanceCm;
+	PlanetaryOceanMesh->SetComponentTickInterval(PlanetaryOceanMesh->TickRate);
+
+	const bool bNeedsRebuild = bForceRebuild || bRadiusChanged || bResolutionChanged || bMinSizeChanged;
+	if (bNeedsRebuild)
+	{
+		if (PrimePlanetaryOceanMeshForRebuild())
+		{
+			bPlanetaryOceanRebuildPending = false;
+			RequestPlanetaryOceanRebuild(true);
+		}
+		else
+		{
+			bPlanetaryOceanRebuildPending = true;
+		}
+	}
+
+	PlanetaryOceanLastRadiusCm = RadiusCm;
+	PlanetaryOceanLastResolution = PlanetaryOceanResolution;
+	PlanetaryOceanLastPolygonMinSizeCm = PlanetaryOceanPolygonMinSizeCm;
+}
+
+void ACubedSpherePlanetActor::ApplyOceanOriginShift()
+{
+	if (!OceanMesh)
+	{
+		return;
+	}
+
+	const FVector TargetOrigin = (bEnableOceanOriginShift && bHasOceanOriginShift) ? OceanMeshLocalOrigin : FVector::ZeroVector;
+	OceanMesh->SetRelativeLocation(TargetOrigin);
+}
+
+void ACubedSpherePlanetActor::RebuildOceanForOriginShift()
+{
+	if (!OceanMesh)
+	{
+		return;
+	}
+
+	StartOceanLODSystem();
+}
+
+void ACubedSpherePlanetActor::UpdateOceanOriginShift()
+{
+	if (!OceanMesh)
+	{
+		return;
+	}
+
+	if (IsUsingPlanetaryPluginOcean())
+	{
+		return;
+	}
+
+	if (!bEnableOceanOriginShift)
+	{
+		if (bHasOceanOriginShift)
+		{
+			bHasOceanOriginShift = false;
+			OceanOriginShiftLocationWS = FVector::ZeroVector;
+			OceanMeshLocalOrigin = FVector::ZeroVector;
+			RebuildOceanForOriginShift();
+		}
+		return;
+	}
+
+	if (!bEnableOcean || !OceanMaterial)
+	{
+		return;
+	}
+
+	const float ThresholdCm = OceanOriginShiftDistanceKm * 100000.0f;
+	if (ThresholdCm <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	const FVector ViewLocation = GetPrimaryViewLocation();
+	if (ViewLocation.IsNearlyZero())
+	{
+		return;
+	}
+
+	const float Distance = FVector::Dist(ViewLocation, OceanOriginShiftLocationWS);
+	if (!bHasOceanOriginShift || Distance > ThresholdCm)
+	{
+		bHasOceanOriginShift = true;
+		OceanOriginShiftLocationWS = ViewLocation;
+		OceanMeshLocalOrigin = GetActorTransform().InverseTransformPosition(ViewLocation);
+		RebuildOceanForOriginShift();
+	}
 }
 
 FVector3f ACubedSpherePlanetActor::CubeToSphere(const FVector3f& P)
@@ -1135,6 +1429,152 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	return StreamSet;
 }
 
+RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildOceanChunkStreams(
+	const FVector& FaceNormal,
+	const FVector& FaceRight,
+	const FVector& FaceUp,
+	int32 ChunkX,
+	int32 ChunkY,
+	float HalfExtent,
+	float ChunkSize,
+	float RadiusCm,
+	int32 VerticesPerEdge,
+	bool bEnableSkirts,
+	float SkirtDepthCm) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(ACubedSpherePlanetActor_BuildOceanChunkStreams);
+
+	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
+	const int32 QuadEdge = VertEdge - 1;
+	const float Step = ChunkSize / QuadEdge;
+	const FVector3f OriginOffset = GetOceanMeshLocalOrigin();
+	const bool bUseSkirts = bEnableSkirts && SkirtDepthCm > 0.0f;
+	const int32 VertCount = VertEdge * VertEdge;
+
+	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
+	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
+	Builder.EnableTangents();
+	Builder.EnableTexCoords();
+	Builder.EnablePolyGroups();
+
+	TArray<FVector3f> Positions;
+	TArray<FVector3f> Normals;
+	TArray<FVector3f> Tangents;
+	TArray<FVector2f> UVs;
+
+	Positions.SetNumUninitialized(VertCount);
+	Normals.SetNumUninitialized(VertCount);
+	Tangents.SetNumUninitialized(VertCount);
+	UVs.SetNumUninitialized(VertCount);
+
+	for (int32 Y = 0; Y < VertEdge; ++Y)
+	{
+		const float V = -HalfExtent + (ChunkY * ChunkSize) + Y * Step;
+
+		for (int32 X = 0; X < VertEdge; ++X)
+		{
+			const float U = -HalfExtent + (ChunkX * ChunkSize) + X * Step;
+			const int32 Index = Y * VertEdge + X;
+
+			const FVector3f CubePoint =
+				FVector3f(FaceNormal) +
+				FVector3f(FaceRight) * U +
+				FVector3f(FaceUp) * V;
+
+			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
+			const FVector3f P = SphereDir * RadiusCm - OriginOffset;
+			const FVector3f N = SphereDir;
+			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
+			const FVector3f T = FVector3f::CrossProduct(RefUp, N).GetSafeNormal();
+
+			Positions[Index] = P;
+			Normals[Index] = N;
+			Tangents[Index] = T;
+			UVs[Index] = FVector2f(
+				(U + HalfExtent) / (HalfExtent * 2.0f),
+				(V + HalfExtent) / (HalfExtent * 2.0f)
+			);
+		}
+	}
+
+	for (int32 Index = 0; Index < VertCount; ++Index)
+	{
+		Builder.AddVertex(Positions[Index])
+			.SetNormalAndTangent(Normals[Index], Tangents[Index])
+			.SetTexCoord(UVs[Index]);
+	}
+
+	for (int32 Y = 0; Y < QuadEdge; ++Y)
+	{
+		for (int32 X = 0; X < QuadEdge; ++X)
+		{
+			const uint32 I0 = Y * VertEdge + X;
+			const uint32 I1 = I0 + 1;
+			const uint32 I2 = I0 + VertEdge;
+			const uint32 I3 = I2 + 1;
+
+			Builder.AddTriangle(I0, I2, I1, 0);
+			Builder.AddTriangle(I1, I2, I3, 0);
+		}
+	}
+
+	if (bUseSkirts)
+	{
+		int32 NextVertexIndex = VertCount;
+		TArray<uint32> SkirtTop;
+		TArray<uint32> SkirtBottom;
+		TArray<uint32> SkirtLeft;
+		TArray<uint32> SkirtRight;
+
+		auto AddSkirtEdge = [&](int32 StartIndex, int32 Stride, TArray<uint32>& OutIndices)
+		{
+			OutIndices.SetNum(VertEdge);
+			for (int32 i = 0; i < VertEdge; ++i)
+			{
+				const int32 BaseIndex = StartIndex + i * Stride;
+				const FVector3f& BasePos = Positions[BaseIndex];
+				const FVector3f Radial = Normals[BaseIndex];
+				const FVector3f SkirtPos = BasePos - Radial * SkirtDepthCm;
+				const uint32 SkirtIndex = static_cast<uint32>(NextVertexIndex++);
+
+				Builder.AddVertex(SkirtPos)
+					.SetNormalAndTangent(Normals[BaseIndex], Tangents[BaseIndex])
+					.SetTexCoord(UVs[BaseIndex]);
+
+				OutIndices[i] = SkirtIndex;
+			}
+		};
+
+		auto AddSkirtTriangles = [&](int32 BaseStart, int32 BaseStride, const TArray<uint32>& SkirtIndices)
+		{
+			for (int32 i = 0; i < VertEdge - 1; ++i)
+			{
+				const uint32 I0 = static_cast<uint32>(BaseStart + i * BaseStride);
+				const uint32 I1 = static_cast<uint32>(BaseStart + (i + 1) * BaseStride);
+				const uint32 S0 = SkirtIndices[i];
+				const uint32 S1 = SkirtIndices[i + 1];
+
+				Builder.AddTriangle(I0, S0, I1, 0);
+				Builder.AddTriangle(I1, S0, S1, 0);
+				Builder.AddTriangle(I1, S0, I0, 0);
+				Builder.AddTriangle(S1, S0, I1, 0);
+			}
+		};
+
+		AddSkirtEdge(0, 1, SkirtTop);
+		AddSkirtEdge((VertEdge - 1) * VertEdge, 1, SkirtBottom);
+		AddSkirtEdge(0, VertEdge, SkirtLeft);
+		AddSkirtEdge(VertEdge - 1, VertEdge, SkirtRight);
+
+		AddSkirtTriangles(0, 1, SkirtTop);
+		AddSkirtTriangles((VertEdge - 1) * VertEdge, 1, SkirtBottom);
+		AddSkirtTriangles(0, VertEdge, SkirtLeft);
+		AddSkirtTriangles(VertEdge - 1, VertEdge, SkirtRight);
+	}
+
+	return StreamSet;
+}
+
 void ACubedSpherePlanetActor::BuildChunk(
 	URealtimeMeshSimple& Mesh,
 	int32 SectionId,
@@ -1270,6 +1710,7 @@ void ACubedSpherePlanetActor::BuildOceanChunk(
 	const int32 VertEdge = FMath::Max(2, VerticesPerEdge);
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
+	const FVector3f OriginOffset = GetOceanMeshLocalOrigin();
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
 	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
@@ -1291,7 +1732,7 @@ void ACubedSpherePlanetActor::BuildOceanChunk(
 				FVector3f(FaceUp) * V;
 
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
-			const FVector3f P = SphereDir * RadiusCm;
+			const FVector3f P = SphereDir * RadiusCm - OriginOffset;
 			const FVector3f N = SphereDir;
 
 			const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
@@ -1332,7 +1773,10 @@ void ACubedSpherePlanetActor::BuildOceanChunk(
 void ACubedSpherePlanetActor::BuildPlanetMesh()
 {
 	BuildPlanetPreview(PreviewLODLevel);
-	BuildOceanMesh();
+	if (!IsUsingPlanetaryPluginOcean())
+	{
+		BuildOceanMesh();
+	}
 }
 
 TArray<int32> ACubedSpherePlanetActor::GetOrderedLODVertices() const
@@ -1400,6 +1844,8 @@ URealtimeMeshSimple* ACubedSpherePlanetActor::ResetOceanMesh()
 	{
 		return nullptr;
 	}
+
+	ApplyOceanOriginShift();
 
 	if (URealtimeMesh* Existing = OceanMesh->GetRealtimeMesh())
 	{
@@ -1595,6 +2041,14 @@ void ACubedSpherePlanetActor::BuildOceanMesh()
 		return;
 	}
 
+	if (IsUsingPlanetaryPluginOcean())
+	{
+		OceanMesh->SetVisibility(false);
+		return;
+	}
+
+	ApplyOceanOriginShift();
+
 	if (!bEnableOcean || !OceanMaterial)
 	{
 		if (URealtimeMesh* Existing = OceanMesh->GetRealtimeMesh())
@@ -1662,5 +2116,57 @@ void ACubedSpherePlanetActor::StartLODSystem()
 	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
 	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm, bAutoIncreaseSubdivisionForTargetEdge, AutoSubdivisionLevelCap);
 	LODSystem->Tick(0.0f);
-	BuildOceanMesh();
+}
+
+void ACubedSpherePlanetActor::StartOceanLODSystem()
+{
+	if (OceanLODSystem)
+	{
+		OceanLODSystem->Shutdown();
+		OceanLODSystem.Reset();
+	}
+
+	if (IsUsingPlanetaryPluginOcean())
+	{
+		if (OceanMesh)
+		{
+			OceanMesh->SetVisibility(false);
+		}
+		SyncPlanetaryOceanMesh(true);
+		return;
+	}
+
+	if (!bEnableOcean || !OceanMaterial || !OceanMesh)
+	{
+		BuildOceanMesh();
+		return;
+	}
+
+	if (!bEnableOceanLODSystem)
+	{
+		BuildOceanMesh();
+		return;
+	}
+
+	OceanMesh->SetVisibility(true);
+
+	URealtimeMeshSimple* Mesh = ResetOceanMesh();
+	if (!Mesh)
+	{
+		return;
+	}
+
+	OceanLODSystem = MakeUnique<FCubedSphereOceanLODSystem>(*this);
+
+	const float RangeCm = ActiveRangeKm * 100000.0f;
+	const float BufferCm = ActiveRangeBufferKm * 100000.0f;
+	const float CruiseMultiplier = FMath::Max(0.01f, CruiseRangeMultiplier);
+	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
+	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
+	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
+	const float TargetEdgeLengthCm = FMath::Max(0.0f, TargetEdgeLengthMeters * 100.0f);
+	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
+
+	OceanLODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetOceanRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm, bAutoIncreaseSubdivisionForTargetEdge, AutoSubdivisionLevelCap);
+	OceanLODSystem->Tick(0.0f);
 }

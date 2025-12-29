@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "CubedSphereLODSystem.h"
+#include "CubedSphereOceanLODSystem.h"
 #include "CubedSpherePlanetActor.generated.h"
 
 class FastNoiseLite;
@@ -10,6 +11,8 @@ class URealtimeMeshComponent;
 class URealtimeMeshSimple;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class USphereMeshComponent;
+class APlanetaryWavesController;
 class USkyAtmosphereComponent;
 class UVolumetricCloudComponent;
 class UTexture2D;
@@ -158,6 +161,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Ocean")
 	bool bEnableOcean = true;
 
+	/** Enable LOD system for ocean chunks. */
+	UPROPERTY(EditAnywhere, Category="Ocean|LOD")
+	bool bEnableOceanLODSystem = true;
+
 	/** Ocean surface offset above planet radius (km). */
 	UPROPERTY(EditAnywhere, Category="Ocean", meta=(ClampMin="0.0", UIMin="0.0"))
 	float OceanSurfaceOffsetKm = 0.0f;
@@ -165,6 +172,50 @@ public:
 	/** Material applied to the ocean surface. */
 	UPROPERTY(EditAnywhere, Category="Ocean")
 	UMaterialInterface* OceanMaterial = nullptr;
+
+	/** Use PlanetaryOceans plugin mesh generation for the ocean. */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin")
+	bool bUsePlanetaryPluginOcean = true;
+
+	/** Resolution per quadtree leaf (PlanetaryOceans mesh). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="2", ClampMax="15"))
+	int32 PlanetaryOceanResolution = 6;
+
+	/** Minimum triangle size to stop subdivision (cm). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="1.0"))
+	double PlanetaryOceanPolygonMinSizeCm = 25.0;
+
+	/** Tick rate for PlanetaryOceans mesh updates (seconds). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="0.02", ClampMax="1.0"))
+	float PlanetaryOceanTickRate = 0.05f;
+
+	/** Camera movement threshold to rebuild mesh (cm). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="1.0"))
+	float PlanetaryOceanGeometryUpdateDistanceCm = 200.0f;
+
+	/** Distance before ocean origin shifts (cm). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="10000.0"))
+	float PlanetaryOceanOriginShiftDistanceCm = 10000000.0f;
+
+	/** Skip back-facing nodes when far from camera. */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin")
+	bool bPlanetaryOceanBackfaceCulling = true;
+
+	/** Distance from camera where backface culling starts (cm). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="0.0"))
+	float PlanetaryOceanCullingStartDistanceCm = 3000.0f;
+
+	/** Optional waves controller actor (drives MPC_WaveParams). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin")
+	APlanetaryWavesController* PlanetaryWavesController = nullptr;
+
+	/** Enable camera-relative origin shifting for ocean mesh precision. */
+	UPROPERTY(EditAnywhere, Category="Ocean|Origin Shift")
+	bool bEnableOceanOriginShift = true;
+
+	/** Distance the view must move before the ocean origin shifts (km). */
+	UPROPERTY(EditAnywhere, Category="Ocean|Origin Shift", meta=(ClampMin="0.0", UIMin="0.0"))
+	float OceanOriginShiftDistanceKm = 100.0f;
 
 	// --- LOD ---
 
@@ -696,12 +747,16 @@ public:
 
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void Tick(float DeltaSeconds) override;
+#if WITH_EDITOR
+	virtual bool ShouldTickIfViewportsOnly() const override;
+#endif
 
 protected:
 	virtual void BeginPlay() override;
 
 private:
 	friend class FCubedSphereLODSystem;
+	friend class FCubedSphereOceanLODSystem;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	USceneComponent* SceneRoot = nullptr;
@@ -711,6 +766,9 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	URealtimeMeshComponent* OceanMesh = nullptr;
+
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	USphereMeshComponent* PlanetaryOceanMesh = nullptr;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	USkyAtmosphereComponent* SkyAtmosphere = nullptr;
@@ -725,6 +783,15 @@ private:
 	UTexture2D* CloudCoverageTexture = nullptr;
 
 	TUniquePtr<FCubedSphereLODSystem> LODSystem;
+	TUniquePtr<FCubedSphereOceanLODSystem> OceanLODSystem;
+
+	FVector OceanOriginShiftLocationWS = FVector::ZeroVector;
+	FVector OceanMeshLocalOrigin = FVector::ZeroVector;
+	bool bHasOceanOriginShift = false;
+	double PlanetaryOceanLastRadiusCm = 0.0;
+	int32 PlanetaryOceanLastResolution = 0;
+	double PlanetaryOceanLastPolygonMinSizeCm = 0.0;
+	bool bPlanetaryOceanRebuildPending = false;
 
 	void BuildPlanetMesh();
 	void BuildOceanMesh();
@@ -733,13 +800,24 @@ private:
 	URealtimeMeshSimple* ResetOceanMesh();
 	void InitializeNoise();
 	void StartLODSystem();
+	void StartOceanLODSystem();
 	void UpdateAtmosphere();
 	void UpdateClouds();
 	void UpdateCloudCoverageMap();
 	void ApplySkyCVars();
+	void UpdateOceanOriginShift();
+	void ApplyOceanOriginShift();
+	void RebuildOceanForOriginShift();
+	FVector GetPrimaryViewLocation() const;
+	FVector3f GetOceanMeshLocalOrigin() const;
+	bool IsUsingPlanetaryPluginOcean() const;
+	void SyncPlanetaryOceanMesh(bool bForceRebuild);
+	void RequestPlanetaryOceanRebuild(bool bMainThread);
+	bool PrimePlanetaryOceanMeshForRebuild();
 
 	TArray<int32> GetOrderedLODVertices() const;
 	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
+	RealtimeMesh::FRealtimeMeshStreamSet BuildOceanChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
 
 	void BuildChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
 	void BuildOceanChunk(URealtimeMeshSimple& Mesh, int32 SectionId, const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge) const;
