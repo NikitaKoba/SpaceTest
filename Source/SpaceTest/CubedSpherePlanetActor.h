@@ -205,6 +205,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin", meta=(ClampMin="0.0"))
 	float PlanetaryOceanCullingStartDistanceCm = 3000.0f;
 
+	/** Allow PlanetaryOceans mesh to contribute to ray tracing. */
+	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin")
+	bool bPlanetaryOceanVisibleInRayTracing = false;
+
 	/** Optional waves controller actor (drives MPC_WaveParams). */
 	UPROPERTY(EditAnywhere, Category="Ocean|Planetary Plugin")
 	APlanetaryWavesController* PlanetaryWavesController = nullptr;

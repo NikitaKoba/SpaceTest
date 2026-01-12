@@ -502,6 +502,7 @@ void ACubedSpherePlanetActor::SyncPlanetaryOceanMesh(bool bForceRebuild)
 	const bool bUsePlugin = IsUsingPlanetaryPluginOcean();
 	PlanetaryOceanMesh->SetVisibility(bUsePlugin);
 	PlanetaryOceanMesh->SetComponentTickEnabled(bUsePlugin);
+	PlanetaryOceanMesh->SetVisibleInRayTracing(bUsePlugin && bPlanetaryOceanVisibleInRayTracing);
 	if (OceanMesh)
 	{
 		const bool bUseRuntimeOcean = !bUsePlugin && bEnableOcean && OceanMaterial;
