@@ -2,7 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "CubedSphereLODSystem.h"
 #include "CubedSphereOceanLODSystem.h"
 #include "CubedSpherePlanetActor.generated.h"
 
@@ -223,22 +222,6 @@ public:
 
 	// --- LOD ---
 
-	/** Enable SSE-driven LOD system (runtime only). */
-	UPROPERTY(EditAnywhere, Category="LOD")
-	bool bEnableLODSystem = true;
-
-	/** Ordered list of vertex counts per chunk edge for preview (low->high). Highest will be forced to include VerticesPerChunkEdge. */
-	UPROPERTY(EditAnywhere, Category="LOD")
-	TArray<int32> LODVerticesPerEdge;
-
-	/** LOD index used for construction preview (low = faster). */
-	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0"))
-	int32 PreviewLODLevel = 0;
-
-	/** Legacy vertex LOD bootstrap level (unused when using subdivision LOD). */
-	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0"))
-	int32 BootstrapLODLevel = 0;
-
 	/** Target SSE in pixels; chunks try to raise LOD until below this. */
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.0"))
 	float ScreenSpaceErrorTarget = 3.0f;
@@ -257,7 +240,7 @@ public:
 
 	/** Seconds between SSE evaluations. */
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.01"))
-	float LodEvaluationInterval = 0.1f;
+	float LodEvaluationInterval = 0.3f;
 
 	/** Scales computed geometric error per LOD (bigger = more aggressive upgrades). */
 	UPROPERTY(EditAnywhere, Category="LOD", meta=(ClampMin="0.01"))
@@ -759,7 +742,6 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
-	friend class FCubedSphereLODSystem;
 	friend class FCubedSphereOceanLODSystem;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
@@ -786,7 +768,6 @@ private:
 	UPROPERTY(Transient)
 	UTexture2D* CloudCoverageTexture = nullptr;
 
-	TUniquePtr<FCubedSphereLODSystem> LODSystem;
 	TUniquePtr<FCubedSphereOceanLODSystem> OceanLODSystem;
 
 	FVector OceanOriginShiftLocationWS = FVector::ZeroVector;
@@ -799,11 +780,9 @@ private:
 
 	void BuildPlanetMesh();
 	void BuildOceanMesh();
-	void BuildPlanetPreview(int32 LodIndex);
 	URealtimeMeshSimple* ResetRuntimeMesh();
 	URealtimeMeshSimple* ResetOceanMesh();
 	void InitializeNoise();
-	void StartLODSystem();
 	void StartOceanLODSystem();
 	void UpdateAtmosphere();
 	void UpdateClouds();
@@ -819,7 +798,6 @@ private:
 	void RequestPlanetaryOceanRebuild(bool bMainThread);
 	bool PrimePlanetaryOceanMeshForRebuild();
 
-	TArray<int32> GetOrderedLODVertices() const;
 	RealtimeMesh::FRealtimeMeshStreamSet BuildChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
 	RealtimeMesh::FRealtimeMeshStreamSet BuildOceanChunkStreams(const FVector& FaceNormal, const FVector& FaceRight, const FVector& FaceUp, int32 ChunkX, int32 ChunkY, float HalfExtent, float ChunkSize, float RadiusCm, int32 VerticesPerEdge, bool bEnableSkirts, float SkirtDepthCm) const;
 

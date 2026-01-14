@@ -171,9 +171,9 @@ namespace RealtimeMesh
 		{
 			if (auto ProxyBuilder = UpdateContext.GetProxyBuilder())
 			{
-				if (Stream.Num() > 0)
+				FRealtimeMeshStream StreamCopy(MoveTemp(Stream));
+				if (StreamCopy.Num() > 0)
 				{
-					FRealtimeMeshStream StreamCopy(Stream);
 					const auto UpdateData = MakeShared<FRealtimeMeshSectionGroupStreamUpdateData>(MoveTemp(StreamCopy), EBufferUsageFlags::Static);
 					UpdateData->CreateBufferAsyncIfPossible(UpdateContext);
 

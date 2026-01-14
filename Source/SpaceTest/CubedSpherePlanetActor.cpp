@@ -1,7 +1,6 @@
 #include "CubedSpherePlanetActor.h"
 
 #include "FastNoiseLite.h"
-#include "CubedSphereLODSystem.h"
 #include "CubedSphereOceanLODSystem.h"
 #include "CubedSphereFaces.h"
 #include "Components/SceneComponent.h"
@@ -19,6 +18,15 @@
 #include "Engine/Texture2D.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
+#include "HAL/IConsoleManager.h"
+
+namespace
+{
+	static TAutoConsoleVariable<int32> CVar_PlanetRealtimeMeshRayTracing(
+		TEXT("planet.LOD.RayTracingRealtimeMeshes"),
+		0,
+		TEXT("Enable realtime meshes in ray tracing for the planet runtime mesh."));
+}
 
 ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 {
@@ -64,13 +72,12 @@ ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 		}
 	}
 
-	LODVerticesPerEdge = {9, 17, 33, 65};
 }
 
 void ACubedSpherePlanetActor::BeginPlay()
 {
 	Super::BeginPlay();
-	StartLODSystem();
+	BuildPlanetMesh();
 	StartOceanLODSystem();
 	SyncPlanetaryOceanMesh(true);
 	if (IsUsingPlanetaryPluginOcean() && !PlanetaryWavesController)
@@ -109,11 +116,6 @@ void ACubedSpherePlanetActor::Tick(float DeltaSeconds)
 	if (bIsGameWorld)
 	{
 		UpdateOceanOriginShift();
-	}
-
-	if (bIsGameWorld && LODSystem)
-	{
-		LODSystem->Tick(DeltaSeconds);
 	}
 
 	if (bIsGameWorld && OceanLODSystem)
@@ -1773,36 +1775,37 @@ void ACubedSpherePlanetActor::BuildOceanChunk(
 
 void ACubedSpherePlanetActor::BuildPlanetMesh()
 {
-	BuildPlanetPreview(PreviewLODLevel);
+	InitializeNoise();
+
+	URealtimeMeshSimple* Mesh = ResetRuntimeMesh();
+	if (!Mesh)
+	{
+		return;
+	}
+
+	const int32 FaceChunks = FMath::Max(1, ChunksPerFace);
+	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
+	const float RadiusCm = GetPlanetRadiusCm();
+	const float HalfExtent = 1.0f;
+	const float ChunkSize = (HalfExtent * 2.0f) / FaceChunks;
+
+	int32 SectionId = 0;
+	for (const FCubedSphereFace& Face : Faces)
+	{
+		for (int32 ChunkY = 0; ChunkY < FaceChunks; ++ChunkY)
+		{
+			for (int32 ChunkX = 0; ChunkX < FaceChunks; ++ChunkX)
+			{
+				BuildChunk(*Mesh, SectionId, Face.Normal, Face.Right, Face.Up, ChunkX, ChunkY, HalfExtent, ChunkSize, RadiusCm, VerticesPerEdge);
+				++SectionId;
+			}
+		}
+	}
+
 	if (!IsUsingPlanetaryPluginOcean())
 	{
 		BuildOceanMesh();
 	}
-}
-
-TArray<int32> ACubedSpherePlanetActor::GetOrderedLODVertices() const
-{
-	TArray<int32> Ordered = LODVerticesPerEdge;
-	if (VerticesPerChunkEdge >= 2 && !Ordered.Contains(VerticesPerChunkEdge))
-	{
-		Ordered.Add(VerticesPerChunkEdge);
-	}
-
-	Ordered.RemoveAll([](int32 Count)
-	{
-		return Count < 2;
-	});
-
-	Ordered.Sort();
-	for (int32 Index = Ordered.Num() - 1; Index > 0; --Index)
-	{
-		if (Ordered[Index] == Ordered[Index - 1])
-		{
-			Ordered.RemoveAt(Index);
-		}
-	}
-
-	return Ordered;
 }
 
 URealtimeMeshSimple* ACubedSpherePlanetActor::ResetRuntimeMesh()
@@ -1825,7 +1828,10 @@ URealtimeMeshSimple* ACubedSpherePlanetActor::ResetRuntimeMesh()
 
 	if (GEngine && RuntimeMesh->GetWorld())
 	{
-		GEngine->Exec(RuntimeMesh->GetWorld(), TEXT("r.RayTracing.Geometry.RealtimeMeshes 1"));
+		const int32 EnableRT = CVar_PlanetRealtimeMeshRayTracing.GetValueOnGameThread();
+		GEngine->Exec(RuntimeMesh->GetWorld(), EnableRT != 0
+			? TEXT("r.RayTracing.Geometry.RealtimeMeshes 1")
+			: TEXT("r.RayTracing.Geometry.RealtimeMeshes 0"));
 	}
 
 	if (PlanetMaterial)
@@ -1995,46 +2001,6 @@ static FastNoiseLite FoothillsInstance;
 	MountainHeightVarNoise->SetFrequency(1.0f);
 }
 
-void ACubedSpherePlanetActor::BuildPlanetPreview(int32 LodIndex)
-{
-	InitializeNoise();
-
-	URealtimeMeshSimple* Mesh = ResetRuntimeMesh();
-	if (!Mesh)
-	{
-		return;
-	}
-
-	const TArray<int32> LodList = GetOrderedLODVertices();
-	if (LodList.Num() == 0)
-	{
-		BuildPlanetPreview(PreviewLODLevel);
-		return;
-	}
-
-	const int32 ClampedLod = FMath::Clamp(LodIndex, 0, LodList.Num() - 1);
-	const int32 VerticesPerEdge = LodList[ClampedLod];
-
-	const int32 FaceChunks = FMath::Max(1, ChunksPerFace);
-	const float RadiusCm = GetPlanetRadiusCm();
-
-	const float HalfExtent = 1.0f;
-	const float ChunkSize = (HalfExtent * 2.0f) / FaceChunks;
-
-	int32 SectionId = 0;
-	for (const FCubedSphereFace& Face : Faces)
-	{
-		for (int32 ChunkY = 0; ChunkY < FaceChunks; ++ChunkY)
-		{
-			for (int32 ChunkX = 0; ChunkX < FaceChunks; ++ChunkX)
-			{
-				BuildChunk(*Mesh, SectionId, Face.Normal, Face.Right, Face.Up, ChunkX, ChunkY, HalfExtent, ChunkSize, RadiusCm, VerticesPerEdge);
-				++SectionId;
-			}
-		}
-	}
-}
-
 void ACubedSpherePlanetActor::BuildOceanMesh()
 {
 	if (!OceanMesh)
@@ -2086,37 +2052,6 @@ void ACubedSpherePlanetActor::BuildOceanMesh()
 			}
 		}
 	}
-}
-
-void ACubedSpherePlanetActor::StartLODSystem()
-{
-	LODSystem.Reset();
-
-	if (!bEnableLODSystem)
-	{
-		BuildPlanetMesh();
-		return;
-	}
-
-	InitializeNoise();
-
-	URealtimeMeshSimple* Mesh = ResetRuntimeMesh();
-	if (!Mesh)
-	{
-		return;
-	}
-
-	LODSystem = MakeUnique<FCubedSphereLODSystem>(*this);
-	const float RangeCm = ActiveRangeKm * 100000.0f;
-	const float BufferCm = ActiveRangeBufferKm * 100000.0f;
-	const float CruiseMultiplier = FMath::Max(0.01f, CruiseRangeMultiplier);
-	const float HyperThreshold = HyperdriveSpeedThresholdKmPerSec * 100000.0f;
-	const int32 VerticesPerEdge = FMath::Max(2, VerticesPerChunkEdge);
-	const float SkirtMinDepthCm = FMath::Max(0.0f, SkirtMinDepthMeters * 100.0f);
-	const float TargetEdgeLengthCm = FMath::Max(0.0f, TargetEdgeLengthMeters * 100.0f);
-	const float TargetEdgeRangeCm = FMath::Max(0.0f, TargetEdgeRangeKm * 100000.0f);
-	LODSystem->Initialize(*Mesh, FMath::Max(1, ChunksPerFace), GetPlanetRadiusCm(), VerticesPerEdge, MaxSubdivisionLevel, MaxChunksPerFrame, WarmupChunksPerFrame, LodEvaluationInterval, ScreenSpaceErrorTarget, ScreenSpaceErrorHysteresis, GeometricErrorMultiplier, bEnableChunkStreaming, RangeCm, BufferCm, CruiseMultiplier, HyperThreshold, HyperdriveRangeMultiplier, bEnableChunkSkirts, SkirtDepthScale, SkirtMinDepthCm, TargetEdgeLengthCm, TargetEdgeRangeCm, bAutoIncreaseSubdivisionForTargetEdge, AutoSubdivisionLevelCap);
-	LODSystem->Tick(0.0f);
 }
 
 void ACubedSpherePlanetActor::StartOceanLODSystem()
