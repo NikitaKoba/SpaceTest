@@ -116,6 +116,26 @@ namespace
 		TEXT("planet.LOD.EvalMaxMerges"),
 		8,
 		TEXT("Max number of merges per LOD evaluation. 0 = no limit."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetLOD_RingEnable(
+		TEXT("planet.LOD.RingEnable"),
+		1,
+		TEXT("Enable ring-based LOD caps (clipmap-style distance bands)."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_RingBaseKm(
+		TEXT("planet.LOD.RingBaseKm"),
+		-1.0f,
+		TEXT("Distance in km for highest LOD ring. <= 0 uses TargetEdgeRangeKm."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_RingScale(
+		TEXT("planet.LOD.RingScale"),
+		2.0f,
+		TEXT("Distance multiplier per LOD ring (larger = fewer fine chunks far away)."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetLOD_RingHysteresis(
+		TEXT("planet.LOD.RingHysteresis"),
+		0.15f,
+		TEXT("Fractional hysteresis for ring transitions (0..0.9)."));
 }
 
 
@@ -148,6 +168,11 @@ void FCubedSphereLODSystem::Shutdown()
 	CurrentMaxSubdivisionLevel = 0;
 	ActiveSplitCount = 0;
 	EvalNodeCursor = 0;
+	bUseLodRings = false;
+	LodRingBaseRangeCm = 0.0f;
+	LodRingScale = 2.0f;
+	LodRingHysteresis = 0.0f;
+	LodRingDistancesCm.Reset();
 	ClearChunkCache();
 }
 
@@ -459,6 +484,49 @@ void FCubedSphereLODSystem::UpdateDynamicQuality(float DeltaSeconds)
 	CurrentMaxSubdivisionLevel = FMath::Max(0, BaseMaxSubdivisionLevel - FMath::RoundToInt(DynamicLoadFactor * MaxSubdivDrop));
 }
 
+void FCubedSphereLODSystem::UpdateLodRings(float RangeScale)
+{
+	const bool bEnableRings = CVar_PlanetLOD_RingEnable.GetValueOnGameThread() != 0;
+	if (!bEnableRings || CurrentMaxSubdivisionLevel <= 0)
+	{
+		bUseLodRings = false;
+		LodRingDistancesCm.Reset();
+		return;
+	}
+
+	float BaseKm = CVar_PlanetLOD_RingBaseKm.GetValueOnGameThread();
+	float BaseCm = 0.0f;
+	if (BaseKm > 0.0f)
+	{
+		BaseCm = BaseKm * 100000.0f;
+	}
+	else if (TargetEdgeRangeCm > 0.0f)
+	{
+		BaseCm = TargetEdgeRangeCm;
+	}
+	else
+	{
+		BaseCm = FMath::Max(1000.0f, BaseActiveRangeCm * 0.1f);
+	}
+
+	const float RingScale = FMath::Max(1.01f, CVar_PlanetLOD_RingScale.GetValueOnGameThread());
+	const float Hysteresis = FMath::Clamp(CVar_PlanetLOD_RingHysteresis.GetValueOnGameThread(), 0.0f, 0.9f);
+	const float ScaledBaseCm = BaseCm * FMath::Max(0.1f, RangeScale);
+
+	bUseLodRings = true;
+	LodRingBaseRangeCm = ScaledBaseCm;
+	LodRingScale = RingScale;
+	LodRingHysteresis = Hysteresis;
+
+	LodRingDistancesCm.SetNum(CurrentMaxSubdivisionLevel + 1);
+	float Distance = ScaledBaseCm;
+	for (int32 Level = CurrentMaxSubdivisionLevel; Level >= 0; --Level)
+	{
+		LodRingDistancesCm[Level] = Distance;
+		Distance *= RingScale;
+	}
+}
+
 void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float PixelsPerCm, float ActorScale, float ActivateRange, float DeactivateRange, const FTransform& PlanetTransform)
 {
 	struct FSplitCandidate
@@ -517,9 +585,29 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 			float Distance = DistanceToCenter - Node.BoundingRadiusCm * ActorScale;
 			Distance = FMath::Max(100.0f, Distance);
 			Node.LastDistanceCm = Distance;
+			float RingDistanceForLevel = BIG_NUMBER;
+			float RingDistanceForChild = BIG_NUMBER;
+			float RingBuffer = 0.0f;
+			float ChildRingBuffer = 0.0f;
+			if (bUseLodRings && LodRingDistancesCm.IsValidIndex(Node.Level))
+			{
+				RingDistanceForLevel = LodRingDistancesCm[Node.Level];
+				RingBuffer = RingDistanceForLevel * LodRingHysteresis;
+				if (LodRingDistancesCm.IsValidIndex(Node.Level + 1))
+				{
+					RingDistanceForChild = LodRingDistancesCm[Node.Level + 1];
+					ChildRingBuffer = RingDistanceForChild * LodRingHysteresis;
+				}
+			}
 			const float EdgeLengthCm = Node.PatchSizeCm / EdgeCount;
 			const bool bNeedsEdgeDetail = bUseTargetEdge && Distance <= TargetEdgeRangeCm && EdgeLengthCm > TargetEdgeLengthCm;
 			const bool bHoldEdgeDetail = bUseTargetEdge && Distance <= EdgeRangeHoldCm && EdgeLengthCm > TargetEdgeLengthCm;
+			bool bRingAllowsSplit = true;
+			if (bUseLodRings && Node.Level < CurrentMaxSubdivisionLevel)
+			{
+				bRingAllowsSplit = Distance <= (RingDistanceForChild - ChildRingBuffer);
+			}
+			const bool bRingForcesMerge = bUseLodRings && Node.Level > 0 && Distance > (RingDistanceForLevel + RingBuffer);
 
 			bool bInView = true;
 			if (bViewCullSplits)
@@ -565,7 +653,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 			const bool bSplitCooldown = (CurrentTimeSeconds - Node.LastSplitTime) < MinSecondsBeforeMerge;
 
 			const bool bParentMergePending = Node.ParentIndex != INDEX_NONE && Nodes.IsValidIndex(Node.ParentIndex) && Nodes[Node.ParentIndex].bMergeInProgress;
-			if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < CurrentMaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && bInView && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
+			if (ActiveSplits < MaxActiveSplits && Node.bIsActive && Node.Level < CurrentMaxSubdivisionLevel && bHasCoverage && !bSplitCooldown && !Node.bSplitInProgress && !Node.bMergeInProgress && !bParentMergePending && bInView && bRingAllowsSplit && (SmoothedSse > SplitThreshold || bNeedsEdgeDetail))
 			{
 				SplitList.Add({ Index, Distance, SmoothedSse });
 			}
@@ -577,7 +665,7 @@ void FCubedSphereLODSystem::EvaluateLOD(const FVector& CamLocation, float Pixels
 					BlockedParents.Add(Node.ParentIndex);
 				}
 
-				const bool bMergeCandidate = (!Node.bIsActive) || (SmoothedSse < MergeThreshold);
+				const bool bMergeCandidate = bRingForcesMerge || (!Node.bIsActive) || (SmoothedSse < MergeThreshold);
 				if (bMergeCandidate && Node.ParentIndex != INDEX_NONE && !bHoldEdgeDetail)
 				{
 					const int32 ParentIndex = Node.ParentIndex;
@@ -1363,14 +1451,8 @@ void FCubedSphereLODSystem::ProcessCompletedBuilds(int32 Budget)
 		Node.bBuildInProgress = false;
 		Node.PendingBuildVersion = 0;
 
-		if (Node.ParentIndex != INDEX_NONE)
-		{
-			TryFinalizeSplit(Node.ParentIndex);
-		}
-		if (Node.bMergeInProgress)
-		{
-			TryFinalizeMerge(Result.NodeIndex);
-		}
+		// CRITICAL FIX: Don't finalize here! Causes 4+ additional commits per chunk!
+		// Finalization will happen in a separate Tick() pass to respect budgets
 
 		if (TimeBudgetSeconds > 0.0f && (FPlatformTime::Seconds() - StartSeconds) >= TimeBudgetSeconds)
 		{
@@ -1456,6 +1538,7 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 
 	UpdateDynamicQuality(DeltaSeconds);
 	MaxConcurrentBuilds = FMath::Clamp(CVar_PlanetLOD_MaxConcurrentBuilds.GetValueOnGameThread(), 1, 4);
+	UpdateLodRings(RangeScale);
 
 	if (!bBootstrapping || TargetEdgeLengthCm > 0.0f)
 	{
@@ -1472,6 +1555,41 @@ void FCubedSphereLODSystem::Tick(float DeltaSeconds)
 	const int32 CommitBudget = FMath::Max(1, FMath::Min(BuildBudget, CVar_PlanetLOD_CommitMaxPerFrame.GetValueOnGameThread()));
 	const int32 CompletedBudget = FMath::Max(1, FMath::Min(CommitBudget, MaxConcurrentBuilds));
 	ProcessCompletedBuilds(CompletedBudget);
+
+	// Process split/merge finalizations in a SEPARATE pass with budget control
+	// This prevents cascading mesh commits from bypassing the budget
+	const int32 MaxFinalizations = 1; // Only 1 finalization per frame (can trigger 4+ mesh ops each)
+	int32 FinalizationsProcessed = 0;
+
+	for (int32 i = 0; i < Nodes.Num() && FinalizationsProcessed < MaxFinalizations; ++i)
+	{
+		FChunkNode& Node = Nodes[i];
+		if (!Node.bInUse)
+		{
+			continue;
+		}
+
+		// Try to finalize splits (parent nodes waiting for children)
+		if (Node.bSplitInProgress && !Node.bIsLeaf && Node.Children[0] != INDEX_NONE)
+		{
+			if (AreChildrenReadyForSplitSwap(Node))
+			{
+				TryFinalizeSplit(i);
+				FinalizationsProcessed++;
+				continue; // Don't try merge on same node same frame
+			}
+		}
+
+		// Try to finalize merges
+		if (Node.bMergeInProgress)
+		{
+			if ((Node.bHasMesh || Node.bHasStagedMesh) && AreChildrenReadyToMerge(Node))
+			{
+				TryFinalizeMerge(i);
+				FinalizationsProcessed++;
+			}
+		}
+	}
 
 	if (bBootstrapping)
 	{

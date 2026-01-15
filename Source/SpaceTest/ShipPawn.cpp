@@ -250,20 +250,14 @@ void AShipPawn::UnPossessed()
 
 void AShipPawn::Destroyed()
 {
-	UE_LOG(LogTemp, Warning,
-		TEXT("[ShipPawn] Destroyed: %s Loc=%s"),
-		*GetName(),
-		*GetActorLocation().ToString());
+
 
 	Super::Destroyed();
 }
 
 void AShipPawn::OutsideWorldBounds()
 {
-	UE_LOG(LogTemp, Warning,
-		TEXT("[ShipPawn] OutsideWorldBounds: %s Loc=%s"),
-		*GetName(),
-		*GetActorLocation().ToString());
+
 
 	// ВАЖНО: не зовём Super::OutsideWorldBounds(), чтобы движок не делал Destroy() автоматически.
 	// Super::OutsideWorldBounds();
@@ -271,10 +265,6 @@ void AShipPawn::OutsideWorldBounds()
 
 void AShipPawn::FellOutOfWorld(const UDamageType& DamageType)
 {
-	UE_LOG(LogTemp, Warning,
-		TEXT("[ShipPawn] FellOutOfWorld: %s Loc=%s"),
-		*GetName(),
-		*GetActorLocation().ToString());
 
 	// Точно так же блокируем автокилл при падении из мира.
 	// Super::FellOutOfWorld(DamageType);

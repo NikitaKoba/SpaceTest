@@ -170,6 +170,11 @@ private:
 	int32 AutoSubdivisionLevelCap = 0;
 	int32 ActiveSplitCount = 0;
 	int32 EvalNodeCursor = 0;
+	bool bUseLodRings = false;
+	float LodRingBaseRangeCm = 0.0f;
+	float LodRingScale = 2.0f;
+	float LodRingHysteresis = 0.0f;
+	TArray<float> LodRingDistancesCm;
 
 	FVector LastCamLocation = FVector::ZeroVector;
 	FVector LastCamForward = FVector::ForwardVector;
@@ -205,6 +210,7 @@ private:
 	void StoreCachedStreams(const FChunkCacheKey& Key, const FChunkStreamPtr& Streams);
 	void TrimChunkCache(int32 MaxEntries);
 	void UpdateDynamicQuality(float DeltaSeconds);
+	void UpdateLodRings(float RangeScale);
 
 	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);
