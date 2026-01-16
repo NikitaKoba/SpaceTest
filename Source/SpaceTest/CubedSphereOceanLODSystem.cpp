@@ -1200,7 +1200,7 @@ void FCubedSphereOceanLODSystem::ApplyStagedMesh(FChunkNode& Node)
 	}
 	else
 	{
-		Mesh->CreateSectionGroup(Node.GroupKey, Streams, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+		Mesh->CreateSectionGroup(Node.GroupKey, Streams, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Dynamic));
 		Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, false);
 		Node.bHasMesh = true;
 	}
@@ -1667,7 +1667,7 @@ void FCubedSphereOceanLODSystem::ProcessCompletedBuilds(int32 Budget)
 		else
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(FCubedSphereOceanLODSystem_CommitChunk);
-			Mesh->CreateSectionGroup(Node.GroupKey, StreamsRef, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Static));
+			Mesh->CreateSectionGroup(Node.GroupKey, StreamsRef, FRealtimeMeshSectionGroupConfig(ERealtimeMeshSectionDrawType::Dynamic));
 			FRealtimeMeshSectionConfig SectionConfig(0);
 			SectionConfig.bCastsShadow = ShouldCastShadow(Node);
 			Mesh->UpdateSectionConfig(Node.SectionKey, SectionConfig, false);
@@ -1784,14 +1784,6 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 	{
 		CommitBudgetVertices = EstimatedVerticesPerChunk;
 	}
-	if (!PendingFinalizeSplits.IsEmpty() && EstimatedVerticesPerChunk > 0)
-	{
-		const int32 SplitBudget = EstimatedVerticesPerChunk * 4;
-		if (CommitBudgetVertices > 0 && CommitBudgetVertices < SplitBudget)
-		{
-			CommitBudgetVertices = SplitBudget;
-		}
-	}
 	CommittedVerticesThisFrame = 0;
 	bCommitAllowedThisFrame = true;
 	const float CommitCooldownSeconds = FMath::Max(0.0f, CVar_OceanLOD_CommitCooldownMs.GetValueOnGameThread()) / 1000.0f;
@@ -1820,10 +1812,10 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 	// Process split/merge finalizations in a bounded queue pass.
 	const int32 MaxFinalizations = 1;
 	int32 FinalizationsProcessed = 0;
-	int32 Attempts = 0;
-	const int32 MaxAttempts = MaxFinalizations * 8;
+	int32 SplitAttempts = 0;
+	const int32 MaxSplitAttempts = 1;
 
-	while (FinalizationsProcessed < MaxFinalizations && Attempts < MaxAttempts)
+	while (FinalizationsProcessed < MaxFinalizations && SplitAttempts < MaxSplitAttempts)
 	{
 		int32 NodeIndex = INDEX_NONE;
 		if (!PendingFinalizeSplits.Dequeue(NodeIndex))
@@ -1831,7 +1823,7 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 			break;
 		}
 
-		++Attempts;
+		++SplitAttempts;
 		if (!Nodes.IsValidIndex(NodeIndex))
 		{
 			continue;
@@ -1853,8 +1845,9 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 		}
 	}
 
-	Attempts = 0;
-	while (FinalizationsProcessed < MaxFinalizations && Attempts < MaxAttempts)
+	int32 MergeAttempts = 0;
+	const int32 MaxMergeAttempts = MaxFinalizations * 8;
+	while (FinalizationsProcessed < MaxFinalizations && MergeAttempts < MaxMergeAttempts)
 	{
 		int32 NodeIndex = INDEX_NONE;
 		if (!PendingFinalizeMerges.Dequeue(NodeIndex))
@@ -1862,7 +1855,7 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 			break;
 		}
 
-		++Attempts;
+		++MergeAttempts;
 		if (!Nodes.IsValidIndex(NodeIndex))
 		{
 			continue;
