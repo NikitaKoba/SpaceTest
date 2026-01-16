@@ -24,7 +24,7 @@ namespace
 
 	static TAutoConsoleVariable<int32> CVar_PlanetLOD_AutoQuality(
 		TEXT("planet.LOD.AutoQuality"),
-		1,
+		0,
 		TEXT("Enable adaptive LOD quality based on build queue load."));
 
 	static TAutoConsoleVariable<int32> CVar_PlanetLOD_AutoQuality_QueueHighWatermark(
@@ -79,7 +79,7 @@ namespace
 
 	static TAutoConsoleVariable<int32> CVar_PlanetLOD_ViewSplitCull(
 		TEXT("planet.LOD.ViewSplitCull"),
-		1,
+		0,
 		TEXT("Only allow LOD splits for chunks inside the view cone."));
 
 	static TAutoConsoleVariable<float> CVar_PlanetLOD_ViewConeScale(
@@ -1321,8 +1321,7 @@ void FCubedSphereLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		return;
 	}
 
-	int32 RequiredCommits = 0;
-	bool bHasChildMesh = false;
+	int32 ChildToCommit = INDEX_NONE;
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
 		const int32 ChildIndex = Parent.Children[ChildSlot];
@@ -1332,24 +1331,22 @@ void FCubedSphereLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
-		bHasChildMesh = bHasChildMesh || Child.bHasMesh;
-		if (Child.bHasStagedMesh)
+		if (Child.bHasStagedMesh && ChildToCommit == INDEX_NONE)
 		{
-			++RequiredCommits;
+			ChildToCommit = ChildIndex;
 		}
 	}
 
-	if (RequiredCommits > 0)
+	if (ChildToCommit != INDEX_NONE)
 	{
-		if (!bCommitAllowedThisFrame)
+		if (!CanCommitChunk())
 		{
 			return;
 		}
-		if (!bHasChildMesh && CommitBudgetVertices > 0
-			&& (CommittedVerticesThisFrame + RequiredCommits * EstimatedVerticesPerChunk) > CommitBudgetVertices)
-		{
-			return;
-		}
+
+		FChunkNode& Child = Nodes[ChildToCommit];
+		ApplyStagedMesh(Child);
+		ConsumeCommitBudget();
 	}
 
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
@@ -1361,12 +1358,22 @@ void FCubedSphereLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
-		if (Child.bHasStagedMesh)
-		{
-			ApplyStagedMesh(Child);
-			ConsumeCommitBudget();
-		}
 		Child.bIsActive = true;
+	}
+
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		const int32 ChildIndex = Parent.Children[ChildSlot];
+		if (!Nodes.IsValidIndex(ChildIndex))
+		{
+			continue;
+		}
+
+		const FChunkNode& Child = Nodes[ChildIndex];
+		if (!Child.bHasMesh || Child.bHasStagedMesh)
+		{
+			return;
+		}
 	}
 
 	if (Parent.bHasMesh && Mesh)

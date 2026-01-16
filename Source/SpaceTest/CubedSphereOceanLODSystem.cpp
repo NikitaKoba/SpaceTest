@@ -25,7 +25,7 @@ namespace
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_AutoQuality(
 		TEXT("ocean.LOD.AutoQuality"),
-		1,
+		0,
 		TEXT("Enable adaptive LOD quality based on build queue load."));
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_AutoQuality_QueueHighWatermark(
@@ -80,7 +80,7 @@ namespace
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_ViewSplitCull(
 		TEXT("ocean.LOD.ViewSplitCull"),
-		1,
+		0,
 		TEXT("Only allow LOD splits for chunks inside the view cone."));
 
 	static TAutoConsoleVariable<float> CVar_OceanLOD_ViewConeScale(
@@ -90,27 +90,27 @@ namespace
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_MaxConcurrentBuilds(
 		TEXT("ocean.LOD.MaxConcurrentBuilds"),
-		2,
+		4,
 		TEXT("Max number of in-flight chunk builds."));
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_CommitMaxPerFrame(
 		TEXT("ocean.LOD.CommitMaxPerFrame"),
-		1,
+		4,
 		TEXT("Max number of chunk mesh commits per frame."));
 
 	static TAutoConsoleVariable<float> CVar_OceanLOD_CommitTimeBudgetMs(
 		TEXT("ocean.LOD.CommitTimeBudgetMs"),
-		2.0f,
+		4,
 		TEXT("Time budget in ms for committing completed chunk meshes per frame. 0 disables time limit."));
 
 	static TAutoConsoleVariable<float> CVar_OceanLOD_EvalTimeBudgetMs(
 		TEXT("ocean.LOD.EvalTimeBudgetMs"),
-		1.5f,
+		0,
 		TEXT("Time budget in ms for LOD evaluation. 0 disables time limit."));
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_EvalMaxNodes(
 		TEXT("ocean.LOD.EvalMaxNodes"),
-		4096,
+		0,
 		TEXT("Max number of nodes processed per LOD evaluation. 0 = no limit."));
 
 	static TAutoConsoleVariable<int32> CVar_OceanLOD_EvalMaxMerges(
@@ -1307,8 +1307,7 @@ void FCubedSphereOceanLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		return;
 	}
 
-	int32 RequiredCommits = 0;
-	bool bHasChildMesh = false;
+	int32 ChildToCommit = INDEX_NONE;
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
 		const int32 ChildIndex = Parent.Children[ChildSlot];
@@ -1318,24 +1317,22 @@ void FCubedSphereOceanLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
-		bHasChildMesh = bHasChildMesh || Child.bHasMesh;
-		if (Child.bHasStagedMesh)
+		if (Child.bHasStagedMesh && ChildToCommit == INDEX_NONE)
 		{
-			++RequiredCommits;
+			ChildToCommit = ChildIndex;
 		}
 	}
 
-	if (RequiredCommits > 0)
+	if (ChildToCommit != INDEX_NONE)
 	{
-		if (!bCommitAllowedThisFrame)
+		if (!CanCommitChunk())
 		{
 			return;
 		}
-		if (!bHasChildMesh && CommitBudgetVertices > 0
-			&& (CommittedVerticesThisFrame + RequiredCommits * EstimatedVerticesPerChunk) > CommitBudgetVertices)
-		{
-			return;
-		}
+
+		FChunkNode& Child = Nodes[ChildToCommit];
+		ApplyStagedMesh(Child);
+		ConsumeCommitBudget();
 	}
 
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
@@ -1347,12 +1344,22 @@ void FCubedSphereOceanLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
-		if (Child.bHasStagedMesh)
-		{
-			ApplyStagedMesh(Child);
-			ConsumeCommitBudget();
-		}
 		Child.bIsActive = true;
+	}
+
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		const int32 ChildIndex = Parent.Children[ChildSlot];
+		if (!Nodes.IsValidIndex(ChildIndex))
+		{
+			continue;
+		}
+
+		const FChunkNode& Child = Nodes[ChildIndex];
+		if (!Child.bHasMesh || Child.bHasStagedMesh)
+		{
+			return;
+		}
 	}
 
 	if (Parent.bHasMesh && Mesh)
