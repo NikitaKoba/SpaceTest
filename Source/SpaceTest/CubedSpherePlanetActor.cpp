@@ -11,6 +11,7 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "HAL/IConsoleManager.h"
 #include "UObject/ConstructorHelpers.h"
 #include "UObject/UnrealType.h"
 #include "Engine/Engine.h"
@@ -19,6 +20,29 @@
 #include "Engine/Texture2D.h"
 #include "RealtimeMeshComponent.h"
 #include "RealtimeMeshSimple.h"
+
+namespace
+{
+	static TAutoConsoleVariable<float> CVar_PlanetGenStrideEdgeCm2(
+		TEXT("planet.GenStrideEdgeCm2"),
+		20000.0f,
+		TEXT("Approx edge length (cm) to switch generator stride to 2."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetGenStrideEdgeCm4(
+		TEXT("planet.GenStrideEdgeCm4"),
+		60000.0f,
+		TEXT("Approx edge length (cm) to switch generator stride to 4."));
+
+	static TAutoConsoleVariable<float> CVar_PlanetGenStrideEdgeCm8(
+		TEXT("planet.GenStrideEdgeCm8"),
+		150000.0f,
+		TEXT("Approx edge length (cm) to switch generator stride to 8."));
+
+	static TAutoConsoleVariable<int32> CVar_PlanetGenHeightCoarseEnable(
+		TEXT("planet.GenHeightCoarseEnable"),
+		0,
+		TEXT("Enable coarse height LOD (reduced noise) for far chunks."));
+}
 
 ACubedSpherePlanetActor::ACubedSpherePlanetActor()
 {
@@ -1051,6 +1075,54 @@ float ACubedSpherePlanetActor::GetMountainHeightCm(const FVector3f& SphereDir, f
 
 	return totalHeight * mountainMask + foothillsHeight;
 }
+float ACubedSpherePlanetActor::GetContinentHeightCmCoarse(const FVector3f& SphereDir, int32 DetailLod) const
+{
+	if (!bEnableContinents || !ContinentBaseNoise || ContinentHeightKm <= 0.f)
+	{
+		return 0.f;
+	}
+
+	const FVector3f BasePos = SphereDir * ContinentFrequency;
+	float amplitude = 1.0f;
+	float frequency = 1.0f;
+	float mask = 0.0f;
+
+	int32 Octaves = ContinentOctaves;
+	if (DetailLod >= 2)
+	{
+		Octaves = FMath::Min(2, Octaves);
+	}
+	else if (DetailLod >= 1)
+	{
+		Octaves = FMath::Min(3, Octaves);
+	}
+
+	for (int32 octave = 0; octave < Octaves; ++octave)
+	{
+		const FVector3f samplePos = BasePos * frequency;
+		mask += amplitude * ContinentBaseNoise->GetNoise(samplePos.X, samplePos.Y, samplePos.Z);
+
+		frequency *= ContinentLacunarity;
+		amplitude *= ContinentGain;
+	}
+
+	mask = FMath::Clamp(mask * 0.5f + 0.5f, 0.0f, 1.0f);
+
+	const float threshold = FMath::Clamp(ContinentMaskThreshold, 0.0f, 1.0f);
+	const float shoreWidth = FMath::Clamp(ContinentShoreWidth, 0.0f, 1.0f);
+	const float tLowRaw = threshold - shoreWidth * 0.5f;
+	const float tLow = FMath::Clamp(tLowRaw, 0.0f, 1.0f);
+	const float tHigh = FMath::Clamp(tLow + shoreWidth, 0.0f, 1.0f);
+	const float invRange = 1.0f / FMath::Max(KINDA_SMALL_NUMBER, tHigh - tLow);
+	float s = FMath::Clamp((mask - tLow) * invRange, 0.0f, 1.0f);
+
+	s = FMath::Pow(s, ContinentMaskSharpness);
+	s = s * s * (3.0f - 2.0f * s);
+	s = FMath::Pow(s, ContinentExponent);
+
+	return s * (ContinentHeightKm * 100000.0f);
+}
+
 float ACubedSpherePlanetActor::GetContinentHeightCm(const FVector3f& SphereDir) const
 {
 	if (!bEnableContinents || !ContinentBaseNoise || ContinentHeightKm <= 0.f)
@@ -1227,9 +1299,32 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	const int32 QuadEdge = VertEdge - 1;
 	const float Step = ChunkSize / QuadEdge;
 	const float ApproxEdgeLengthCm = Step * RadiusCm;
-	const float SampleDistanceCm = FMath::Max(1.0f, ApproxEdgeLengthCm * 0.75f);
 	const bool bUseSkirts = bEnableSkirts && SkirtDepthCm > 0.0f;
 	const int32 VertCount = VertEdge * VertEdge;
+	const float StrideEdge2Cm = CVar_PlanetGenStrideEdgeCm2.GetValueOnAnyThread();
+	const float StrideEdge4Cm = CVar_PlanetGenStrideEdgeCm4.GetValueOnAnyThread();
+	const float StrideEdge8Cm = CVar_PlanetGenStrideEdgeCm8.GetValueOnAnyThread();
+	const bool bEnableCoarseHeight = CVar_PlanetGenHeightCoarseEnable.GetValueOnAnyThread() != 0;
+	int32 HeightStride = 1;
+	if (ApproxEdgeLengthCm >= StrideEdge8Cm)
+	{
+		HeightStride = 8;
+	}
+	else if (ApproxEdgeLengthCm >= StrideEdge4Cm)
+	{
+		HeightStride = 4;
+	}
+	else if (ApproxEdgeLengthCm >= StrideEdge2Cm)
+	{
+		HeightStride = 2;
+	}
+	HeightStride = FMath::Clamp(HeightStride, 1, QuadEdge);
+	while (HeightStride > 1 && (QuadEdge % HeightStride) != 0)
+	{
+		HeightStride /= 2;
+	}
+	const int32 CoarseEdge = QuadEdge / HeightStride + 1;
+	const int32 HeightLod = (HeightStride >= 8) ? 2 : ((HeightStride >= 4) ? 1 : 0);
 
 	RealtimeMesh::FRealtimeMeshStreamSet StreamSet;
 	RealtimeMesh::TRealtimeMeshBuilderLocal<uint32, FPackedNormal, FVector2DHalf, 1> Builder(StreamSet);
@@ -1242,48 +1337,22 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 	TArray<FVector3f> Normals;
 	TArray<FVector3f> Tangents;
 	TArray<FVector2f> UVs;
+	TArray<float> CoarseHeights;
 
 	Positions.SetNumUninitialized(VertCount);
 	SphereDirs.SetNumUninitialized(VertCount);
 	Normals.SetNumUninitialized(VertCount);
 	Tangents.SetNumUninitialized(VertCount);
 	UVs.SetNumUninitialized(VertCount);
+	CoarseHeights.SetNumUninitialized(CoarseEdge * CoarseEdge);
 
-	auto PosFromDir = [&](const FVector3f& Dir) -> FVector3f
+	auto HeightAtDir = [&](const FVector3f& SphereDir) -> float
 	{
-		const FVector3f NDir = Dir.GetSafeNormal();
-		const float H = GetContinentHeightCm(NDir);
-		return NDir * (RadiusCm + H);
-	};
-
-	auto RotateDirAroundTangent = [&](const FVector3f& Dir, const FVector3f& Tangent, float AngleRad) -> FVector3f
-	{
-		float s, c;
-		FMath::SinCos(&s, &c, AngleRad);
-		return (Dir * c + Tangent * s).GetSafeNormal();
-	};
-
-	auto ComputeEdgeNormal = [&](const FVector3f& SphereDir, const FVector3f& P, FVector3f& OutNormal, FVector3f& OutTangent)
-	{
-		const FVector3f RefUp = (FMath::Abs(SphereDir.Z) < 0.99f) ? FVector3f(0, 0, 1) : FVector3f(0, 1, 0);
-		const FVector3f T1 = FVector3f::CrossProduct(RefUp, SphereDir).GetSafeNormal();
-		const FVector3f T2 = FVector3f::CrossProduct(SphereDir, T1).GetSafeNormal();
-
-		const float LocalSampleAngle = SampleDistanceCm / FMath::Max(KINDA_SMALL_NUMBER, P.Size());
-		const FVector3f DirUPlus  = RotateDirAroundTangent(SphereDir,  T1, LocalSampleAngle);
-		const FVector3f DirUMinus = RotateDirAroundTangent(SphereDir, -T1, LocalSampleAngle);
-		const FVector3f DirVPlus  = RotateDirAroundTangent(SphereDir,  T2, LocalSampleAngle);
-		const FVector3f DirVMinus = RotateDirAroundTangent(SphereDir, -T2, LocalSampleAngle);
-
-		const FVector3f Pu = PosFromDir(DirUPlus) - PosFromDir(DirUMinus);
-		const FVector3f Pv = PosFromDir(DirVPlus) - PosFromDir(DirVMinus);
-
-		OutNormal = FVector3f::CrossProduct(Pu, Pv).GetSafeNormal();
-		if (FVector3f::DotProduct(OutNormal, SphereDir) < 0.0f)
+		if (!bEnableCoarseHeight || HeightLod == 0)
 		{
-			OutNormal *= -1.0f;
+			return GetContinentHeightCm(SphereDir);
 		}
-		OutTangent = (T1 - OutNormal * FVector3f::DotProduct(T1, OutNormal)).GetSafeNormal();
+		return GetContinentHeightCmCoarse(SphereDir, HeightLod);
 	};
 
 	for (int32 Y = 0; Y < VertEdge; ++Y)
@@ -1301,14 +1370,23 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 				FVector3f(FaceUp) * V;
 
 			const FVector3f SphereDir = CubeToSphere(CubePoint).GetSafeNormal();
-			const FVector3f P = PosFromDir(SphereDir);
 
 			SphereDirs[Index] = SphereDir;
-			Positions[Index] = P;
 			UVs[Index] = FVector2f(
 				(U + HalfExtent) / (HalfExtent * 2.0f),
 				(V + HalfExtent) / (HalfExtent * 2.0f)
 			);
+		}
+	}
+
+	for (int32 CY = 0; CY < CoarseEdge; ++CY)
+	{
+		const int32 Y = CY * HeightStride;
+		for (int32 CX = 0; CX < CoarseEdge; ++CX)
+		{
+			const int32 X = CX * HeightStride;
+			const int32 Index = Y * VertEdge + X;
+			CoarseHeights[CY * CoarseEdge + CX] = HeightAtDir(SphereDirs[Index]);
 		}
 	}
 
@@ -1317,31 +1395,45 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 		for (int32 X = 0; X < VertEdge; ++X)
 		{
 			const int32 Index = Y * VertEdge + X;
-			FVector3f N = FVector3f::ZeroVector;
-			FVector3f T = FVector3f::ZeroVector;
+			const int32 CX0 = X / HeightStride;
+			const int32 CY0 = Y / HeightStride;
+			const int32 CX1 = FMath::Min(CX0 + 1, CoarseEdge - 1);
+			const int32 CY1 = FMath::Min(CY0 + 1, CoarseEdge - 1);
+			const float TX = (HeightStride > 0) ? (static_cast<float>(X - (CX0 * HeightStride)) / static_cast<float>(HeightStride)) : 0.0f;
+			const float TY = (HeightStride > 0) ? (static_cast<float>(Y - (CY0 * HeightStride)) / static_cast<float>(HeightStride)) : 0.0f;
 
-			const bool bIsEdge = (X == 0 || X == VertEdge - 1 || Y == 0 || Y == VertEdge - 1);
-			if (bIsEdge)
+			const float H00 = CoarseHeights[CY0 * CoarseEdge + CX0];
+			const float H10 = CoarseHeights[CY0 * CoarseEdge + CX1];
+			const float H01 = CoarseHeights[CY1 * CoarseEdge + CX0];
+			const float H11 = CoarseHeights[CY1 * CoarseEdge + CX1];
+
+			const float H0 = FMath::Lerp(H00, H10, TX);
+			const float H1 = FMath::Lerp(H01, H11, TX);
+			const float H = FMath::Lerp(H0, H1, TY);
+
+			Positions[Index] = SphereDirs[Index] * (RadiusCm + H);
+		}
+	}
+
+	for (int32 Y = 0; Y < VertEdge; ++Y)
+	{
+		for (int32 X = 0; X < VertEdge; ++X)
+		{
+			const int32 Index = Y * VertEdge + X;
+			const int32 X0 = FMath::Max(0, X - 1);
+			const int32 X1 = FMath::Min(VertEdge - 1, X + 1);
+			const int32 Y0 = FMath::Max(0, Y - 1);
+			const int32 Y1 = FMath::Min(VertEdge - 1, Y + 1);
+
+			const FVector3f DX = Positions[Y * VertEdge + X1] - Positions[Y * VertEdge + X0];
+			const FVector3f DY = Positions[Y1 * VertEdge + X] - Positions[Y0 * VertEdge + X];
+
+			FVector3f N = FVector3f::CrossProduct(DY, DX).GetSafeNormal();
+			if (FVector3f::DotProduct(N, SphereDirs[Index]) < 0.0f)
 			{
-				ComputeEdgeNormal(SphereDirs[Index], Positions[Index], N, T);
+				N *= -1.0f;
 			}
-			else
-			{
-				const int32 X0 = X - 1;
-				const int32 X1 = X + 1;
-				const int32 Y0 = Y - 1;
-				const int32 Y1 = Y + 1;
-
-				const FVector3f DX = Positions[Y * VertEdge + X1] - Positions[Y * VertEdge + X0];
-				const FVector3f DY = Positions[Y1 * VertEdge + X] - Positions[Y0 * VertEdge + X];
-
-				N = FVector3f::CrossProduct(DY, DX).GetSafeNormal();
-				if (FVector3f::DotProduct(N, SphereDirs[Index]) < 0.0f)
-				{
-					N *= -1.0f;
-				}
-				T = (DX - N * FVector3f::DotProduct(DX, N)).GetSafeNormal();
-			}
+			const FVector3f T = (DX - N * FVector3f::DotProduct(DX, N)).GetSafeNormal();
 
 			Normals[Index] = N;
 			Tangents[Index] = T;
@@ -1411,8 +1503,6 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildChunkStreams(
 
 				Builder.AddTriangle(I0, S0, I1, 0);
 				Builder.AddTriangle(I1, S0, S1, 0);
-				Builder.AddTriangle(I1, S0, I0, 0);
-				Builder.AddTriangle(S1, S0, I1, 0);
 			}
 		};
 
@@ -1557,8 +1647,6 @@ RealtimeMesh::FRealtimeMeshStreamSet ACubedSpherePlanetActor::BuildOceanChunkStr
 
 				Builder.AddTriangle(I0, S0, I1, 0);
 				Builder.AddTriangle(I1, S0, S1, 0);
-				Builder.AddTriangle(I1, S0, I0, 0);
-				Builder.AddTriangle(S1, S0, I1, 0);
 			}
 		};
 

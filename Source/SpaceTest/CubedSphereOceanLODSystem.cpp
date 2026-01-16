@@ -213,6 +213,16 @@ void FCubedSphereOceanLODSystem::Shutdown()
 		FChunkBuildResult DummyResult;
 		CompletedQueue.Dequeue(DummyResult);
 	}
+	while (!PendingFinalizeSplits.IsEmpty())
+	{
+		int32 DummyIndex = INDEX_NONE;
+		PendingFinalizeSplits.Dequeue(DummyIndex);
+	}
+	while (!PendingFinalizeMerges.IsEmpty())
+	{
+		int32 DummyIndex = INDEX_NONE;
+		PendingFinalizeMerges.Dequeue(DummyIndex);
+	}
 	InFlightBuilds = 0;
 	bBootstrapping = false;
 	bHasPrevCam = false;
@@ -348,7 +358,26 @@ void FCubedSphereOceanLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 I
 void FCubedSphereOceanLODSystem::CreateRootNodes()
 {
 	Nodes.Reset();
-	Nodes.Reserve(ChunksPerFace * ChunksPerFace * 6);
+	const int32 RootCount = ChunksPerFace * ChunksPerFace * 6;
+	int64 ReserveCount = RootCount;
+	int64 LevelCount = RootCount;
+	const int64 MaxReserve = 500000;
+	const int32 MaxReserveLevels = FMath::Min(MaxSubdivisionLevel, 8);
+	for (int32 Level = 0; Level < MaxReserveLevels; ++Level)
+	{
+		if (LevelCount > (INT64_MAX / 4))
+		{
+			break;
+		}
+		LevelCount *= 4;
+		ReserveCount += LevelCount;
+		if (ReserveCount >= MaxReserve)
+		{
+			ReserveCount = MaxReserve;
+			break;
+		}
+	}
+	Nodes.Reserve(static_cast<int32>(ReserveCount));
 
 	for (int32 FaceIndex = 0; FaceIndex < 6; ++FaceIndex)
 	{
@@ -1030,6 +1059,7 @@ void FCubedSphereOceanLODSystem::SplitNode(int32 NodeIndex)
 	Nodes[NodeIndex].bIsLeaf = false;
 	Nodes[NodeIndex].bRetireAfterSplit = false;
 	SetSplitInProgress(Nodes[NodeIndex], true);
+	PendingFinalizeSplits.Enqueue(NodeIndex);
 	Nodes[NodeIndex].bMergeInProgress = false;
 	Nodes[NodeIndex].bHasStagedMesh = false;
 	ClearStagedMesh(Nodes[NodeIndex]);
@@ -1078,6 +1108,7 @@ void FCubedSphereOceanLODSystem::MergeNode(int32 ParentIndex)
 
 	Parent.bIsActive = true;
 	Parent.bMergeInProgress = true;
+	PendingFinalizeMerges.Enqueue(ParentIndex);
 	SetSplitInProgress(Parent, false);
 
 	if (Parent.bHasMesh || Parent.bHasStagedMesh)
@@ -1276,37 +1307,52 @@ void FCubedSphereOceanLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		return;
 	}
 
-	bool bAllChildrenApplied = true;
+	int32 RequiredCommits = 0;
+	bool bHasChildMesh = false;
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
 		const int32 ChildIndex = Parent.Children[ChildSlot];
 		if (!Nodes.IsValidIndex(ChildIndex))
 		{
-			bAllChildrenApplied = false;
+			continue;
+		}
+
+		FChunkNode& Child = Nodes[ChildIndex];
+		bHasChildMesh = bHasChildMesh || Child.bHasMesh;
+		if (Child.bHasStagedMesh)
+		{
+			++RequiredCommits;
+		}
+	}
+
+	if (RequiredCommits > 0)
+	{
+		if (!bCommitAllowedThisFrame)
+		{
+			return;
+		}
+		if (!bHasChildMesh && CommitBudgetVertices > 0
+			&& (CommittedVerticesThisFrame + RequiredCommits * EstimatedVerticesPerChunk) > CommitBudgetVertices)
+		{
+			return;
+		}
+	}
+
+	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
+	{
+		const int32 ChildIndex = Parent.Children[ChildSlot];
+		if (!Nodes.IsValidIndex(ChildIndex))
+		{
 			continue;
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
 		if (Child.bHasStagedMesh)
 		{
-			if (!CanCommitChunk())
-			{
-				bAllChildrenApplied = false;
-				continue;
-			}
 			ApplyStagedMesh(Child);
 			ConsumeCommitBudget();
 		}
 		Child.bIsActive = true;
-		if (!Child.bHasMesh && !Child.bHasStagedMesh)
-		{
-			bAllChildrenApplied = false;
-		}
-	}
-
-	if (!bAllChildrenApplied)
-	{
-		return;
 	}
 
 	if (Parent.bHasMesh && Mesh)
@@ -1731,6 +1777,14 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 	{
 		CommitBudgetVertices = EstimatedVerticesPerChunk;
 	}
+	if (!PendingFinalizeSplits.IsEmpty() && EstimatedVerticesPerChunk > 0)
+	{
+		const int32 SplitBudget = EstimatedVerticesPerChunk * 4;
+		if (CommitBudgetVertices > 0 && CommitBudgetVertices < SplitBudget)
+		{
+			CommitBudgetVertices = SplitBudget;
+		}
+	}
 	CommittedVerticesThisFrame = 0;
 	bCommitAllowedThisFrame = true;
 	const float CommitCooldownSeconds = FMath::Max(0.0f, CVar_OceanLOD_CommitCooldownMs.GetValueOnGameThread()) / 1000.0f;
@@ -1756,35 +1810,70 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 	const int32 CompletedBudget = FMath::Max(1, FMath::Min(CommitBudget, MaxConcurrentBuilds));
 	ProcessCompletedBuilds(CompletedBudget);
 
-	// Process split/merge finalizations in a separate pass with budget control.
+	// Process split/merge finalizations in a bounded queue pass.
 	const int32 MaxFinalizations = 1;
 	int32 FinalizationsProcessed = 0;
+	int32 Attempts = 0;
+	const int32 MaxAttempts = MaxFinalizations * 8;
 
-	for (int32 i = 0; i < Nodes.Num() && FinalizationsProcessed < MaxFinalizations; ++i)
+	while (FinalizationsProcessed < MaxFinalizations && Attempts < MaxAttempts)
 	{
-		FChunkNode& Node = Nodes[i];
-		if (!Node.bInUse)
+		int32 NodeIndex = INDEX_NONE;
+		if (!PendingFinalizeSplits.Dequeue(NodeIndex))
+		{
+			break;
+		}
+
+		++Attempts;
+		if (!Nodes.IsValidIndex(NodeIndex))
 		{
 			continue;
 		}
 
-		if (Node.bSplitInProgress && !Node.bIsLeaf && Node.Children[0] != INDEX_NONE)
+		if (!Nodes[NodeIndex].bSplitInProgress)
 		{
-			if (AreChildrenReadyForSplitSwap(Node))
-			{
-				TryFinalizeSplit(i);
-				FinalizationsProcessed++;
-				continue;
-			}
+			continue;
 		}
 
-		if (Node.bMergeInProgress)
+		TryFinalizeSplit(NodeIndex);
+		if (Nodes[NodeIndex].bSplitInProgress)
 		{
-			if ((Node.bHasMesh || Node.bHasStagedMesh) && AreChildrenReadyToMerge(Node))
-			{
-				TryFinalizeMerge(i);
-				FinalizationsProcessed++;
-			}
+			PendingFinalizeSplits.Enqueue(NodeIndex);
+		}
+		else
+		{
+			++FinalizationsProcessed;
+		}
+	}
+
+	Attempts = 0;
+	while (FinalizationsProcessed < MaxFinalizations && Attempts < MaxAttempts)
+	{
+		int32 NodeIndex = INDEX_NONE;
+		if (!PendingFinalizeMerges.Dequeue(NodeIndex))
+		{
+			break;
+		}
+
+		++Attempts;
+		if (!Nodes.IsValidIndex(NodeIndex))
+		{
+			continue;
+		}
+
+		if (!Nodes[NodeIndex].bMergeInProgress)
+		{
+			continue;
+		}
+
+		TryFinalizeMerge(NodeIndex);
+		if (Nodes[NodeIndex].bMergeInProgress)
+		{
+			PendingFinalizeMerges.Enqueue(NodeIndex);
+		}
+		else
+		{
+			++FinalizationsProcessed;
 		}
 	}
 

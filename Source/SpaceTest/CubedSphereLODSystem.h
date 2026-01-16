@@ -126,6 +126,8 @@ private:
 	TArray<FChunkNode> Nodes;
 	TArray<FChunkBuildRequest> BuildQueue;
 	TQueue<FChunkBuildResult, EQueueMode::Mpsc> CompletedQueue;
+	TQueue<int32, EQueueMode::Mpsc> PendingFinalizeSplits;
+	TQueue<int32, EQueueMode::Mpsc> PendingFinalizeMerges;
 	uint64 NextBuildSequence = 1;
 
 	int32 ChunksPerFace = 0;

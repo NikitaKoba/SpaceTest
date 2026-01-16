@@ -829,6 +829,7 @@ private:
 	float GetPlanetRadiusCm() const;
 	float GetOceanRadiusCm() const;
 	float GetContinentHeightCm(const FVector3f& SphereDir) const;
+	float GetContinentHeightCmCoarse(const FVector3f& SphereDir, int32 DetailLod) const;
 	float GetMountainHeightCm(const FVector3f& SphereDir, float ContinentMask) const;
 	float GetPOIHeightCm(const FVector3f& SphereDir) const;
 	float GetEstimatedMaxSurfaceHeightKm() const;
