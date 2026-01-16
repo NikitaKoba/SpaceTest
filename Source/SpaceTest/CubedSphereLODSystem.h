@@ -133,6 +133,7 @@ private:
 	int32 VerticesPerEdge = 0;
 	int32 MaxSubdivisionLevel = 0;
 	float BaseChunkSize = 0.0f;
+	float MaxRootPatchCm = 0.0f;
 
 	float EvaluationAccumulator = 0.0f;
 	float EvaluationIntervalSeconds = 0.1f;
@@ -166,6 +167,11 @@ private:
 	float TargetEdgeLengthCm = 0.0f;
 	float TargetEdgeRangeCm = 0.0f;
 	float TargetEdgeRangeBufferCm = 0.0f;
+	float EffectiveTargetEdgeLengthCm = 0.0f;
+	float EffectiveTargetEdgeRangeCm = 0.0f;
+	float EffectiveTargetEdgeRangeBufferCm = 0.0f;
+	float NearSurfaceAlpha = 0.0f;
+	int32 NearSurfaceMaxSubdivisionLevel = 0;
 	bool bAutoIncreaseSubdivisionForTargetEdge = false;
 	int32 AutoSubdivisionLevelCap = 0;
 	int32 ActiveSplitCount = 0;
@@ -180,6 +186,11 @@ private:
 	FVector LastCamForward = FVector::ForwardVector;
 	float LastCamHalfFovRad = PI * 0.25f;
 	bool bHasPrevCam = false;
+	float LastCommitTimeSeconds = -1e9f;
+	int32 CommitBudgetVertices = 0;
+	int32 CommittedVerticesThisFrame = 0;
+	bool bCommitAllowedThisFrame = true;
+	int32 EstimatedVerticesPerChunk = 0;
 	TMap<FChunkCacheKey, FChunkCacheEntry> ChunkCache;
 	TArray<FChunkCacheKey> ChunkCacheOrder;
 
@@ -210,7 +221,10 @@ private:
 	void StoreCachedStreams(const FChunkCacheKey& Key, const FChunkStreamPtr& Streams);
 	void TrimChunkCache(int32 MaxEntries);
 	void UpdateDynamicQuality(float DeltaSeconds);
+	void UpdateNearSurfaceState(const FVector& CamLocation, const FTransform& PlanetTransform, float ActorScale);
 	void UpdateLodRings(float RangeScale);
+	bool CanCommitChunk() const;
+	void ConsumeCommitBudget();
 
 	void EnqueueBuild(int32 NodeIndex);
 	void ProcessBuildQueue(int32 Budget);

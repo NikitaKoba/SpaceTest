@@ -137,6 +137,56 @@ namespace
 		TEXT("ocean.LOD.RingHysteresis"),
 		0.15f,
 		TEXT("Fractional hysteresis for ring transitions (0..0.9)."));
+
+	static TAutoConsoleVariable<int32> CVar_OceanLOD_NearSurfaceEnable(
+		TEXT("ocean.LOD.NearSurfaceEnable"),
+		1,
+		TEXT("Enable near-surface LOD boost (smaller chunks close to surface)."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_NearSurfaceMinKm(
+		TEXT("ocean.LOD.NearSurfaceMinKm"),
+		1.0f,
+		TEXT("Altitude in km where near-surface boost is full."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_NearSurfaceMaxKm(
+		TEXT("ocean.LOD.NearSurfaceMaxKm"),
+		20.0f,
+		TEXT("Altitude in km where near-surface boost ends."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_NearSurfaceTargetEdgeScale(
+		TEXT("ocean.LOD.NearSurfaceTargetEdgeScale"),
+		0.6f,
+		TEXT("Scale target edge length at full near-surface boost (smaller = more detail)."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_NearSurfaceTargetRangeScale(
+		TEXT("ocean.LOD.NearSurfaceTargetRangeScale"),
+		1.0f,
+		TEXT("Scale target edge range at full near-surface boost."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_NearSurfaceRingBaseScale(
+		TEXT("ocean.LOD.NearSurfaceRingBaseScale"),
+		0.6f,
+		TEXT("Scale ring base distance at full near-surface boost (smaller = more detail)."));
+
+	static TAutoConsoleVariable<int32> CVar_OceanLOD_NearSurfaceAutoSubdiv(
+		TEXT("ocean.LOD.NearSurfaceAutoSubdiv"),
+		1,
+		TEXT("Allow near-surface target edge to raise max subdivision level."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_NearSurfaceLoadSuppression(
+		TEXT("ocean.LOD.NearSurfaceLoadSuppression"),
+		0.5f,
+		TEXT("Scales down near-surface boost under load (0 = no suppression, 1 = full)."));
+
+	static TAutoConsoleVariable<int32> CVar_OceanLOD_CommitMaxVerticesPerFrame(
+		TEXT("ocean.LOD.CommitMaxVerticesPerFrame"),
+		0,
+		TEXT("Max total vertices to commit per frame (0 = auto)."));
+
+	static TAutoConsoleVariable<float> CVar_OceanLOD_CommitCooldownMs(
+		TEXT("ocean.LOD.CommitCooldownMs"),
+		0.0f,
+		TEXT("Minimum time between chunk commits in ms (0 = no cooldown)."));
 }
 
 
@@ -176,11 +226,22 @@ void FCubedSphereOceanLODSystem::Shutdown()
 	CurrentMaxSubdivisionLevel = 0;
 	ActiveSplitCount = 0;
 	EvalNodeCursor = 0;
+	EffectiveTargetEdgeLengthCm = 0.0f;
+	EffectiveTargetEdgeRangeCm = 0.0f;
+	EffectiveTargetEdgeRangeBufferCm = 0.0f;
+	NearSurfaceAlpha = 0.0f;
+	NearSurfaceMaxSubdivisionLevel = 0;
 	bUseLodRings = false;
 	LodRingBaseRangeCm = 0.0f;
 	LodRingScale = 2.0f;
 	LodRingHysteresis = 0.0f;
 	LodRingDistancesCm.Reset();
+	MaxRootPatchCm = 0.0f;
+	LastCommitTimeSeconds = -1e9f;
+	CommitBudgetVertices = 0;
+	CommittedVerticesThisFrame = 0;
+	bCommitAllowedThisFrame = true;
+	EstimatedVerticesPerChunk = 0;
 	ClearChunkCache();
 }
 
@@ -193,8 +254,10 @@ void FCubedSphereOceanLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 I
 	ChunksPerFace = FMath::Max(1, InChunksPerFace);
 	OceanRadiusCm = InOceanRadiusCm;
 	VerticesPerEdge = FMath::Max(2, InVerticesPerEdge);
+	EstimatedVerticesPerChunk = VerticesPerEdge * VerticesPerEdge;
 	MaxSubdivisionLevel = FMath::Max(0, InMaxSubdivisionLevel);
 	BaseChunkSize = 2.0f / static_cast<float>(ChunksPerFace);
+	MaxRootPatchCm = 0.0f;
 
 	EvaluationIntervalSeconds = FMath::Max(0.01f, InEvaluationInterval);
 	TargetErrorPixels = FMath::Max(0.0f, TargetSSE);
@@ -224,6 +287,8 @@ void FCubedSphereOceanLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 I
 	TargetEdgeRangeCm = FMath::Max(0.0f, InTargetEdgeRangeCm);
 	bAutoIncreaseSubdivisionForTargetEdge = bInAutoIncreaseSubdivisionForTargetEdge;
 	AutoSubdivisionLevelCap = FMath::Max(0, InAutoSubdivisionLevelCap);
+	EffectiveTargetEdgeLengthCm = TargetEdgeLengthCm;
+	EffectiveTargetEdgeRangeCm = TargetEdgeRangeCm;
 	if (TargetEdgeRangeCm > 0.0f && TargetEdgeLengthCm > 0.0f)
 	{
 		TargetEdgeRangeBufferCm = FMath::Max(TargetEdgeRangeCm * 0.1f, TargetEdgeLengthCm * 10.0f);
@@ -232,6 +297,7 @@ void FCubedSphereOceanLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 I
 	{
 		TargetEdgeRangeBufferCm = 0.0f;
 	}
+	EffectiveTargetEdgeRangeBufferCm = TargetEdgeRangeBufferCm;
 
 	bBootstrapping = true;
 	bHasPrevCam = false;
@@ -240,17 +306,15 @@ void FCubedSphereOceanLODSystem::Initialize(URealtimeMeshSimple& InMesh, int32 I
 	MaxConcurrentBuilds = FMath::Clamp(CVar_OceanLOD_MaxConcurrentBuilds.GetValueOnGameThread(), 1, 4);
 
 	CreateRootNodes();
+	for (const FChunkNode& Node : Nodes)
+	{
+		if (Node.Level == 0)
+		{
+			MaxRootPatchCm = FMath::Max(MaxRootPatchCm, Node.PatchSizeCm);
+		}
+	}
 	if (TargetEdgeLengthCm > 0.0f && VerticesPerEdge > 1 && bAutoIncreaseSubdivisionForTargetEdge)
 	{
-		float MaxRootPatchCm = 0.0f;
-		for (const FChunkNode& Node : Nodes)
-		{
-			if (Node.Level == 0)
-			{
-				MaxRootPatchCm = FMath::Max(MaxRootPatchCm, Node.PatchSizeCm);
-			}
-		}
-
 		const float EdgeCount = static_cast<float>(VerticesPerEdge - 1);
 		const float Ratio = (EdgeCount > 0.0f) ? (MaxRootPatchCm / (EdgeCount * TargetEdgeLengthCm)) : 0.0f;
 		if (Ratio > 1.0f)
@@ -492,6 +556,69 @@ void FCubedSphereOceanLODSystem::UpdateDynamicQuality(float DeltaSeconds)
 	CurrentMaxSubdivisionLevel = FMath::Max(0, BaseMaxSubdivisionLevel - FMath::RoundToInt(DynamicLoadFactor * MaxSubdivDrop));
 }
 
+void FCubedSphereOceanLODSystem::UpdateNearSurfaceState(const FVector& CamLocation, const FTransform& PlanetTransform, float ActorScale)
+{
+	NearSurfaceAlpha = 0.0f;
+	EffectiveTargetEdgeLengthCm = TargetEdgeLengthCm;
+	EffectiveTargetEdgeRangeCm = TargetEdgeRangeCm;
+	EffectiveTargetEdgeRangeBufferCm = TargetEdgeRangeBufferCm;
+	NearSurfaceMaxSubdivisionLevel = BaseMaxSubdivisionLevel;
+
+	if (!CVar_OceanLOD_NearSurfaceEnable.GetValueOnGameThread())
+	{
+		return;
+	}
+
+	const FVector PlanetCenter = PlanetTransform.TransformPosition(FVector::ZeroVector);
+	const float SurfaceRadiusCm = OceanRadiusCm * ActorScale;
+	const float DistanceToCenter = FVector::Distance(CamLocation, PlanetCenter);
+	const float AltitudeCm = FMath::Max(0.0f, DistanceToCenter - SurfaceRadiusCm);
+
+	const float MinKm = FMath::Max(0.0f, CVar_OceanLOD_NearSurfaceMinKm.GetValueOnGameThread());
+	const float MaxKm = FMath::Max(MinKm + 0.01f, CVar_OceanLOD_NearSurfaceMaxKm.GetValueOnGameThread());
+	const float MinCm = MinKm * 100000.0f;
+	const float MaxCm = MaxKm * 100000.0f;
+	const float T = FMath::Clamp((AltitudeCm - MinCm) / (MaxCm - MinCm), 0.0f, 1.0f);
+	const float SmoothT = T * T * (3.0f - 2.0f * T);
+	NearSurfaceAlpha = 1.0f - SmoothT;
+
+	const float LoadSuppression = FMath::Clamp(CVar_OceanLOD_NearSurfaceLoadSuppression.GetValueOnGameThread(), 0.0f, 1.0f);
+	if (LoadSuppression > 0.0f)
+	{
+		const float LoadScale = FMath::Lerp(1.0f, 1.0f - LoadSuppression, DynamicLoadFactor);
+		NearSurfaceAlpha *= LoadScale;
+	}
+
+	const float EdgeScale = FMath::Clamp(CVar_OceanLOD_NearSurfaceTargetEdgeScale.GetValueOnGameThread(), 0.1f, 4.0f);
+	const float RangeScale = FMath::Clamp(CVar_OceanLOD_NearSurfaceTargetRangeScale.GetValueOnGameThread(), 0.1f, 4.0f);
+	EffectiveTargetEdgeLengthCm = TargetEdgeLengthCm * FMath::Lerp(1.0f, EdgeScale, NearSurfaceAlpha);
+	EffectiveTargetEdgeRangeCm = TargetEdgeRangeCm * FMath::Lerp(1.0f, RangeScale, NearSurfaceAlpha);
+
+	if (EffectiveTargetEdgeRangeCm > 0.0f && EffectiveTargetEdgeLengthCm > 0.0f)
+	{
+		EffectiveTargetEdgeRangeBufferCm = FMath::Max(EffectiveTargetEdgeRangeCm * 0.1f, EffectiveTargetEdgeLengthCm * 10.0f);
+	}
+	else
+	{
+		EffectiveTargetEdgeRangeBufferCm = 0.0f;
+	}
+
+	if ((bAutoIncreaseSubdivisionForTargetEdge || CVar_OceanLOD_NearSurfaceAutoSubdiv.GetValueOnGameThread() != 0)
+		&& EffectiveTargetEdgeLengthCm > 0.0f && VerticesPerEdge > 1 && MaxRootPatchCm > 0.0f)
+	{
+		const float EdgeCount = static_cast<float>(VerticesPerEdge - 1);
+		const float Ratio = (EdgeCount > 0.0f) ? (MaxRootPatchCm / (EdgeCount * EffectiveTargetEdgeLengthCm)) : 0.0f;
+		if (Ratio > 1.0f)
+		{
+			const int32 RequiredLevel = FMath::CeilToInt(FMath::Log2(Ratio));
+			const int32 AutoCap = (AutoSubdivisionLevelCap > 0) ? AutoSubdivisionLevelCap : 18;
+			const int32 TargetMaxLevel = FMath::Clamp(FMath::Max(BaseMaxSubdivisionLevel, RequiredLevel), 0, AutoCap);
+			const float Blended = FMath::Lerp(static_cast<float>(BaseMaxSubdivisionLevel), static_cast<float>(TargetMaxLevel), NearSurfaceAlpha);
+			NearSurfaceMaxSubdivisionLevel = FMath::Clamp(FMath::RoundToInt(Blended), 0, AutoCap);
+		}
+	}
+}
+
 void FCubedSphereOceanLODSystem::UpdateLodRings(float RangeScale)
 {
 	const bool bEnableRings = CVar_OceanLOD_RingEnable.GetValueOnGameThread() != 0;
@@ -508,9 +635,9 @@ void FCubedSphereOceanLODSystem::UpdateLodRings(float RangeScale)
 	{
 		BaseCm = BaseKm * 100000.0f;
 	}
-	else if (TargetEdgeRangeCm > 0.0f)
+	else if (EffectiveTargetEdgeRangeCm > 0.0f)
 	{
-		BaseCm = TargetEdgeRangeCm;
+		BaseCm = EffectiveTargetEdgeRangeCm;
 	}
 	else
 	{
@@ -519,7 +646,8 @@ void FCubedSphereOceanLODSystem::UpdateLodRings(float RangeScale)
 
 	const float RingScale = FMath::Max(1.01f, CVar_OceanLOD_RingScale.GetValueOnGameThread());
 	const float Hysteresis = FMath::Clamp(CVar_OceanLOD_RingHysteresis.GetValueOnGameThread(), 0.0f, 0.9f);
-	const float ScaledBaseCm = BaseCm * FMath::Max(0.1f, RangeScale);
+	const float NearSurfaceScale = FMath::Clamp(CVar_OceanLOD_NearSurfaceRingBaseScale.GetValueOnGameThread(), 0.1f, 4.0f);
+	const float ScaledBaseCm = BaseCm * FMath::Max(0.1f, RangeScale) * FMath::Lerp(1.0f, NearSurfaceScale, NearSurfaceAlpha);
 
 	bUseLodRings = true;
 	LodRingBaseRangeCm = ScaledBaseCm;
@@ -533,6 +661,30 @@ void FCubedSphereOceanLODSystem::UpdateLodRings(float RangeScale)
 		LodRingDistancesCm[Level] = Distance;
 		Distance *= RingScale;
 	}
+}
+
+bool FCubedSphereOceanLODSystem::CanCommitChunk() const
+{
+	if (!bCommitAllowedThisFrame)
+	{
+		return false;
+	}
+
+	if (CommitBudgetVertices <= 0)
+	{
+		return true;
+	}
+
+	return (CommittedVerticesThisFrame + EstimatedVerticesPerChunk) <= CommitBudgetVertices;
+}
+
+void FCubedSphereOceanLODSystem::ConsumeCommitBudget()
+{
+	if (CommitBudgetVertices > 0)
+	{
+		CommittedVerticesThisFrame += EstimatedVerticesPerChunk;
+	}
+	LastCommitTimeSeconds = CurrentTimeSeconds;
 }
 
 void FCubedSphereOceanLODSystem::EvaluateLOD(const FVector& CamLocation, float PixelsPerCm, float ActorScale, float ActivateRange, float DeactivateRange, const FTransform& PlanetTransform)
@@ -576,8 +728,8 @@ void FCubedSphereOceanLODSystem::EvaluateLOD(const FVector& CamLocation, float P
 	const float MergeThreshold = FMath::Max(0.0f, CurrentTargetErrorPixels - ErrorHysteresisPixels);
 	const float SplitThreshold = CurrentTargetErrorPixels + ErrorHysteresisPixels;
 	const float EdgeCount = static_cast<float>(FMath::Max(1, VerticesPerEdge - 1));
-	const bool bUseTargetEdge = TargetEdgeLengthCm > 0.0f && TargetEdgeRangeCm > 0.0f;
-	const float EdgeRangeHoldCm = TargetEdgeRangeCm + TargetEdgeRangeBufferCm;
+	const bool bUseTargetEdge = EffectiveTargetEdgeLengthCm > 0.0f && EffectiveTargetEdgeRangeCm > 0.0f;
+	const float EdgeRangeHoldCm = EffectiveTargetEdgeRangeCm + EffectiveTargetEdgeRangeBufferCm;
 
 	int32 ProcessedNodes = 0;
 	for (int32 LocalIndex = 0; LocalIndex < NodeBudget; ++LocalIndex)
@@ -608,8 +760,8 @@ void FCubedSphereOceanLODSystem::EvaluateLOD(const FVector& CamLocation, float P
 				}
 			}
 			const float EdgeLengthCm = Node.PatchSizeCm / EdgeCount;
-			const bool bNeedsEdgeDetail = bUseTargetEdge && Distance <= TargetEdgeRangeCm && EdgeLengthCm > TargetEdgeLengthCm;
-			const bool bHoldEdgeDetail = bUseTargetEdge && Distance <= EdgeRangeHoldCm && EdgeLengthCm > TargetEdgeLengthCm;
+			const bool bNeedsEdgeDetail = bUseTargetEdge && Distance <= EffectiveTargetEdgeRangeCm && EdgeLengthCm > EffectiveTargetEdgeLengthCm;
+			const bool bHoldEdgeDetail = bUseTargetEdge && Distance <= EdgeRangeHoldCm && EdgeLengthCm > EffectiveTargetEdgeLengthCm;
 			bool bRingAllowsSplit = true;
 			if (bUseLodRings && Node.Level < CurrentMaxSubdivisionLevel)
 			{
@@ -741,7 +893,7 @@ void FCubedSphereOceanLODSystem::EvaluateLOD(const FVector& CamLocation, float P
 		if (bUseTargetEdge)
 		{
 			const float ParentEdgeLengthCm = Parent.PatchSizeCm / EdgeCount;
-			if (ParentDistance <= EdgeRangeHoldCm && ParentEdgeLengthCm > TargetEdgeLengthCm)
+			if (ParentDistance <= EdgeRangeHoldCm && ParentEdgeLengthCm > EffectiveTargetEdgeLengthCm)
 			{
 				continue;
 			}
@@ -1124,20 +1276,37 @@ void FCubedSphereOceanLODSystem::TryFinalizeSplit(int32 ParentIndex)
 		return;
 	}
 
+	bool bAllChildrenApplied = true;
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
 	{
 		const int32 ChildIndex = Parent.Children[ChildSlot];
 		if (!Nodes.IsValidIndex(ChildIndex))
 		{
+			bAllChildrenApplied = false;
 			continue;
 		}
 
 		FChunkNode& Child = Nodes[ChildIndex];
 		if (Child.bHasStagedMesh)
 		{
+			if (!CanCommitChunk())
+			{
+				bAllChildrenApplied = false;
+				continue;
+			}
 			ApplyStagedMesh(Child);
+			ConsumeCommitBudget();
 		}
 		Child.bIsActive = true;
+		if (!Child.bHasMesh && !Child.bHasStagedMesh)
+		{
+			bAllChildrenApplied = false;
+		}
+	}
+
+	if (!bAllChildrenApplied)
+	{
+		return;
 	}
 
 	if (Parent.bHasMesh && Mesh)
@@ -1174,7 +1343,12 @@ void FCubedSphereOceanLODSystem::TryFinalizeMerge(int32 ParentIndex)
 
 	if (Parent.bHasStagedMesh)
 	{
+		if (!CanCommitChunk())
+		{
+			return;
+		}
 		ApplyStagedMesh(Parent);
+		ConsumeCommitBudget();
 	}
 
 	for (int32 ChildSlot = 0; ChildSlot < 4; ++ChildSlot)
@@ -1367,14 +1541,19 @@ void FCubedSphereOceanLODSystem::ProcessCompletedBuilds(int32 Budget)
 		return;
 	}
 
+	if (CompletedQueue.IsEmpty())
+	{
+		return;
+	}
+
 	const float TimeBudgetSeconds = FMath::Max(0.0f, CVar_OceanLOD_CommitTimeBudgetMs.GetValueOnGameThread()) / 1000.0f;
 	const double StartSeconds = (TimeBudgetSeconds > 0.0f) ? FPlatformTime::Seconds() : 0.0;
 
 	FChunkBuildResult Result;
 	int32 Processed = 0;
+	TArray<FChunkBuildResult> Deferred;
 	while (Processed < Budget && CompletedQueue.Dequeue(Result))
 	{
-		Processed++;
 		if (!Nodes.IsValidIndex(Result.NodeIndex))
 		{
 			continue;
@@ -1405,7 +1584,15 @@ void FCubedSphereOceanLODSystem::ProcessCompletedBuilds(int32 Budget)
 			const FChunkNode& ParentNode = Nodes[Node.ParentIndex];
 			bStageOnly = ParentNode.bSplitInProgress;
 		}
+		const bool bWillCommit = !bStageOnly;
 
+		if (bWillCommit && !CanCommitChunk())
+		{
+			Deferred.Add(Result);
+			continue;
+		}
+
+		Processed++;
 		const FChunkStreamPtr& StreamsPtr = Result.Streams;
 		const RealtimeMesh::FRealtimeMeshStreamSet& StreamsRef = *StreamsPtr;
 		const FChunkCacheKey CacheKey{ Node.FaceIndex, Node.Level, Node.ChunkX, Node.ChunkY };
@@ -1434,6 +1621,11 @@ void FCubedSphereOceanLODSystem::ProcessCompletedBuilds(int32 Budget)
 			Node.bHasMesh = true;
 		}
 
+		if (bWillCommit)
+		{
+			ConsumeCommitBudget();
+		}
+
 		Node.bBuildInProgress = false;
 		Node.PendingBuildVersion = 0;
 		// Finalization happens in a separate Tick pass to respect budgets.
@@ -1442,6 +1634,11 @@ void FCubedSphereOceanLODSystem::ProcessCompletedBuilds(int32 Budget)
 		{
 			break;
 		}
+	}
+
+	for (const FChunkBuildResult& DeferredResult : Deferred)
+	{
+		CompletedQueue.Enqueue(DeferredResult);
 	}
 }
 
@@ -1495,10 +1692,14 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 
 	const float SpeedFactor = (HyperdriveSpeedThreshold > 0.0f) ? FMath::Clamp(CameraSpeed / HyperdriveSpeedThreshold, 0.0f, 10.0f) : 0.0f;
 	const float RangeScale = CruiseRangeMultiplier + SpeedFactor * (HyperdriveRangeMultiplier - CruiseRangeMultiplier);
+
+	UpdateDynamicQuality(DeltaSeconds);
+	UpdateNearSurfaceState(CamLocation, PlanetTransform, ActorScale);
+
 	float ActivateRange = BaseActiveRangeCm * RangeScale;
-	if (TargetEdgeRangeCm > 0.0f)
+	if (EffectiveTargetEdgeRangeCm > 0.0f)
 	{
-		ActivateRange = FMath::Max(ActivateRange, TargetEdgeRangeCm);
+		ActivateRange = FMath::Max(ActivateRange, EffectiveTargetEdgeRangeCm);
 	}
 	float MaxHorizonRangeCm = 0.0f;
 	if (Owner->bClampActiveRangeToHorizon)
@@ -1520,8 +1721,23 @@ void FCubedSphereOceanLODSystem::Tick(float DeltaSeconds)
 		DeactivateRange = FMath::Min(DeactivateRange, MaxHorizonRangeCm);
 	}
 
-	UpdateDynamicQuality(DeltaSeconds);
+	if (NearSurfaceMaxSubdivisionLevel > CurrentMaxSubdivisionLevel)
+	{
+		CurrentMaxSubdivisionLevel = NearSurfaceMaxSubdivisionLevel;
+	}
 	MaxConcurrentBuilds = FMath::Clamp(CVar_OceanLOD_MaxConcurrentBuilds.GetValueOnGameThread(), 1, 4);
+	CommitBudgetVertices = FMath::Max(0, CVar_OceanLOD_CommitMaxVerticesPerFrame.GetValueOnGameThread());
+	if (CommitBudgetVertices <= 0 && EstimatedVerticesPerChunk > 0)
+	{
+		CommitBudgetVertices = EstimatedVerticesPerChunk;
+	}
+	CommittedVerticesThisFrame = 0;
+	bCommitAllowedThisFrame = true;
+	const float CommitCooldownSeconds = FMath::Max(0.0f, CVar_OceanLOD_CommitCooldownMs.GetValueOnGameThread()) / 1000.0f;
+	if (CommitCooldownSeconds > 0.0f && (CurrentTimeSeconds - LastCommitTimeSeconds) < CommitCooldownSeconds)
+	{
+		bCommitAllowedThisFrame = false;
+	}
 	UpdateLodRings(RangeScale);
 
 	if (!bBootstrapping || TargetEdgeLengthCm > 0.0f)
